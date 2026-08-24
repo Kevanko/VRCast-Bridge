@@ -62,25 +62,26 @@ function renderNowPlaying(state) {
   const item=currentItem(state), cover=$('#nowCover');
   if (item) {
     $('#nowTitle').textContent=item.title; $('#nowSource').textContent=item.local?'Файл с компьютера':'Медиа по ссылке';
-    cover.innerHTML=item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="">`:'<span>♪</span>';
+    cover.innerHTML=item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="">`:`<span>${icon('note')}</span>`;
   } else if (state.running && state.activeKind==='screen') {
-    $('#nowTitle').textContent=captureLabel(); $('#nowSource').textContent=audioLabel(); cover.innerHTML='<span>▣</span>';
-  } else { $('#nowTitle').textContent='Эфир не запущен'; $('#nowSource').textContent=ui.source==='queue'?'Добавьте видео справа':'Выберите источник справа'; cover.innerHTML='<span>♪</span>'; }
-  $('#togglePause').textContent=state.playback?.paused?'▶':'Ⅱ';
+    $('#nowTitle').textContent=captureLabel(); $('#nowSource').textContent=audioLabel(); cover.innerHTML=`<span>${icon('display')}</span>`;
+  } else { $('#nowTitle').textContent='Эфир не запущен'; $('#nowSource').textContent=ui.source==='queue'?'Добавьте видео справа':'Выберите источник справа'; cover.innerHTML=`<span>${icon('note')}</span>`; }
+  $('#togglePause').innerHTML=icon(state.playback?.paused?'play':'pause');
   if(Date.now()>ui.speedPendingUntil)paintSpeed(state.playback?.speed||1);
   if(Date.now()>ui.loopPendingUntil)paintLoop(state.playback?.loopMode||'once');
   $('#transport').classList.toggle('disabled',state.activeKind!=='queue'||!state.running);
 }
 
 const SPEED_STEPS=[0.5,0.75,1,1.25,1.5,2];
-const LOOP_STEPS=[['once','↻','Без повтора'],['all','↻','Повтор очереди'],['one','↻¹','Повтор трека']];
+const icon=name=>`<svg class="ic" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+const LOOP_STEPS=[['once','repeat','Без повтора'],['all','repeat','Повтор очереди'],['one','repeat-one','Повтор трека']];
 function paintSpeed(value){const button=$('#speedSelect');button.dataset.value=String(value);button.textContent=`${value}×`;
   button.classList.toggle('on',Number(value)!==1);button.title=`Скорость ${value}× — нажмите, чтобы изменить`;}
 function paintLoop(mode){const button=$('#loopSelect');const step=LOOP_STEPS.find(item=>item[0]===mode)||LOOP_STEPS[0];
-  button.dataset.value=step[0];button.textContent=step[1];button.classList.toggle('on',step[0]!=='once');button.title=`${step[2]} — нажмите, чтобы изменить`;}
+  button.dataset.value=step[0];button.innerHTML=icon(step[1]);button.classList.toggle('on',step[0]!=='once');button.title=`${step[2]} — нажмите, чтобы изменить`;}
 
-function monitorPlaceholder(title, text, icon = '◇') {
-  $('#monitorPlaceholderTitle').textContent=title; $('#monitorPlaceholderText').textContent=text; $('#monitorPlaceholderIcon').textContent=icon;
+function monitorPlaceholder(title, text, name = 'broadcast') {
+  $('#monitorPlaceholderTitle').textContent=title; $('#monitorPlaceholderText').textContent=text; $('#monitorPlaceholderIcon').innerHTML=icon(name);
 }
 
 function startPreview(state) {
@@ -152,6 +153,9 @@ function render(state) {
     const rtspLive=!tunnelMode&&state.config.outputMode!=='rtmp'&&Boolean(state.rtsp?.available);
     shownUrl=tunnelReady?state.tunnel.url:tunnelMode?'':state.playbackUrl;
     hint=rtspLive?'В мире нужен AVPro и включённые Untrusted URLs.':'В мире нужен плеер AVPro.';
+    // Бесплатный туннель не тянет тяжёлый поток — это и есть причина рывков у друзей.
+    if(tunnelMode){const heavy=ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30);
+      if(heavy)hint+=' Через бесплатный туннель 1080p и 60 кадров рвутся — поставьте 720p и 30 кадров.';}
     linkText=streamStalled?'Поток отстаёт':rtspLive?'Канал готов':streamReady?(tunnelMode?`Готово · ${state.tunnel.provider}`:'Канал готов'):tunnelStarting?'Получаю адрес…':'Готовлю поток…';
     linkGood=(rtspLive||streamReady)&&(!tunnelMode||tunnelReady);
     linkError=streamStalled||state.tunnel?.state==='error';
@@ -159,10 +163,9 @@ function render(state) {
   $('#playbackUrl').textContent=shownUrl||(linkError?'Ссылка пока недоступна':'Подготовка ссылки…'); $('#trustHint').textContent=hint;
   const altUrl=!unityMode&&state.config.outputMode==='remote'?(state.rtsp?.remote?.hlsUrl||''):'';
   $('#altLinkRow').hidden=!altUrl; if(altUrl)$('#altLink').textContent=altUrl;
-  $('#copyUrl').disabled=!shownUrl||(unityMode?!unitySource.available:!linkGood);
+  $('#copyUrl').disabled=!shownUrl;
   const linkState=$('#linkState'); linkState.className=`link-state ${linkGood?'public':linkError?'error':''}`; linkState.querySelector('span').textContent=linkText;
   // Транспорт имеет смысл только для RTSP-ссылки
-  $('#transportRow').hidden=unityMode||!['local','remote'].includes(state.config.outputMode);
   $('#unityTools').hidden=!unityMode;
   if(unityMode){
     const storedQueueTask=unity.queue||{}, queueTask=ui.unitySelectedId&&storedQueueTask.itemId!==ui.unitySelectedId?{...storedQueueTask,available:false,stale:true}:storedQueueTask, captureTask=unity.capture||{}, task=ui.source==='screen'?captureTask:queueTask;
@@ -184,6 +187,9 @@ function render(state) {
   const ratio=Number(state.performance?.realtimeRatio||0); $('#streamHealth').textContent=streamReady?`поток ${ratio?Math.round(ratio*100):100}% реального времени`:streamStalled?`скорость ${Math.round(ratio*100)}% · перегрузка`:'канал буферизуется';
   $('#queueCount').textContent=state.queue.length; $('#logs').textContent=state.logs.join('\n')||'Журнал пуст';
   $('#monitorBadge').textContent=state.running?(state.activeKind==='screen'?'CAPTURE':'MEDIA'):'OFFLINE';
+  const monitor=$('#monitor');
+  monitor.classList.toggle('tally-live',Boolean(state.running&&streamReady));
+  monitor.classList.toggle('tally-cue',Boolean(state.running&&!streamReady));
   const list=$('#queueList');
   const queueSignature=JSON.stringify([state.currentId,ui.unitySelectedId,$('#playerMode').value,state.queue.map(item=>[item.id,item.title,item.thumbnail,item.duration,item.unavailable])]);
   if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>`<div class="queue-item ${state.currentId===item.id?'playing':''} ${$('#playerMode').value==='unity'&&ui.unitySelectedId===item.id?'unity-selected':''}" data-id="${item.id}" ${item.unavailable?'data-unavailable="1"':''} role="button" tabindex="0" title="${$('#playerMode').value==='unity'?'Выбрать для подготовки Unity':'Включить этот трек'}"><span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="">`:String(index+1).padStart(2,'0')}</span><span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small>${item.unavailable?'⚠ недоступен — пропускается':`${item.local?'Локальный файл · ':''}${item.duration?formatTime(item.duration):'длительность неизвестна'}`}</small></span><button class="remove-item" aria-label="Удалить из очереди" title="Удалить">×</button></div>`).join(''):'<div class="empty-state">Очередь пуста</div>';}
@@ -249,12 +255,12 @@ async function refreshCapturePreview(save = true) {
   try {
     if(save)await saveConfig(); const result=await api('/api/capture-preview',{method:'POST'}); const monitor=$('#monitor');
     monitor.classList.toggle('window-paused',Boolean(result.minimized||result.unavailable));
-    if(result.minimized){monitor.classList.remove('source-preview');monitorPlaceholder('ОКНО СВЁРНУТО','В эфире заглушка, звук продолжает идти','—');}
-    else if(result.unavailable){monitor.classList.remove('source-preview');monitorPlaceholder('ОКНО НЕДОСТУПНО','Откройте приложение или обновите список','!');}
+    if(result.minimized){monitor.classList.remove('source-preview');monitorPlaceholder('ОКНО СВЁРНУТО','В эфире заглушка, звук продолжает идти','minus');}
+    else if(result.unavailable){monitor.classList.remove('source-preview');monitorPlaceholder('ОКНО НЕДОСТУПНО','Откройте приложение или обновите список','alert');}
     else{$('#capturePreview').src=`${result.url}&cache=${Date.now()}`;monitor.classList.add('source-preview');monitorPlaceholder('ИСТОЧНИК НЕ ВЫБРАН','Выберите медиа, окно, монитор или область');}
     $('#monitorBadge').textContent=result.minimized?'PAUSED':result.unavailable?'MISSING':'PREVIEW';
   } catch(error){
-    if(!$('#monitor').classList.contains('source-preview')){monitorPlaceholder('НЕТ ПРЕДПРОСМОТРА',error.message||'Обновите список источников','!');$('#monitorBadge').textContent='RETRY';}
+    if(!$('#monitor').classList.contains('source-preview')){monitorPlaceholder('НЕТ ПРЕДПРОСМОТРА',error.message||'Обновите список источников','alert');$('#monitorBadge').textContent='RETRY';}
     throw error;
   } finally { ui.previewBusy=false; }
 }
@@ -305,8 +311,21 @@ $('#removeServer').addEventListener('click',async()=>{
     render(result.status);toast(result.cleaned?'Сервер очищен и удалён из списка':'Сервер удалён из списка');
   }catch(error){toast(error.message,true);}
 });
-$('#copyUrl').addEventListener('click',async()=>{const value=$('#playbackUrl').textContent;if(!/^(https?|rtspt?):\/\//.test(value))return toast('Ссылка ещё создаётся',true);try{await navigator.clipboard.writeText(value);toast('Ссылка скопирована');}catch{toast('Не удалось скопировать',true);}});
-$('#copyAltUrl').addEventListener('click',async()=>{const value=$('#altLink').textContent;if(!value)return;try{await navigator.clipboard.writeText(value);toast('Запасная ссылка скопирована');}catch{toast('Не удалось скопировать',true);}});
+// В WebView2 navigator.clipboard отказывает, когда окно не в фокусе, поэтому
+// нужен запасной путь через скрытое поле — иначе кнопка молча ничего не делает.
+async function copyText(value){
+  try{ await navigator.clipboard.writeText(value); return true; }catch{}
+  const field=document.createElement('textarea');
+  field.value=value; field.setAttribute('readonly','');
+  field.style.cssText='position:fixed;top:0;left:-9999px;opacity:0';
+  document.body.appendChild(field); field.select(); field.setSelectionRange(0,value.length);
+  let ok=false;
+  try{ ok=document.execCommand('copy'); }catch{}
+  field.remove();
+  return ok;
+}
+$('#copyUrl').addEventListener('click',async()=>{const value=$('#playbackUrl').textContent;if(!/^(https?|rtspt?):\/\//.test(value))return toast('Ссылка ещё создаётся',true);const ok=await copyText(value);toast(ok?'Ссылка скопирована':'Не удалось скопировать',!ok);});
+$('#copyAltUrl').addEventListener('click',async()=>{const value=$('#altLink').textContent;if(!value)return;const ok=await copyText(value);toast(ok?'Запасная ссылка скопирована':'Не удалось скопировать',!ok);});
 $('#playerMode').addEventListener('change',()=>{if(ui.status)render(ui.status);});
 $('#rtspTransport').addEventListener('change',async()=>{try{render(await saveConfig(false));toast('Скопируйте ссылку заново');}catch(error){toast(error.message,true);}});
 $('#prepareUnityQueue').addEventListener('click',async()=>{const button=$('#prepareUnityQueue');button.disabled=true;try{render(await api('/api/unity/queue/build',{method:'POST',body:JSON.stringify({id:ui.unitySelectedId})}));toast('Подготовка выбранного трека началась');}catch(error){toast(error.message,true);}finally{if(ui.status?.compatibility?.unity?.queue?.state!=='building')button.disabled=false;}});
@@ -335,7 +354,7 @@ $('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button
 $('#stopLive').addEventListener('click',async()=>{try{render(await api('/api/stop',{method:'POST'}));}catch(error){toast(error.message,true);}});
 $('#updateButton').addEventListener('click',async()=>{if(!confirm('Программа закроется, установит новую версию и запустится снова. Эфир прервётся на несколько секунд. Продолжить?'))return;try{await api('/api/update/apply',{method:'POST'});toast('Устанавливаю обновление…');}catch(error){toast(error.message,true);}});
 $('#showLogs').addEventListener('click',()=>$('#logDialog').showModal());
-$('#openLogFolder').addEventListener('click',()=>{const folder=ui.status?.logFolder;if(!folder)return;navigator.clipboard.writeText(folder).then(()=>toast('Путь к журналам скопирован: '+folder),()=>toast(folder));}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
+$('#openLogFolder').addEventListener('click',async()=>{const folder=ui.status?.logFolder;if(!folder)return;const ok=await copyText(folder);toast(ok?'Путь к журналам скопирован: '+folder:folder);}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 $('#shutdownApp').addEventListener('click',async()=>{try{await api('/api/shutdown',{method:'POST'});window.location.href='vrcast://close';}catch(error){toast(error.message,true);}});
 
 async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
@@ -347,3 +366,11 @@ setInterval(()=>{const video=$('#streamPreview');
   else stall.strikes=0;
   stall.time=video.currentTime;},3000);}
 init().catch(error=>toast(error.message,true));
+
+// Свёрнутые разделы левой колонки остаются свёрнутыми при следующем запуске.
+for(const card of document.querySelectorAll('details.rail-card')){
+  const key=`rail:${card.id}`;
+  const saved=localStorage.getItem(key);
+  if(saved!==null)card.open=saved==='1';
+  card.addEventListener('toggle',()=>localStorage.setItem(key,card.open?'1':'0'));
+}

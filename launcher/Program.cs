@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -10,7 +10,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.29.0";
+    private const string AppVersion = "0.30.2";
 
     [STAThread]
     private static void Main(string[] args)
@@ -283,11 +283,15 @@ internal sealed class MainWindow : Form
         Height = 760;
         MinimumSize = new Size(980, 640);
         StartPosition = FormStartPosition.CenterScreen;
+
         BackColor = Color.FromArgb(10, 12, 11);
         AllowDrop = true;
         _webView.AllowExternalDrop = false;
         Controls.Add(_webView);
         Shown += InitializeWebView;
+        // Геометрию применяем после создания окна: до этого WinForms пересчитывает
+        // координаты под DPI другого монитора и окно уползает при каждом запуске.
+        Shown += (_, _) => RestoreGeometry();
         FormClosing += OnClosing;
         DragEnter += (_, args) => { if (args.Data?.GetDataPresent(DataFormats.FileDrop) == true) args.Effect = DragDropEffects.Copy; };
         DragDrop += async (_, args) =>
@@ -398,10 +402,44 @@ internal sealed class MainWindow : Form
         catch { }
     }
 
+    // Размер и положение окна помнятся между запусками.
+    private static string GeometryPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "window.txt");
+
+    private void RestoreGeometry()
+    {
+        try
+        {
+            var parts = File.ReadAllText(GeometryPath).Split(',');
+            if (parts.Length != 5) return;
+            var saved = new Rectangle(int.Parse(parts[0]), int.Parse(parts[1]), int.Parse(parts[2]), int.Parse(parts[3]));
+            if (saved.Width < MinimumSize.Width || saved.Height < MinimumSize.Height) return;
+            // Монитор могли отключить — окно не должно уехать за пределы рабочего стола.
+            if (!Screen.AllScreens.Any(screen => screen.WorkingArea.IntersectsWith(saved))) return;
+            StartPosition = FormStartPosition.Manual;
+            Bounds = saved;
+            if (parts[4] == "1") WindowState = FormWindowState.Maximized;
+        }
+        catch { }
+    }
+
+    private void SaveGeometry()
+    {
+        try
+        {
+            var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            var maximized = WindowState == FormWindowState.Maximized ? 1 : 0;
+            Directory.CreateDirectory(Path.GetDirectoryName(GeometryPath)!);
+            File.WriteAllText(GeometryPath, $"{bounds.X},{bounds.Y},{bounds.Width},{bounds.Height},{maximized}");
+        }
+        catch { }
+    }
+
     private void OnClosing(object? sender, FormClosingEventArgs eventArgs)
     {
         if (_closing) return;
         _closing = true;
+        SaveGeometry();
         Program.ShutdownServer();
     }
 }
