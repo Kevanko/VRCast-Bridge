@@ -112,10 +112,10 @@ function renderServers(state) {
   }
   $('#removeServer').disabled=!servers.length;
   const remote=state.rtsp?.remote||{};
-  $('#serverHint').textContent=!servers.length?'Добавьте сервер: программа сама развернёт на нём медиасервер по SSH.'
-    :remote.live?'Эфир идёт через ваш сервер. Ссылку можно давать друзьям — она не протухает.'
+  $('#serverHint').textContent=!servers.length?'Добавьте сервер — программа развернёт его сама.'
+    :remote.live?'Эфир идёт через ваш сервер.'
     :state.config.outputMode==='remote'?'Подключаюсь к серверу…'
-    :'Сервер сохранён. Нажмите «Свой сервер», чтобы вести эфир через него.';
+    :'Сервер сохранён.';
 }
 
 function renderTemplates(state) {
@@ -131,7 +131,7 @@ function render(state) {
   if(ui.seekPending&&!state.playback?.busy&&Number(state.playback?.revision)>=ui.seekRevision&&Date.now()>=ui.seekVisualUntil)ui.seekPending=false;
   const streamReady=Boolean(state.stream?.ready), streamStalled=state.stream?.state==='stalled';
   $('#stateDot').className=`state-dot ${streamStalled?'error':state.running?'live':ready?'ready':''}`;
-  $('#systemState').textContent=state.playback?.buffering?'ЗАГРУЖАЮ ТРЕК В БУФЕР':streamStalled?'Поток отстаёт':state.running&&streamReady?'Эфир стабилен':state.running?'Эфир запускается':streamReady?'Канал готов':ready?'Система готова':'Нужны FFmpeg и yt-dlp';
+  $('#systemState').textContent=state.playback?.buffering?'Загружаю трек':streamStalled?'Поток отстаёт':state.running&&streamReady?'Эфир идёт':state.running?'Эфир запускается':streamReady?'Канал готов':ready?'Готово к работе':'Нужен FFmpeg';
   const tunnelMode=state.config.outputMode==='tunnel', tunnelReady=tunnelMode&&state.tunnel?.ready, tunnelStarting=tunnelMode&&state.tunnel?.state==='starting';
   const unityMode=$('#playerMode').value==='unity', unity=state.compatibility?.unity||{};
   if(!ui.unitySelectedId||!state.queue.some(item=>item.id===ui.unitySelectedId))ui.unitySelectedId=unity.queue?.itemId||state.currentId||state.queue[0]?.id||'';
@@ -139,20 +139,20 @@ function render(state) {
   const unitySource=ui.source==='queue'&&ui.unitySelectedId&&storedUnitySource.itemId!==ui.unitySelectedId
     ?{...storedUnitySource,available:false,url:'',stale:true}:storedUnitySource;
   let shownUrl='', hint='', linkText='', linkGood=false, linkError=false;
-  if(unityMode){shownUrl=unitySource.available?unitySource.url:'';hint=unitySource.scope==='local'&&tunnelMode?'Рабочая локальная Unity-ссылка. Для друзей используйте AVPro: бесплатный Pinggy подменяет Unity-запрос страницей предупреждения.':ui.source==='screen'?'Unity получает завершённую запись захвата, а не прямой эфир. Для live используйте AVPro.':unitySource.stale?'Выбранный трек изменился — подготовьте MP4 заново.':'Unity получает один выбранный трек. Нажмите на нужное видео в очереди.';linkText=unitySource.available?(ui.source==='screen'?'Unity · клип захвата готов':'Unity · выбранный трек готов'):unitySource.state==='building'||unitySource.state==='recording'||unitySource.state==='finalizing'?'Unity · подготовка файла':'Unity · файл ещё не готов';linkGood=Boolean(unitySource.available);linkError=unitySource.state==='error';}
+  if(unityMode){shownUrl=unitySource.available?unitySource.url:'';hint=unitySource.scope==='local'&&tunnelMode?'Рабочая локальная Unity-ссылка. Для друзей используйте AVPro: бесплатный Pinggy подменяет Unity-запрос страницей предупреждения.':ui.source==='screen'?'Unity получит завершённую запись, а не прямой эфир.':unitySource.stale?'Трек изменился — подготовьте заново.':'Unity получает один трек — выберите его в очереди.';linkText=unitySource.available?(ui.source==='screen'?'Клип готов':'Трек готов'):unitySource.state==='building'||unitySource.state==='recording'||unitySource.state==='finalizing'?'Готовлю файл…':'Файл не готов';linkGood=Boolean(unitySource.available);linkError=unitySource.state==='error';}
   else if(state.config.outputMode==='remote'){
     const remote=state.rtsp?.remote||{};
     shownUrl=remote.configured?remote.url:'';
-    hint='Мгновенный канал через ваш сервер: ссылку можно давать друзьям, она не протухает. В мире нужен AVPro и Untrusted URLs.';
-    linkText=!remote.configured?'Укажите адрес сервера ниже':remote.live?'Свой сервер · задержка около секунды':'Подключаюсь к вашему серверу…';
+    hint='Ссылку можно давать друзьям — она не меняется. В мире нужен AVPro и Untrusted URLs.';
+    linkText=!remote.configured?'Сервер не выбран':remote.live?'Эфир через ваш сервер':'Подключаюсь к серверу…';
     linkGood=Boolean(remote.live);
     linkError=Boolean(remote.configured&&!remote.live&&state.running);
   }
   else {
     const rtspLive=!tunnelMode&&state.config.outputMode!=='rtmp'&&Boolean(state.rtsp?.available);
     shownUrl=tunnelReady?state.tunnel.url:tunnelMode?'':state.playbackUrl;
-    hint=rtspLive?'Мгновенный канал: задержка меньше секунды. В мире нужен AVPro и включённые Untrusted URLs.':'Для захвата экрана и общей очереди в мире должен быть выбран AVPro.';
-    linkText=streamStalled?'Поток не успевает кодироваться':rtspLive?'Мгновенный канал готов · задержка < 1 с':streamReady?(tunnelMode?`Готово · ${state.tunnel.provider}`:'Локальный канал готов'):tunnelStarting?'Создаём публичный адрес…':'Подготавливаем первые сегменты…';
+    hint=rtspLive?'В мире нужен AVPro и включённые Untrusted URLs.':'В мире нужен плеер AVPro.';
+    linkText=streamStalled?'Поток отстаёт':rtspLive?'Канал готов':streamReady?(tunnelMode?`Готово · ${state.tunnel.provider}`:'Канал готов'):tunnelStarting?'Получаю адрес…':'Готовлю поток…';
     linkGood=(rtspLive||streamReady)&&(!tunnelMode||tunnelReady);
     linkError=streamStalled||state.tunnel?.state==='error';
   }
@@ -161,7 +161,7 @@ function render(state) {
   $('#altLinkRow').hidden=!altUrl; if(altUrl)$('#altLink').textContent=altUrl;
   $('#copyUrl').disabled=!shownUrl||(unityMode?!unitySource.available:!linkGood);
   const linkState=$('#linkState'); linkState.className=`link-state ${linkGood?'public':linkError?'error':''}`; linkState.querySelector('span').textContent=linkText;
-  // Транспорт имеет смысл только для мгновенной RTSP-ссылки
+  // Транспорт имеет смысл только для RTSP-ссылки
   $('#transportRow').hidden=unityMode||!['local','remote'].includes(state.config.outputMode);
   $('#unityTools').hidden=!unityMode;
   if(unityMode){
@@ -181,7 +181,7 @@ function render(state) {
   if(update.available)$('#updateButton').textContent=update.ready?`Обновить до ${update.version}`:`Скачиваю ${update.version}…`;
   $('#updateButton').disabled=!update.ready;
   $('#encoderLabel').textContent=state.performance?.encoder||'неизвестно';
-  const ratio=Number(state.performance?.realtimeRatio||0); $('#streamHealth').textContent=streamReady?`поток ${ratio?Math.round(ratio*100):100}% реального времени`:streamStalled?`скорость ${Math.round(ratio*100)}% · перегрузка`:'буферизация канала';
+  const ratio=Number(state.performance?.realtimeRatio||0); $('#streamHealth').textContent=streamReady?`поток ${ratio?Math.round(ratio*100):100}% реального времени`:streamStalled?`скорость ${Math.round(ratio*100)}% · перегрузка`:'канал буферизуется';
   $('#queueCount').textContent=state.queue.length; $('#logs').textContent=state.logs.join('\n')||'Журнал пуст';
   $('#monitorBadge').textContent=state.running?(state.activeKind==='screen'?'CAPTURE':'MEDIA'):'OFFLINE';
   const list=$('#queueList');
@@ -208,7 +208,7 @@ function chooseAudioMode(mode) {
   $('#windowFields').hidden=$('#captureMode').value!=='window'&&mode!=='process';
   if(mode==='process')refreshWindows().catch(()=>{});
   $('#audioOutputFields').hidden=mode!=='output'; $('#audioDeviceFields').hidden=mode!=='device'; $('#localVolumeFields').hidden=mode!=='process';
-  const text={process:'В эфир попадёт только звук процесса выбранного окна и его дочерних процессов.',system:'Берётся устройство вывода Windows по умолчанию.',output:'Выберите колонки, наушники или HDMI-аудио нужного монитора.',device:'Микрофон или виртуальный аудиовход.',none:'Эфир будет без звука.'}; $('#audioHelp').textContent=text[mode]||'';
+  const text={process:'Звук выбранного окна и его дочерних процессов.',system:'Устройство вывода Windows по умолчанию.',output:'Колонки, наушники или HDMI-звук нужного монитора.',device:'Микрофон или виртуальный вход.',none:'Эфир без звука.'}; $('#audioHelp').textContent=text[mode]||'';
 }
 function captureLabel() { const mode=$('#captureMode').value; if(mode==='window')return $('#windowSource').selectedOptions[0]?.textContent||'Окно'; if(mode==='monitor')return $('#monitorSource').selectedOptions[0]?.textContent||'Монитор'; if(mode==='region')return `Область ${$('#regionWidth').value}×${$('#regionHeight').value}`; return 'Все мониторы'; }
 function audioLabel() { return $('#audioMode').selectedOptions[0]?.textContent||'Без звука'; }
@@ -249,12 +249,12 @@ async function refreshCapturePreview(save = true) {
   try {
     if(save)await saveConfig(); const result=await api('/api/capture-preview',{method:'POST'}); const monitor=$('#monitor');
     monitor.classList.toggle('window-paused',Boolean(result.minimized||result.unavailable));
-    if(result.minimized){monitor.classList.remove('source-preview');monitorPlaceholder('ОКНО СВЕРНУТО','В эфир пойдёт нейтральная заглушка, звук можно оставить включённым','—');}
-    else if(result.unavailable){monitor.classList.remove('source-preview');monitorPlaceholder('ОКНО НЕДОСТУПНО','Откройте приложение или обновите список окон','!');}
+    if(result.minimized){monitor.classList.remove('source-preview');monitorPlaceholder('ОКНО СВЁРНУТО','В эфире заглушка, звук продолжает идти','—');}
+    else if(result.unavailable){monitor.classList.remove('source-preview');monitorPlaceholder('ОКНО НЕДОСТУПНО','Откройте приложение или обновите список','!');}
     else{$('#capturePreview').src=`${result.url}&cache=${Date.now()}`;monitor.classList.add('source-preview');monitorPlaceholder('ИСТОЧНИК НЕ ВЫБРАН','Выберите медиа, окно, монитор или область');}
     $('#monitorBadge').textContent=result.minimized?'PAUSED':result.unavailable?'MISSING':'PREVIEW';
   } catch(error){
-    if(!$('#monitor').classList.contains('source-preview')){monitorPlaceholder('ПРЕДПРОСМОТР НЕДОСТУПЕН',error.message||'Обновите список источников','!');$('#monitorBadge').textContent='RETRY';}
+    if(!$('#monitor').classList.contains('source-preview')){monitorPlaceholder('НЕТ ПРЕДПРОСМОТРА',error.message||'Обновите список источников','!');$('#monitorBadge').textContent='RETRY';}
     throw error;
   } finally { ui.previewBusy=false; }
 }
@@ -264,19 +264,19 @@ $$('.nav-item').forEach(button=>button.addEventListener('click',()=>chooseSource
 $$('.broadcast-mode button').forEach(button=>button.addEventListener('click',async()=>{chooseOutput(button.dataset.output);try{render(await saveConfig(false));}catch(error){toast(error.message,true);}}));
 $('#captureMode').addEventListener('change',event=>{chooseCaptureMode(event.target.value);refreshCapturePreview().catch(error=>toast(error.message,true));});
 $('#audioMode').addEventListener('change',event=>chooseAudioMode(event.target.value));
-$('#localAppVolume').addEventListener('change',async()=>{try{const live=ui.status?.activeKind==='screen';render(await saveConfig(live));toast(live?'Громкость применена — в эфире осталась прежней':'Сохранено');}catch(error){toast(error.message,true);}});
+$('#localAppVolume').addEventListener('change',async()=>{try{const live=ui.status?.activeKind==='screen';render(await saveConfig(live));toast(live?'Громкость изменена, в эфире прежняя':'Сохранено');}catch(error){toast(error.message,true);}});
 $('#monitorSource').addEventListener('change',()=>refreshCapturePreview().catch(error=>toast(error.message,true)));
 $('#windowSource').addEventListener('change',()=>refreshCapturePreview().catch(error=>toast(error.message,true)));
 $('#windowSource').addEventListener('mousedown',()=>refreshWindows().catch(()=>{}));
 $('#refreshSources').addEventListener('click',async()=>{try{await loadCaptureSources();toast('Список обновлён');}catch(error){toast(error.message,true);}});
 $('#refreshPreview').addEventListener('click',()=>refreshCapturePreview().catch(error=>toast(error.message,true))); $('#highlightSource').addEventListener('click',highlightSelected);
-$('#applyCapture').addEventListener('click',async()=>{const button=$('#applyCapture');button.disabled=true;try{await saveConfig();$('#monitor').classList.remove('source-preview','window-paused');render(await api('/api/start/screen',{method:'POST'}));toast('Источник применён без смены ссылки');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
+$('#applyCapture').addEventListener('click',async()=>{const button=$('#applyCapture');button.disabled=true;try{await saveConfig();$('#monitor').classList.remove('source-preview','window-paused');render(await api('/api/start/screen',{method:'POST'}));toast('Источник применён');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
 $('#selectRegion').addEventListener('click',()=>{window.location.href='vrcast://select-region';}); $('#pickLocal').addEventListener('click',()=>{window.location.href='vrcast://pick-media';});
 window.applySelectedRegion=region=>{$('#regionX').value=region.x;$('#regionY').value=region.y;$('#regionWidth').value=region.width;$('#regionHeight').value=region.height;refreshCapturePreview().catch(()=>{});toast(`Выбрано ${region.width}×${region.height}`);};
 window.addLocalFiles=async paths=>{try{const result=await api('/api/queue/local',{method:'POST',body:JSON.stringify({paths})});render(result.status);toast(`Добавлено: ${result.added.length}`);}catch(error){toast(error.message,true);}};
 
 $('#addForm').addEventListener('submit',async event=>{event.preventDefault();const button=$('#addButton');button.disabled=true;button.textContent='…';try{const result=await api('/api/queue',{method:'POST',body:JSON.stringify({url:$('#mediaUrl').value})});$('#mediaUrl').value='';render(result.status);toast(`Добавлено: ${result.added.length}`);}catch(error){toast(error.message,true);}finally{button.disabled=false;button.textContent='Добавить';}});
-$('#queueList').addEventListener('click',async event=>{const row=event.target.closest('.queue-item');if(!row)return;const remove=event.target.closest('.remove-item');try{if(remove)render(await api(`/api/queue/${row.dataset.id}`,{method:'DELETE'}));else if($('#playerMode').value==='unity'){ui.unitySelectedId=row.dataset.id;if(ui.status)render(ui.status);toast('Трек выбран. Нажмите «Подготовить выбранный трек».');}else await playback('jump',{id:row.dataset.id});}catch(error){toast(error.message,true);}});
+$('#queueList').addEventListener('click',async event=>{const row=event.target.closest('.queue-item');if(!row)return;const remove=event.target.closest('.remove-item');try{if(remove)render(await api(`/api/queue/${row.dataset.id}`,{method:'DELETE'}));else if($('#playerMode').value==='unity'){ui.unitySelectedId=row.dataset.id;if(ui.status)render(ui.status);toast('Трек выбран — нажмите «Подготовить».');}else await playback('jump',{id:row.dataset.id});}catch(error){toast(error.message,true);}});
 $('#queueList').addEventListener('keydown',event=>{if((event.key==='Enter'||event.key===' ')&&event.target.matches('.queue-item')){event.preventDefault();playback('jump',{id:event.target.dataset.id});}});
 $('#clearQueue').addEventListener('click',async()=>{try{render(await api('/api/queue',{method:'DELETE'}));}catch(error){toast(error.message,true);}});
 $('#templateSelect').addEventListener('change',event=>{const item=ui.status?.templates?.find(entry=>entry.id===event.target.value);if(item)$('#templateName').value=item.name;$('#loadTemplate').disabled=!item;$('#appendTemplate').disabled=!item;$('#deleteTemplate').disabled=!item;});
@@ -308,18 +308,18 @@ $('#removeServer').addEventListener('click',async()=>{
 $('#copyUrl').addEventListener('click',async()=>{const value=$('#playbackUrl').textContent;if(!/^(https?|rtspt?):\/\//.test(value))return toast('Ссылка ещё создаётся',true);try{await navigator.clipboard.writeText(value);toast('Ссылка скопирована');}catch{toast('Не удалось скопировать',true);}});
 $('#copyAltUrl').addEventListener('click',async()=>{const value=$('#altLink').textContent;if(!value)return;try{await navigator.clipboard.writeText(value);toast('Запасная ссылка скопирована');}catch{toast('Не удалось скопировать',true);}});
 $('#playerMode').addEventListener('change',()=>{if(ui.status)render(ui.status);});
-$('#rtspTransport').addEventListener('change',async()=>{try{render(await saveConfig(false));toast('Скопируйте ссылку заново и вставьте в плеер');}catch(error){toast(error.message,true);}});
+$('#rtspTransport').addEventListener('change',async()=>{try{render(await saveConfig(false));toast('Скопируйте ссылку заново');}catch(error){toast(error.message,true);}});
 $('#prepareUnityQueue').addEventListener('click',async()=>{const button=$('#prepareUnityQueue');button.disabled=true;try{render(await api('/api/unity/queue/build',{method:'POST',body:JSON.stringify({id:ui.unitySelectedId})}));toast('Подготовка выбранного трека началась');}catch(error){toast(error.message,true);}finally{if(ui.status?.compatibility?.unity?.queue?.state!=='building')button.disabled=false;}});
 $('#recordUnityCapture').addEventListener('click',async()=>{const recording=ui.status?.compatibility?.unity?.capture?.state==='recording';try{render(await api(recording?'/api/unity/capture/stop':'/api/unity/capture/start',{method:'POST'}));toast(recording?'Завершаю MP4…':'Запись Unity-клипа началась');}catch(error){toast(error.message,true);}});
 
-async function playback(action,extra={}){try{render(await api('/api/playback',{method:'POST',body:JSON.stringify({action,...extra})}));const delay=Math.max(0,Number(ui.status?.config?.previewDelay)||0);if(delay&&['pause','resume','seek'].includes(action))toast(`Команда появится в VRChat примерно через ${delay} с`);return true;}catch(error){toast(error.message,true);return false;}}
+async function playback(action,extra={}){try{render(await api('/api/playback',{method:'POST',body:JSON.stringify({action,...extra})}));const delay=Math.max(0,Number(ui.status?.config?.previewDelay)||0);if(delay&&['pause','resume','seek'].includes(action))toast(`В VRChat это появится через ${delay} с`);return true;}catch(error){toast(error.message,true);return false;}}
 $('#togglePause').addEventListener('click',()=>ui.status?.playback?.paused?playback('resume'):playback('pause',{position:ui.seekPending?ui.seekDraft:presentedProgress(ui.status).position})); $('#previousTrack').addEventListener('click',()=>playback('previous')); $('#nextTrack').addEventListener('click',()=>playback('next')); $('#skipTrack').addEventListener('click',()=>playback('next'));
 $('#seekBar').addEventListener('input',event=>{ui.seeking=true;const percent=Number(event.target.value)/10;event.target.style.setProperty('--seek',`${percent}%`);const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*percent/100;$('#elapsedTime').textContent=formatTime(ui.seekDraft);});
 $('#seekBar').addEventListener('change',async event=>{const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*Number(event.target.value)/1000;ui.seeking=false;ui.seekPending=true;ui.seekVisualUntil=Date.now()+Math.max(0,Number(ui.status?.config?.previewDelay)||0)*1000;ui.seekRevision=Number(ui.status?.playback?.revision||0)+1;if(!await playback('seek',{position:ui.seekDraft}))ui.seekPending=false;});
-function applyQualityLive(kind){clearTimeout(ui.liveApplyTimer);ui.liveApplyTimer=setTimeout(async()=>{try{const live=ui.status?.activeKind===kind;render(await saveConfig(live));toast(live?'Профиль применён без смены ссылки':'Профиль сохранён');}catch(error){toast(error.message,true);}},350);}
+function applyQualityLive(kind){clearTimeout(ui.liveApplyTimer);ui.liveApplyTimer=setTimeout(async()=>{try{const live=ui.status?.activeKind===kind;render(await saveConfig(live));toast(live?'Качество применено':'Качество сохранено');}catch(error){toast(error.message,true);}},350);}
 $('#quality').addEventListener('change',()=>applyQualityLive('screen'));$('#fps').addEventListener('change',()=>applyQualityLive('screen'));
 $('#mediaQuality').addEventListener('change',()=>applyQualityLive('queue'));$('#mediaFps').addEventListener('change',()=>applyQualityLive('queue'));
-$('#previewDelay').addEventListener('change',async()=>{try{ui.hls?.destroy();ui.hls=null;ui.previewUrl='';render(await saveConfig(false));toast('Задержка предпросмотра применена');}catch(error){toast(error.message,true);}});
+$('#previewDelay').addEventListener('change',async()=>{try{ui.hls?.destroy();ui.hls=null;ui.previewUrl='';render(await saveConfig(false));toast('Задержка предпросмотра изменена');}catch(error){toast(error.message,true);}});
 $('#speedSelect').addEventListener('click',async()=>{const current=Number($('#speedSelect').dataset.value)||1;
   const next=SPEED_STEPS[(SPEED_STEPS.indexOf(current)+1)%SPEED_STEPS.length];
   paintSpeed(next);ui.speedPendingUntil=Date.now()+1500;await playback('speed',{speed:next});paintSpeed(next);ui.speedPendingUntil=0;});
@@ -331,7 +331,7 @@ $('#mediaVolume').addEventListener('input',event=>paintVolume(event.target,$('#m
 $('#mediaVolume').addEventListener('change',async event=>{if(ui.status?.activeKind==='queue')playback('volume',{volume:Number(event.target.value)/100});else try{await saveConfig();}catch(error){toast(error.message,true);}});
 $('#captureVolume').addEventListener('input',event=>paintVolume(event.target,$('#captureVolumeValue')));
 
-$('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button.disabled=true;try{await saveConfig();render(await api(`/api/start/${ui.source}`,{method:'POST'}));toast(ui.output==='tunnel'?'Эфир запускается — создаём публичную ссылку':'Эфир запускается');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
+$('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button.disabled=true;try{await saveConfig();render(await api(`/api/start/${ui.source}`,{method:'POST'}));toast(ui.output==='tunnel'?'Запускаю эфир и получаю публичную ссылку':'Эфир запускается');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
 $('#stopLive').addEventListener('click',async()=>{try{render(await api('/api/stop',{method:'POST'}));}catch(error){toast(error.message,true);}});
 $('#updateButton').addEventListener('click',async()=>{if(!confirm('Программа закроется, установит новую версию и запустится снова. Эфир прервётся на несколько секунд. Продолжить?'))return;try{await api('/api/update/apply',{method:'POST'});toast('Устанавливаю обновление…');}catch(error){toast(error.message,true);}});
 $('#showLogs').addEventListener('click',()=>$('#logDialog').showModal());
