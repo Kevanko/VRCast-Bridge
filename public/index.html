@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <link rel="icon" type="image/png" href="/logo.png?v=0.28.0">
+  <link rel="icon" type="image/png" href="/logo.png?v=0.29.0">
   <meta name="theme-color" content="#080611">
   <title>VRCast Bridge</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=0.28.0">
+  <link rel="stylesheet" href="/styles.css?v=0.29.0">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"></div>
@@ -30,8 +30,8 @@
         <div class="rail-card">
           <div class="rail-card-head"><span>ССЫЛКА ДЛЯ VRCHAT</span></div>
           <label class="player-mode" id="transportRow">Транспорт<select id="rtspTransport">
-            <option value="tcp">TCP · надёжно</option>
-            <option value="udp">UDP · иногда быстрее в VRChat</option>
+            <option value="tcp">TCP</option>
+            <option value="udp">UDP</option>
           </select></label>
           <label class="player-mode">Плеер мира<select id="playerMode"><option value="avpro">AVPro · прямой эфир</option><option value="unity">Unity · подготовленный MP4</option></select></label>
           <div class="link-row"><code id="playbackUrl">http://127.0.0.1:4717/stream/live.m3u8</code><button id="copyUrl" title="Скопировать ссылку">⧉</button></div>
@@ -43,14 +43,14 @@
             <div class="unity-progress-track"><i id="unityTaskBar"></i></div>
             <button id="prepareUnityQueue">Подготовить выбранный трек</button>
             <button id="recordUnityCapture" hidden>Записать клип захвата</button>
-            <small>Нажмите на нужный трек в очереди. Unity получит только его, поэтому не придётся ждать загрузки всех видео.</small>
+            <small>Выберите трек в очереди — Unity получит только его.</small>
           </div>
         </div>
 
 
         <div class="rail-card">
           <div class="rail-card-head"><span>КУДА ВЕЩАТЬ</span></div>
-          <div class="broadcast-mode"><button class="active" data-output="local" title="Мгновенная ссылка для этого компьютера">Локально</button><button data-output="remote" title="Мгновенная ссылка через ваш сервер с белым IP">Свой сервер</button><button data-output="tunnel" title="Ссылка через бесплатный туннель, задержка больше">Для друзей</button><button data-output="rtmp" title="Публикация на сторонний RTMP">RTMP</button></div>
+          <div class="broadcast-mode"><button class="active" data-output="local" title="Ссылка только для этого компьютера">Локально</button><button data-output="remote" title="Эфир через ваш сервер">Свой сервер</button><button data-output="tunnel" title="Бесплатный туннель, задержка около трёх секунд">Для друзей</button><button data-output="rtmp" title="Публикация на сторонний RTMP-сервер">RTMP</button></div>
           <section class="output-panel" id="remoteOutput" hidden>
             <label>Сервер трансляции<select id="serverSelect"></select></label>
             <div class="server-actions">
@@ -62,9 +62,9 @@
               <label>Пароль root<input id="serverPassword" type="password" placeholder="пароль" autocomplete="off"></label>
               <label>Название<input id="serverName" type="text" placeholder="Латвия" autocomplete="off"></label>
               <button class="deploy-button" id="deployServer" type="button">Развернуть и подключить</button>
-              <p class="field-help">Программа сама поставит медиасервер, откроет порт и подключит эфир. Пароль нужен только на время установки и не сохраняется.</p>
+              <p class="field-help">Пароль нужен только для установки и нигде не сохраняется.</p>
             </div>
-            <p class="field-help" id="serverHint">Мгновенная ссылка через ваш сервер — работает у друзей и не протухает.</p>
+            <p class="field-help" id="serverHint"></p>
           </section>
           <section class="output-panel" id="rtmpOutput" hidden>
             <label>RTMP-адрес<input id="rtmpUrl" type="password" placeholder="rtmp://…"></label>
@@ -83,7 +83,7 @@
           <video id="streamPreview" muted autoplay playsinline></video>
           <img id="capturePreview" alt="Предпросмотр выбранного источника">
           <div class="monitor-empty" id="monitorPlaceholder"><span id="monitorPlaceholderIcon">◇</span><b id="monitorPlaceholderTitle">ИСТОЧНИК НЕ ВЫБРАН</b><small id="monitorPlaceholderText">Выберите медиа, окно, монитор или область</small></div>
-          <div class="monitor-top"><span><i></i> PROGRAM</span><label class="preview-sync" title="Задерживает предпросмотр и шкалу до времени VRChat">СИНХРОННО <select id="previewDelay"><option value="0" selected>LIVE</option><option value="3">+3 С</option><option value="5">+5 С</option><option value="7">+7 С</option><option value="10">+10 С</option></select></label><span id="monitorBadge">OFFLINE</span></div>
+          <div class="monitor-top"><span><i></i> PROGRAM</span><label class="preview-sync" title="Показывать окно с задержкой, как у зрителей">СИНХРОННО <select id="previewDelay"><option value="0" selected>LIVE</option><option value="3">+3 С</option><option value="5">+5 С</option><option value="7">+7 С</option><option value="10">+10 С</option></select></label><span id="monitorBadge">OFFLINE</span></div>
           <div class="safe-frame" aria-hidden="true"></div>
         </div>
 
@@ -121,11 +121,11 @@
             <input id="mediaUrl" type="url" placeholder="Ссылка: YouTube, VK, Rutube, аниме-сайт, .m3u8/.mp4" required>
             <button id="addButton" type="submit">Добавить</button>
           </form>
-          <button class="drop-button" id="pickLocal"><span>＋</span><div><b>Файлы с компьютера</b><small>Можно перетащить видео прямо в окно</small></div></button>
+          <button class="drop-button" id="pickLocal"><span>＋</span><div><b>Файлы с компьютера</b><small>Или перетащите их в окно</small></div></button>
           <label class="volume-control" for="mediaVolume"><span><b>Громкость медиа</b><output id="mediaVolumeValue">100%</output></span><input id="mediaVolume" type="range" min="0" max="200" step="5" value="100"></label>
-          <div class="stream-preset"><div><b>Плавность медиа</b><small>Меньше нагрузка — меньше фризов и задержка</small></div><div class="quality-row"><label>Разрешение<select id="mediaQuality"><option value="720p">720p · быстрее</option><option value="1080p">1080p · чётче</option></select></label><label>Кадры<select id="mediaFps"><option value="30">30 FPS · стабильно</option><option value="60">60 FPS · плавно</option></select></label></div></div>
+          <div class="stream-preset"><div><b>Качество</b></div><div class="quality-row"><label>Разрешение<select id="mediaQuality"><option value="720p">720p</option><option value="1080p">1080p</option></select></label><label>Кадры<select id="mediaFps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></label></div></div>
           <div class="template-box">
-            <div class="template-head"><span><b>Шаблоны очереди</b><small>Сохраняются между перезапусками</small></span><span id="templateCount">0</span></div>
+            <div class="template-head"><span><b>Шаблоны очереди</b></span><span id="templateCount">0</span></div>
             <select id="templateSelect" aria-label="Сохранённый шаблон"><option value="">Новый шаблон…</option></select>
             <input id="templateName" type="text" maxlength="80" placeholder="Например: Музыка для клуба">
             <div class="template-actions">
@@ -164,18 +164,18 @@
           <p class="field-help" id="audioHelp"></p>
           <div id="localVolumeFields" hidden>
             <label>Слышать у себя<select id="localAppVolume">
-              <option value="1">Как обычно · 100%</option>
-              <option value="0.35">Тише · 35%</option>
-              <option value="0.15">Совсем тихо · 15%</option>
-              <option value="0.05">Почти беззвучно · 5%</option>
+              <option value="1">100%</option>
+              <option value="0.35">35%</option>
+              <option value="0.15">15%</option>
+              <option value="0.05">5%</option>
             </select></label>
-            <p class="field-help">Приложение станет тише в ваших наушниках, а в эфир звук уйдёт прежней громкости — программа компенсирует разницу. Помогает, когда звук двоится: свой напрямую и он же с задержкой из VRChat.</p>
+            <p class="field-help">Приложение станет тише в наушниках. В эфире громкость не изменится.</p>
           </div>
           <div id="audioOutputFields" hidden><label>Выход звука<select id="audioOutput"></select></label></div>
           <div id="audioDeviceFields" hidden><label>Вход<select id="audioDevice"></select></label></div>
           <label class="volume-control" for="captureVolume"><span><b>Громкость захвата</b><output id="captureVolumeValue">150%</output></span><input id="captureVolume" type="range" min="0" max="300" step="5" value="150"></label>
 
-          <div class="quality-row"><label>Качество<select id="quality"><option value="720p">720p</option><option value="1080p">1080p</option></select></label><label>Кадры<select id="fps"><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label></div>
+          <div class="quality-row"><label>Качество<select id="quality"><option value="720p">720p</option><option value="1080p">1080p</option></select></label><label>Кадры<select id="fps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></label></div>
           <button class="refresh-list" id="refreshSources">Обновить окна и устройства</button>
         </section>
 
@@ -185,7 +185,7 @@
 
   <dialog id="logDialog"><div class="dialog-head"><b>Журнал</b><button id="openLogFolder" title="Скопировать путь к файлам журнала">Файлы журнала</button><button id="closeLogs">×</button></div><pre id="logs">Запуск…</pre><button class="shutdown" id="shutdownApp">Закрыть VRCast Bridge</button></dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/vendor/hls.min.js?v=0.28.0"></script>
-  <script type="module" src="/app.js?v=0.28.0"></script>
+  <script src="/vendor/hls.min.js?v=0.29.0"></script>
+  <script type="module" src="/app.js?v=0.29.0"></script>
 </body>
 </html>
