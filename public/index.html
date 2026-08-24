@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" type="image/png" href="/logo.png?v=0.27.0">
+  <meta name="theme-color" content="#080611">
+  <title>VRCast Bridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css?v=0.27.0">
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"></div>
+  <div class="desktop-app">
+    <header class="titlebar">
+      <div class="brand"><span class="brand-mark"><i></i><i></i><i></i></span><b>VRCAST</b><span>BRIDGE</span><em id="appVersion"></em></div>
+      <button class="update-badge" id="updateButton" hidden></button><div class="title-status"><span class="state-dot" id="stateDot"></span><span id="systemState">Проверка системы</span></div>
+    </header>
+
+    <main class="workspace">
+      <aside class="rail">
+        <p class="section-label">ИСТОЧНИК</p>
+        <nav class="source-nav" aria-label="Источник эфира">
+          <button class="nav-item active" data-tab="queue"><span>▶</span><div><b>Медиа</b><small>Видео и плейлисты</small></div></button>
+          <button class="nav-item" data-tab="screen"><span>▣</span><div><b>Захват</b><small>Экран, окно, область</small></div></button>
+        </nav>
+
+        <div class="rail-card">
+          <div class="rail-card-head"><span>ССЫЛКА ДЛЯ VRCHAT</span></div>
+          <label class="player-mode" id="transportRow">Транспорт<select id="rtspTransport">
+            <option value="tcp">TCP · надёжно</option>
+            <option value="udp">UDP · иногда быстрее в VRChat</option>
+          </select></label>
+          <label class="player-mode">Плеер мира<select id="playerMode"><option value="avpro">AVPro · прямой эфир</option><option value="unity">Unity · подготовленный MP4</option></select></label>
+          <div class="link-row"><code id="playbackUrl">http://127.0.0.1:4717/stream/live.m3u8</code><button id="copyUrl" title="Скопировать ссылку">⧉</button></div>
+          <div class="alt-link" id="altLinkRow" hidden><span>Для Quest и строгих сетей</span><div class="link-row"><code id="altLink"></code><button id="copyAltUrl" title="Скопировать запасную ссылку">⧉</button></div></div>
+          <small id="trustHint">Ссылка доступна на этом компьютере</small>
+          <div class="link-state" id="linkState"><i></i><span>Локальный режим</span></div>
+          <div class="unity-tools" id="unityTools" hidden>
+            <div class="unity-progress"><span id="unityTaskText">Трек не подготовлен</span><b id="unityTaskPercent">0%</b></div>
+            <div class="unity-progress-track"><i id="unityTaskBar"></i></div>
+            <button id="prepareUnityQueue">Подготовить выбранный трек</button>
+            <button id="recordUnityCapture" hidden>Записать клип захвата</button>
+            <small>Нажмите на нужный трек в очереди. Unity получит только его, поэтому не придётся ждать загрузки всех видео.</small>
+          </div>
+        </div>
+
+
+        <div class="rail-card">
+          <div class="rail-card-head"><span>КУДА ВЕЩАТЬ</span></div>
+          <div class="broadcast-mode"><button class="active" data-output="local" title="Мгновенная ссылка для этого компьютера">Локально</button><button data-output="remote" title="Мгновенная ссылка через ваш сервер с белым IP">Свой сервер</button><button data-output="tunnel" title="Ссылка через бесплатный туннель, задержка больше">Для друзей</button><button data-output="rtmp" title="Публикация на сторонний RTMP">RTMP</button></div>
+          <section class="output-panel" id="remoteOutput" hidden>
+            <label>Сервер трансляции<select id="serverSelect"></select></label>
+            <div class="server-actions">
+              <button id="addServerToggle" type="button">＋ Добавить</button>
+              <button id="removeServer" type="button" disabled>Удалить</button>
+            </div>
+            <div id="addServerForm" hidden>
+              <label>Адрес SSH<input id="serverHost" type="text" placeholder="123.45.67.89 или my-server.com" autocomplete="off"></label>
+              <label>Пароль root<input id="serverPassword" type="password" placeholder="пароль" autocomplete="off"></label>
+              <label>Название<input id="serverName" type="text" placeholder="Латвия" autocomplete="off"></label>
+              <button class="deploy-button" id="deployServer" type="button">Развернуть и подключить</button>
+              <p class="field-help">Программа сама поставит медиасервер, откроет порт и подключит эфир. Пароль нужен только на время установки и не сохраняется.</p>
+            </div>
+            <p class="field-help" id="serverHint">Мгновенная ссылка через ваш сервер — работает у друзей и не протухает.</p>
+          </section>
+          <section class="output-panel" id="rtmpOutput" hidden>
+            <label>RTMP-адрес<input id="rtmpUrl" type="password" placeholder="rtmp://…"></label>
+            <label>Публичная HLS-ссылка<input id="publicUrl" type="url" placeholder="https://…/live.m3u8"></label>
+          </section>
+        </div>
+
+        <div class="rail-bottom">
+          <div class="encoder"><span>ENC</span><b id="encoderLabel">проверка…</b><small id="streamHealth">поток запускается</small></div>
+          <button class="quiet-button" id="showLogs">Журнал</button>
+        </div>
+      </aside>
+
+      <section class="studio">
+        <div class="monitor" id="monitor">
+          <video id="streamPreview" muted autoplay playsinline></video>
+          <img id="capturePreview" alt="Предпросмотр выбранного источника">
+          <div class="monitor-empty" id="monitorPlaceholder"><span id="monitorPlaceholderIcon">◇</span><b id="monitorPlaceholderTitle">ИСТОЧНИК НЕ ВЫБРАН</b><small id="monitorPlaceholderText">Выберите медиа, окно, монитор или область</small></div>
+          <div class="monitor-top"><span><i></i> PROGRAM</span><label class="preview-sync" title="Задерживает предпросмотр и шкалу до времени VRChat">СИНХРОННО <select id="previewDelay"><option value="0" selected>LIVE</option><option value="3">+3 С</option><option value="5">+5 С</option><option value="7">+7 С</option><option value="10">+10 С</option></select></label><span id="monitorBadge">OFFLINE</span></div>
+          <div class="safe-frame" aria-hidden="true"></div>
+        </div>
+
+        <div class="now-row">
+          <div class="now-cover" id="nowCover"><span>♪</span></div>
+          <div class="now-copy"><small>СЕЙЧАС В ЭФИРЕ</small><h1 id="nowTitle">Эфир не запущен</h1><p id="nowSource">Добавьте источник справа</p></div>
+          <div class="live-clock"><span id="elapsedTime">0:00</span><small id="totalTime">0:00</small></div>
+        </div>
+
+        <div class="transport" id="transport">
+          <div class="transport-buttons">
+            <button id="previousTrack" title="Предыдущий">│◀</button>
+            <button class="play-button" id="togglePause" title="Пауза или продолжить">▶</button>
+            <button id="nextTrack" title="Следующий">▶│</button>
+          </div>
+          <input id="seekBar" type="range" min="0" max="1000" value="0" aria-label="Позиция трека">
+          <button class="chip-button" id="speedSelect" aria-label="Скорость" data-value="1">1×</button>
+          <button class="chip-button" id="loopSelect" aria-label="Режим повтора" data-value="once">↻</button>
+        </div>
+
+        <div class="actionbar">
+          <div class="action-buttons">
+            <button class="secondary" id="skipTrack" hidden>Следующий</button>
+            <button class="go-live" id="goLive">Начать эфир</button>
+            <button class="stop-live" id="stopLive" hidden>Остановить</button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="inspector">
+        <div class="inspector-head"><div><small>ПАНЕЛЬ</small><h2 id="panelTitle">Медиа-очередь</h2></div><span id="queueCount">0</span></div>
+
+        <section id="queuePanel" class="panel-content">
+          <form id="addForm" class="add-media">
+            <input id="mediaUrl" type="url" placeholder="Ссылка: YouTube, VK, Rutube, аниме-сайт, .m3u8/.mp4" required>
+            <button id="addButton" type="submit">Добавить</button>
+          </form>
+          <button class="drop-button" id="pickLocal"><span>＋</span><div><b>Файлы с компьютера</b><small>Можно перетащить видео прямо в окно</small></div></button>
+          <label class="volume-control" for="mediaVolume"><span><b>Громкость медиа</b><output id="mediaVolumeValue">100%</output></span><input id="mediaVolume" type="range" min="0" max="200" step="5" value="100"></label>
+          <div class="stream-preset"><div><b>Плавность медиа</b><small>Меньше нагрузка — меньше фризов и задержка</small></div><div class="quality-row"><label>Разрешение<select id="mediaQuality"><option value="720p">720p · быстрее</option><option value="1080p">1080p · чётче</option></select></label><label>Кадры<select id="mediaFps"><option value="30">30 FPS · стабильно</option><option value="60">60 FPS · плавно</option></select></label></div></div>
+          <div class="template-box">
+            <div class="template-head"><span><b>Шаблоны очереди</b><small>Сохраняются между перезапусками</small></span><span id="templateCount">0</span></div>
+            <select id="templateSelect" aria-label="Сохранённый шаблон"><option value="">Новый шаблон…</option></select>
+            <input id="templateName" type="text" maxlength="80" placeholder="Например: Музыка для клуба">
+            <div class="template-actions">
+              <button id="saveTemplate">Сохранить</button><button id="loadTemplate" disabled>Загрузить</button><button id="appendTemplate" disabled title="Добавить содержимое к текущей очереди">＋</button><button class="danger-mini" id="deleteTemplate" disabled title="Удалить шаблон">×</button>
+            </div>
+          </div>
+          <div class="queue-toolbar"><span>ОЧЕРЕДЬ</span><button id="clearQueue">Очистить</button></div>
+          <div class="queue-list" id="queueList"><div class="empty-state">Очередь пуста</div></div>
+        </section>
+
+        <section id="screenPanel" class="panel-content" hidden>
+          <label>Что показываем<select id="captureMode">
+            <option value="monitor">Монитор</option><option value="window">Окно приложения</option><option value="region">Область</option><option value="desktop">Все мониторы</option>
+          </select></label>
+
+          <div id="monitorFields"><label>Монитор<select id="monitorSource"></select></label></div>
+          <div id="windowFields" hidden><label>Окно<select id="windowSource"></select></label></div>
+          <div id="regionFields" hidden>
+            <button class="select-region" id="selectRegion">Выделить область на всех экранах</button>
+            <div class="coords"><label>X<input id="regionX" type="number"></label><label>Y<input id="regionY" type="number"></label><label>Ш<input id="regionWidth" type="number" min="64"></label><label>В<input id="regionHeight" type="number" min="64"></label></div>
+          </div>
+
+          <div class="source-check">
+            <button id="refreshPreview"><span>↻</span><b>Проверить кадр</b></button>
+            <button id="highlightSource"><span>⌖</span><b>Найти источник</b></button>
+          </div>
+          <button class="apply-capture" id="applyCapture" hidden>Применить источник в эфире</button>
+
+          <label>Звук<select id="audioMode">
+            <option value="process">Только выбранное приложение</option>
+            <option value="system">Устройство Windows по умолчанию</option>
+            <option value="output">Конкретный выход / монитор HDMI</option>
+            <option value="device">Микрофон или виртуальный вход</option>
+            <option value="none">Без звука</option>
+          </select></label>
+          <p class="field-help" id="audioHelp"></p>
+          <div id="localVolumeFields" hidden>
+            <label>Слышать у себя<select id="localAppVolume">
+              <option value="1">Как обычно · 100%</option>
+              <option value="0.35">Тише · 35%</option>
+              <option value="0.15">Совсем тихо · 15%</option>
+              <option value="0.05">Почти беззвучно · 5%</option>
+            </select></label>
+            <p class="field-help">Приложение станет тише в ваших наушниках, а в эфир звук уйдёт прежней громкости — программа компенсирует разницу. Помогает, когда звук двоится: свой напрямую и он же с задержкой из VRChat.</p>
+          </div>
+          <div id="audioOutputFields" hidden><label>Выход звука<select id="audioOutput"></select></label></div>
+          <div id="audioDeviceFields" hidden><label>Вход<select id="audioDevice"></select></label></div>
+          <label class="volume-control" for="captureVolume"><span><b>Громкость захвата</b><output id="captureVolumeValue">150%</output></span><input id="captureVolume" type="range" min="0" max="300" step="5" value="150"></label>
+
+          <div class="quality-row"><label>Качество<select id="quality"><option value="720p">720p</option><option value="1080p">1080p</option></select></label><label>Кадры<select id="fps"><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label></div>
+          <button class="refresh-list" id="refreshSources">Обновить окна и устройства</button>
+        </section>
+
+      </aside>
+    </main>
+  </div>
+
+  <dialog id="logDialog"><div class="dialog-head"><b>Журнал</b><button id="openLogFolder" title="Скопировать путь к файлам журнала">Файлы журнала</button><button id="closeLogs">×</button></div><pre id="logs">Запуск…</pre><button class="shutdown" id="shutdownApp">Закрыть VRCast Bridge</button></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/vendor/hls.min.js?v=0.27.0"></script>
+  <script type="module" src="/app.js?v=0.27.0"></script>
+</body>
+</html>

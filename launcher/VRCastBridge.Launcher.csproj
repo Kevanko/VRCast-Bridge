@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>VRCast Bridge</AssemblyName>
+    <RootNamespace>VRCastBridge.Launcher</RootNamespace>
+    <Version>0.27.0</Version>
+    <FileVersion>0.27.0.0</FileVersion>
+    <AssemblyVersion>0.27.0.0</AssemblyVersion>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>none</DebugType>
+    <ApplicationIcon>assets\vrcast-icon.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" />
+    <EmbeddedResource Include="..\src\server.js" LogicalName="VRCast.Payload.server.js" />
+    <EmbeddedResource Include="..\public\index.html" LogicalName="VRCast.Payload.index.html" />
+    <EmbeddedResource Include="..\public\styles.css" LogicalName="VRCast.Payload.styles.css" />
+    <EmbeddedResource Include="..\public\app.js" LogicalName="VRCast.Payload.app.js" />
+    <EmbeddedResource Include="..\public\vendor\hls.min.js" LogicalName="VRCast.Payload.hls.min.js" />
+    <EmbeddedResource Include="..\tools\VRCast.AudioCapture.exe" LogicalName="VRCast.Payload.AudioCapture.exe" />
+    <EmbeddedResource Include="..\tools\VRCast.WindowCapture.exe" LogicalName="VRCast.Payload.WindowCapture.exe" />
+    <EmbeddedResource Include="..\tools\cloudflared.exe" LogicalName="VRCast.Payload.Cloudflared.exe" />
+    <EmbeddedResource Include="..\tools\pinggy.exe" LogicalName="VRCast.Payload.Pinggy.exe" />
+    <EmbeddedResource Include="..\tools\mediamtx.exe" LogicalName="VRCast.Payload.MediaMtx.exe" />
+    <EmbeddedResource Include="..\tools\plink.exe" LogicalName="VRCast.Payload.Plink.exe" />
+    <EmbeddedResource Include="assets\vrcast-icon.ico" LogicalName="VRCast.Payload.icon.ico" />
+    <EmbeddedResource Include="..\public\logo.png" LogicalName="VRCast.Payload.logo.png" />
+    <EmbeddedResource Include="..\public\standby.png" LogicalName="VRCast.Payload.standby.png" />
+    <EmbeddedResource Include="..\tools\yt-dlp.exe" LogicalName="VRCast.Payload.ytdlp.exe" />
+  </ItemGroup>
+</Project>
