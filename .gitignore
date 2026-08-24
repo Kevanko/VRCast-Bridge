@@ -1,0 +1,32 @@
+# Сборки
+launcher/bin/
+launcher/obj/
+audio-helper/bin/
+audio-helper/obj/
+capture-helper/target/
+*.exe
+
+# Сторонние компоненты качаются скриптом tools/fetch-tools.ps1
+tools/*.exe
+!tools/*.ps1
+
+# Зависимости
+node_modules/
+
+# Локальное и временное
+.playwright-mcp/
+*.log
+*.bak
+*.tmp
+launcher/NuGet/
+audio-helper/NuGet/
+
+# Самоподписанные ключи, которые MediaMTX создаёт рядом с собой
+auto.crt
+auto.key
+*.pem
+*.pfx
+*.key
+
+# Мусор от публикации лаунчера
+launcher/publish/
