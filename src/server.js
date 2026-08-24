@@ -6,6 +6,8 @@ import { basename, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 
+const APP_VERSION = '0.30.2';
+
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PUBLIC_DIR = join(ROOT, 'public');
 const STANDBY_IMAGE = join(PUBLIC_DIR, 'standby.png');
@@ -425,13 +427,11 @@ function startPublicTunnel() {
   if (config.outputMode !== 'tunnel' || tunnelProcess || tunnelCandidates.size) return;
   if (!tools.cloudflared && !tools.pinggy) throw new Error('Компоненты публичной ссылки не найдены.');
   tunnelUrl = ''; tunnelProvider = ''; tunnelState = 'starting'; tunnelError = '';
-  if (tools.cloudflared) {
-    startCloudflareCandidate();
-    if (tools.pinggy) tunnelFallbackTimer = setTimeout(() => {
-      tunnelFallbackTimer = null;
-      if (!tunnelUrl && !stopping) { tunnelState = 'starting'; tunnelError = ''; log('Cloudflare не подключился, запускаю резервный Pinggy'); startPinggyCandidate(); }
-    }, 12000);
-  } else if (tools.pinggy) startPinggyCandidate();
+  // Оба туннеля поднимаются одновременно, побеждает тот, кто первым отдал адрес.
+  // Раньше Pinggy ждал Cloudflare 12 секунд, а в сетях с фильтром Cloudflare
+  // не подключается никогда — ссылка появлялась через минуту и с ошибкой посередине.
+  if (tools.cloudflared) startCloudflareCandidate();
+  if (tools.pinggy) startPinggyCandidate();
   tunnelDeadlineTimer = setTimeout(() => {
     if (tunnelUrl || tunnelState !== 'starting') return;
     for (const child of tunnelCandidates) child.kill('SIGTERM');
@@ -442,16 +442,13 @@ function startPublicTunnel() {
   }, 35000);
 }
 
-// rtspt:// — принудительный TCP-транспорт: AVPro/GStreamer в VRChat так не
-// теряет пакеты на Wi-Fi и не требует открытых UDP-портов.
-// rtspt:// — принудительный TCP: надёжно на Wi-Fi. rtsp:// разрешает плееру
-// выбрать UDP: в части миров VRChat так заметно меньше буферизация.
-function rtspScheme() {
-  return config.rtspTransport === 'udp' ? 'rtsp' : 'rtspt';
-}
-
+// Транспорт выбирается по адресу назначения, а не настройкой.
+// Своя машина (127.0.0.1) — rtsp:// (UDP): на петле пакеты не теряются, а по TCP
+// плеер упирается в backpressure и видео ползёт при живом звуке.
+// Свой сервер и адреса в локальной сети — rtspt:// (TCP): UDP там режут
+// фаерволы и Wi-Fi, а на Quest он не проходит вовсе.
 function rtspAddress() {
-  return mediaMtxProcess ? `${rtspScheme()}://127.0.0.1:${RTSP_PORT}/live` : '';
+  return mediaMtxProcess ? `rtsp://127.0.0.1:${RTSP_PORT}/live` : '';
 }
 
 // «Свой сервер»: тот же мгновенный RTSP, но на машине с белым IP — ссылка
@@ -680,7 +677,7 @@ function remoteRtspTarget() {
   if (!server?.host) return null;
   const port = Number(server.rtspPort) || SERVER_RTSP_PORT;
   const hlsPort = Number(server.hlsPort) || 0;
-  return { host: server.host, port, name: server.name, playUrl: `${rtspScheme()}://${server.host}:${port}/live`,
+  return { host: server.host, port, name: server.name, playUrl: `rtspt://${server.host}:${port}/live`,
     // Запасная ссылка: обычный HLS с того же сервера. Нужна там, где RTSP не
     // проходит — Quest, строгие сети, старые плееры. Задержка больше, зато берёт везде.
     hlsUrl: hlsPort ? `http://${server.host}:${hlsPort}/live/index.m3u8` : '',
@@ -818,7 +815,7 @@ function status() {
   const runningElapsed = currentStartedAt ? Math.max(0, (Date.now() - currentStartedAt) / 1000) * speed : 0;
   const elapsed = queuePaused ? pausedPosition : sourcePosition + runningElapsed;
   return {
-    appVersion: '0.29.0', tools, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(),
+    appVersion: APP_VERSION, tools, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(),
     progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
@@ -831,7 +828,7 @@ function status() {
       state: !relayProcess ? 'offline' : hlsHealth.ready ? 'ready' : hlsHealth.segmentAge !== null && hlsHealth.segmentAge >= 4 ? 'stalled' : 'starting' },
     compatibility: { live: { player: 'AVPro', supported: true }, unity: unityCompatibility() },
     rtsp: { available: Boolean(mediaMtxProcess && rtspPushProcesses.has('local')), url: rtspAddress(),
-      lanUrls: getLanAddresses().map(ip => `${rtspScheme()}://${ip}:${RTSP_PORT}/live`),
+      lanUrls: getLanAddresses().map(ip => `rtspt://${ip}:${RTSP_PORT}/live`),
       remote: config.outputMode === 'remote'
         ? { configured: Boolean(remoteRtspTarget()), live: rtspPushProcesses.has('remote'),
             url: remoteRtspTarget()?.playUrl || '', hlsUrl: remoteRtspTarget()?.hlsUrl || '' }
@@ -2630,6 +2627,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET') {
       const relative = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
+      // Версию в адресах стилей и скриптов подставляем на лету: иначе WebView2
+      // отдаёт файлы прошлой версии из кеша и обновлённый интерфейс не виден.
+      if (relative === 'index.html') {
+        const html = readFileSync(join(PUBLIC_DIR, 'index.html'), 'utf8').replace(/\?v=[0-9.]+/g, `?v=${APP_VERSION}`);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(html);
+        return;
+      }
       if (serveFile(res, PUBLIC_DIR, relative, false)) return;
     }
     json(res, 404, { error: 'Не найдено' });
@@ -2639,7 +2644,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   log(`VRCast Bridge открыт: http://${HOST}:${PORT}`);
   log(`Кодировщик: ${encoder.label} · FFmpeg: ${tools.ffmpeg ? 'готов' : 'не найден'} · yt-dlp: ${tools.ytdlp ? 'готов' : 'не найден'}`);
-  logDetail(`=== запуск VRCast Bridge 0.29.0 · ffmpeg: ${tools.ffmpeg ? 'есть' : 'нет'} · yt-dlp: ${ytdlpPath()} · кодировщик: ${encoder.label} ===`);
+  logDetail(`=== запуск VRCast Bridge ${APP_VERSION} · ffmpeg: ${tools.ffmpeg ? 'есть' : 'нет'} · yt-dlp: ${ytdlpPath()} · кодировщик: ${encoder.label} ===`);
   startHlsHealthMonitor();
   refreshYtdlp();
   // Проверяем не сразу: пусть эфир поднимется первым, обновление подождёт.

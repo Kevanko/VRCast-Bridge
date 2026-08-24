@@ -51,7 +51,7 @@ test('возвращает состояние инструментов и адр
   const state = await response.json();
   assert.equal(typeof state.tools.ffmpeg, 'boolean');
   assert.equal(state.localPlaybackUrl, `http://127.0.0.1:${port}/stream/live.m3u8`);
-  assert.match(state.playbackUrl, /^(rtspt:\/\/127\.0\.0\.1:\d+\/live|http:\/\/127\.0\.0\.1:\d+\/stream\/live\.m3u8)$/);
+  assert.match(state.playbackUrl, /^(rtsp:\/\/127\.0\.0\.1:\d+\/live|http:\/\/127\.0\.0\.1:\d+\/stream\/live\.m3u8)$/);
   assert.deepEqual(state.queue, []);
   assert.deepEqual(state.templates, []);
   assert.deepEqual(state.playback, { paused: false, busy: false, buffering: false, revision: 0, speed: 1, loopMode: 'once', canSeek: false });
@@ -454,11 +454,11 @@ test('мгновенный RTSP-канал публикуется и отдаё�
   }
   assert.equal(state.tools.mediamtx, true, 'RTSP-сервер должен поставляться вместе с приложением');
   assert.equal(state.rtsp.available, true, 'RTSP-канал должен подниматься автоматически');
-  assert.match(state.rtsp.url, /^rtspt:\/\/127\.0\.0\.1:\d+\/live$/);
+  assert.match(state.rtsp.url, /^rtsp:\/\/127\.0\.0\.1:\d+\/live$/);
   assert.equal(state.playbackUrl, state.rtsp.url, 'в локальном режиме основная ссылка — мгновенный RTSP');
 
   const probe = spawnSync('ffprobe', ['-v', 'error', '-rtsp_transport', 'tcp', '-show_entries', 'stream=codec_name',
-    '-of', 'csv=p=0', state.rtsp.url.replace('rtspt://', 'rtsp://')], { windowsHide: true, encoding: 'utf8', timeout: 20000 });
+    '-of', 'csv=p=0', state.rtsp.url], { windowsHide: true, encoding: 'utf8', timeout: 20000 });
   assert.equal(probe.status, 0, `RTSP-поток должен открываться плеером: ${probe.stderr}`);
   assert.match(probe.stdout, /h264/, 'RTSP обязан отдавать H.264 для AVPro');
   assert.match(probe.stdout, /aac/, 'RTSP обязан отдавать AAC-звук');
