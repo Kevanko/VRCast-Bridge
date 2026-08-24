@@ -818,7 +818,7 @@ function status() {
   const runningElapsed = currentStartedAt ? Math.max(0, (Date.now() - currentStartedAt) / 1000) * speed : 0;
   const elapsed = queuePaused ? pausedPosition : sourcePosition + runningElapsed;
   return {
-    appVersion: '0.27.0', tools, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(),
+    appVersion: '0.28.0', tools, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(),
     progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
@@ -2639,7 +2639,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   log(`VRCast Bridge открыт: http://${HOST}:${PORT}`);
   log(`Кодировщик: ${encoder.label} · FFmpeg: ${tools.ffmpeg ? 'готов' : 'не найден'} · yt-dlp: ${tools.ytdlp ? 'готов' : 'не найден'}`);
-  logDetail(`=== запуск VRCast Bridge 0.27.0 · ffmpeg: ${tools.ffmpeg ? 'есть' : 'нет'} · yt-dlp: ${ytdlpPath()} · кодировщик: ${encoder.label} ===`);
+  logDetail(`=== запуск VRCast Bridge 0.28.0 · ffmpeg: ${tools.ffmpeg ? 'есть' : 'нет'} · yt-dlp: ${ytdlpPath()} · кодировщик: ${encoder.label} ===`);
   startHlsHealthMonitor();
   refreshYtdlp();
   // Проверяем не сразу: пусть эфир поднимется первым, обновление подождёт.
