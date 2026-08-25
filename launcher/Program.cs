@@ -11,12 +11,18 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.41.1";
+    private const string AppVersion = "0.41.2";
 
     [STAThread]
     private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        // Раньше при сбое вылезало системное окно «Unhandled exception» без
+        // подробностей. Теперь причина пишется в файл и видна в сообщении.
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, error) => ReportCrash(error.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, error) => ReportCrash(error.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, error) => { LogCrash(error.Exception); error.SetObserved(); };
         var noWindow = args.Any(arg => arg.Equals("--no-browser", StringComparison.OrdinalIgnoreCase));
         // Пока программа не установлена, файл работает установщиком: спрашивает
         // папку и ярлык, ставит себя туда и запускает уже оттуда.
@@ -67,7 +73,12 @@ internal static class Program
         CleanupOrphanHelpers();
         // Окно открывается сразу, а сервер поднимается в фоне: раньше программа
         // молча висела на заставке, пока он готовился, и это выглядело зависанием.
-        var подготовка = Task.Run(() => EnsureServer(runtimeDirectory));
+        var подготовка = Task.Run(async () =>
+        {
+            // Сбой подготовки — это сообщение в окне, а не падение всей программы.
+            try { return await EnsureServer(runtimeDirectory); }
+            catch (Exception error) { LogCrash(error); return null; }
+        });
         if (noWindow)
         {
             подготовка.GetAwaiter().GetResult();
@@ -161,6 +172,33 @@ internal static class Program
     }
 
     internal const string InstalledMarker = "vrcast.installed";
+
+    internal static string CrashLogPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "crash.log");
+
+    internal static void LogCrash(Exception? error)
+    {
+        if (error is null) return;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(CrashLogPath)!);
+            File.AppendAllText(CrashLogPath,
+                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [{AppVersion}] {error.GetType().Name}: {error.Message}{Environment.NewLine}{error.StackTrace}{Environment.NewLine}{Environment.NewLine}");
+        }
+        catch { }
+    }
+
+    private static void ReportCrash(Exception? error)
+    {
+        LogCrash(error);
+        var текст = error is null ? "Неизвестная ошибка." : $"{error.GetType().Name}: {error.Message}";
+        try
+        {
+            MessageBox.Show($"Сбой в программе.{Environment.NewLine}{Environment.NewLine}{текст}{Environment.NewLine}{Environment.NewLine}Подробности записаны в {CrashLogPath}",
+                "VRCast Bridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        catch { }
+    }
 
     internal static bool IsInstalled()
     {
@@ -549,6 +587,7 @@ internal sealed class MainWindow : Form
     }
 
     private readonly Task<Process?>? _serverTask;
+    private ChildProcessJob? _job;
 
     internal MainWindow(Task<Process?> serverTask) : this()
     {
@@ -706,6 +745,10 @@ internal sealed class MainWindow : Form
         {
             if (await Program.IsReady())
             {
+                if (_job is null && _serverTask is { IsCompletedSuccessfully: true } && _serverTask.Result is { } живой)
+                {
+                    try { _job = ChildProcessJob.Attach(живой); } catch { }
+                }
                 if (!_closing) BeginInvoke(() => { _ready = true; _webView.CoreWebView2?.Navigate(Program.AppUrl); });
                 return;
             }
@@ -713,7 +756,8 @@ internal sealed class MainWindow : Form
             // а не бесконечную заставку.
             if (_serverTask is { IsCompleted: true })
             {
-                var died = _serverTask.Result is null || _serverTask.Result!.HasExited;
+                var процесс = _serverTask.IsCompletedSuccessfully ? _serverTask.Result : null;
+                var died = процесс is null || процесс.HasExited;
                 if (died && !await Program.IsReady())
                 {
                     if (!_closing) BeginInvoke(() => ShowFailure());

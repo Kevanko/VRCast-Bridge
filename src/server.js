@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.41.1';
+const APP_VERSION = '0.41.2';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1257,23 +1257,34 @@ function nextProducerTimestamp() {
   // начинался ЗА уже отданными кадрами: плеер отматывался назад, показывал
   // старое и мигал. Теперь берём фактические часы потока — PCR последнего
   // отданного пакета — и продолжаем строго после них.
-  return Math.max(base, previousNow, lastRelayPcr + 0.05);
+  // Запас — один кадр: метка кадра точна, гадать больше не нужно.
+  return Math.max(base, previousNow, lastRelayPts + 0.04);
 }
 
-// PCR — часы транспортного потока, лежат прямо в заголовке пакета. Читаем их
-// на лету у всего, что уходит в релей: 188 байт на пакет, поиск по флагу.
-let lastRelayPcr = 0;
+// Время последнего кадра, ушедшего в эфир. Сначала читалось из PCR — служебных
+// часов потока, но они отстают от самих кадров примерно на треть секунды, и
+// следующий ролик начинался ЗА уже показанным: в VRChat это выглядело как
+// возврат старых кадров. Теперь берём метку самого кадра (PTS) из заголовка PES.
+let lastRelayPts = 0;
 
 function trackRelayClock(chunk) {
   for (let offset = 0; offset + 188 <= chunk.length; offset += 188) {
-    if (chunk[offset] !== 0x47) continue;                    // не начало пакета
-    if ((chunk[offset + 3] & 0x20) === 0) continue;          // нет поля адаптации
-    if (chunk[offset + 4] === 0) continue;                   // поле пустое
-    if ((chunk[offset + 5] & 0x10) === 0) continue;          // нет PCR
-    const base = chunk[offset + 6] * 33554432 + chunk[offset + 7] * 131072
-      + chunk[offset + 8] * 512 + chunk[offset + 9] * 2 + (chunk[offset + 10] >> 7);
-    const seconds = base / 90000;
-    if (seconds > lastRelayPcr) lastRelayPcr = seconds;
+    if (chunk[offset] !== 0x47) continue;                     // не начало пакета
+    if ((chunk[offset + 1] & 0x40) === 0) continue;           // не начало PES
+    const adaptation = (chunk[offset + 3] & 0x30) >> 4;
+    if (adaptation === 0 || adaptation === 2) continue;       // полезной нагрузки нет
+    let payload = offset + 4;
+    if (adaptation === 3) payload += 1 + chunk[offset + 4];   // пропускаем поле адаптации
+    if (payload + 14 > offset + 188) continue;
+    if (chunk[payload] !== 0 || chunk[payload + 1] !== 0 || chunk[payload + 2] !== 1) continue;
+    if ((chunk[payload + 7] & 0x80) === 0) continue;          // метки времени нет
+    const b = payload + 9;
+    const pts = (chunk[b] & 0x0e) * 536870912
+      + chunk[b + 1] * 4194304 + (chunk[b + 2] & 0xfe) * 16384
+      + chunk[b + 3] * 128 + ((chunk[b + 4] & 0xfe) >> 1);
+    const seconds = pts / 90000;
+    // Скачок больше часа — это чужая метка или переполнение, её не берём.
+    if (seconds > lastRelayPts && seconds - lastRelayPts < 3600) lastRelayPts = seconds;
   }
 }
 
@@ -1769,7 +1780,7 @@ function ensureRelay(profile = streamProfile()) {
   if (!relayProcess) {
     cleanHls();
     producerClock = null;
-    lastRelayPcr = 0;
+    lastRelayPts = 0;
     relayStartedAt = Date.now();
     try { startRelay(profile); }
     catch (error) { relayStartedAt = 0; relayProfile = null; throw error; }
