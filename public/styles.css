@@ -137,8 +137,7 @@ details.rail-card[open]>summary .chevron{transform:rotate(180deg)}
   background:linear-gradient(180deg,transparent,rgba(6,8,14,.55) 38%,rgba(6,8,14,.88));
   opacity:0;transform:translateY(6px);pointer-events:none;transition:opacity .18s var(--ease),transform .18s var(--ease)}
 .player:hover .player-ui,.player-ui:focus-within,.player.idle .player-ui,.player.menu-open .player-ui{opacity:1;transform:none;pointer-events:auto}
-.player-ui.disabled{opacity:.45;pointer-events:none}
-.player:hover .player-ui.disabled{opacity:.45}
+.player-ui.disabled .scrub,.player-ui.disabled #previousTrack,.player-ui.disabled #nextTrack,.player-ui.disabled .chip-button,.player-ui.disabled .volume-pop{opacity:.35;pointer-events:none}
 .player-row{display:flex;align-items:center;gap:6px}
 .player-row button{width:30px;height:30px;display:grid;place-items:center;border:0;border-radius:6px;background:transparent;color:#dfe3ee}
 .player-row button:hover{background:rgba(255,255,255,.10)}
@@ -197,3 +196,15 @@ option{background:var(--dusk);color:var(--text)}
 .monitor-empty span{width:54px;height:54px;border:1px solid var(--edge);color:var(--iris);box-shadow:none;background:rgba(122,120,207,.06)}
 .monitor-empty b{font:600 13px "Golos Text",system-ui,sans-serif;letter-spacing:0;color:var(--text)}
 .monitor-empty small{font-size:11px;color:var(--muted)}
+/* Органы управления в кадре крупнее: мелкие было не разобрать */
+.player-row button{width:34px;height:34px}
+.player-row .ic{width:19px;height:19px}
+.player-row .play-button{width:40px;height:40px}
+.player-row .play-button .ic{width:22px;height:22px}
+.player-row .chip-button{min-width:40px;height:30px;font-size:12px}
+.player-ui{padding:30px 14px 12px;gap:8px}
+.scrub{height:5px}
+/* Когда картинка выключена — это видно и включается одним нажатием */
+.preview-off{position:absolute;inset:0;z-index:2;display:grid;place-items:center;gap:10px;align-content:center;color:var(--muted)}
+.preview-off button{padding:9px 16px;border:1px solid var(--edge);border-radius:var(--r);background:var(--haze);color:var(--text);font-size:12px}
+.preview-off button:hover{border-color:var(--iris)}

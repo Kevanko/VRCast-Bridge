@@ -10,7 +10,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.33.0";
+    private const string AppVersion = "0.34.0";
 
     [STAThread]
     private static void Main(string[] args)
@@ -549,12 +549,14 @@ internal sealed class CaptureOutline : Form
 
     protected override bool ShowWithoutActivation => true;
 
+    private readonly Rectangle _target;
+
     internal CaptureOutline(Rectangle rectangle)
     {
+        // Рамку кладём ВНУТРЬ окна: снаружи её не видно у окна на весь экран.
+        _target = rectangle;
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
-        rectangle.Inflate(3, 3);
-        Bounds = rectangle;
         TopMost = true;
         ShowInTaskbar = false;
         BackColor = Color.Magenta;
@@ -564,7 +566,9 @@ internal sealed class CaptureOutline : Form
         Shown += (_, _) =>
         {
             SetWindowDisplayAffinity(Handle, WdaExcludeFromCapture);
-            SetWindowPos(Handle, HwndTopMost, 0, 0, 0, 0, SwpNoActivate | SwpNoMove | SwpNoSize);
+            // Координаты ставим уже созданному окну: WinForms пересчитывает
+            // Bounds под масштаб экрана, и рамка уезжала мимо цели.
+            SetWindowPos(Handle, HwndTopMost, _target.X, _target.Y, _target.Width, _target.Height, SwpNoActivate);
             _timer.Start();
         };
         FormClosed += (_, _) => _timer.Dispose();
@@ -573,8 +577,11 @@ internal sealed class CaptureOutline : Form
     protected override void OnPaint(PaintEventArgs args)
     {
         base.OnPaint(args);
-        using var edge = new Pen(Color.FromArgb(210, 173, 124, 255), 2);
-        var rectangle = new Rectangle(1, 1, Math.Max(1, ClientSize.Width - 3), Math.Max(1, ClientSize.Height - 3));
-        args.Graphics.DrawRectangle(edge, rectangle);
+        // Толще и с тёмным контуром — видно и на светлом, и на тёмном кадре.
+        using var shadow = new Pen(Color.FromArgb(190, 12, 14, 22), 8);
+        using var edge = new Pen(Color.FromArgb(235, 122, 120, 207), 4);
+        var outer = new Rectangle(4, 4, Math.Max(1, ClientSize.Width - 9), Math.Max(1, ClientSize.Height - 9));
+        args.Graphics.DrawRectangle(shadow, outer);
+        args.Graphics.DrawRectangle(edge, outer);
     }
 }

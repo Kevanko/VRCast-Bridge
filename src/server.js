@@ -5,9 +5,10 @@ import { networkInterfaces } from 'node:os';
 import { basename, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.33.0';
+const APP_VERSION = '0.34.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -546,7 +547,7 @@ HLSPORT=$(( PORT + 10 ))
   echo "  permissions:"
   echo "  - action: publish"
   echo "paths:"
-  echo "  live: {}"
+  echo "  all_others: {}"
 } > "$DIR/mediamtx.yml"
 chmod 600 "$DIR/mediamtx.yml"
 {
@@ -647,12 +648,37 @@ function sshRun(server, password, script, timeout = 180000) {
   });
 }
 
+// Проверка, отвечает ли сервер на нужном порту: без неё непонятно, почему
+// эфир «подключается» бесконечно — сервер выключен, порт закрыт или адрес не тот.
+function probeServer(host, port, timeout = 5000) {
+  return new Promise(resolve => {
+    const socket = netConnect({ host, port, timeout });
+    const finish = ok => { socket.destroy(); resolve(ok); };
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+let remoteReachable = null;
+function watchRemoteServer() {
+  const проверить = async () => {
+    const target = remoteRtspTarget();
+    if (!target) { remoteReachable = null; return; }
+    remoteReachable = await probeServer(target.host, target.port);
+  };
+  проверить();
+  setInterval(проверить, 20000).unref();
+}
+
 async function deployServer(body) {
   if (!tools.plink) throw new Error('Компонент SSH не найден.');
   const raw = String(body.host || '').trim().replace(/^ssh:\/\//i, '');
   const [hostName, sshPortRaw] = raw.split(':');
   const password = String(body.password || '');
   if (!hostName) throw new Error('Укажите адрес сервера.');
+  // Годится и домен, и IP — проверяем только форму записи.
+  if (!/^[a-z0-9.-]+$/i.test(hostName)) throw new Error('Адрес сервера: только буквы, цифры, точки и дефис.');
   if (!password) throw new Error('Укажите пароль root.');
   const existing = savedServers().find(item => item.host === hostName);
   const server = { host: hostName, sshPort: Number(sshPortRaw) || existing?.sshPort || 22,
@@ -667,6 +693,7 @@ async function deployServer(body) {
     id: existing?.id || crypto.randomUUID(),
     name: String(body.name || existing?.name || '').trim().slice(0, 60) || hostName,
     host: hostName, sshPort: server.sshPort, user: server.user, hostKey: server.hostKey,
+    channel: String(body.channel || existing?.channel || 'live').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'live',
     publicIp: result[1], rtspPort: Number(result[2]), hlsPort: Number(result[3]), publishKey: result[4],
     addedAt: existing?.addedAt || new Date().toISOString(),
   };
@@ -713,11 +740,14 @@ function remoteRtspTarget() {
   if (!server?.host) return null;
   const port = Number(server.rtspPort) || SERVER_RTSP_PORT;
   const hlsPort = Number(server.hlsPort) || 0;
-  return { host: server.host, port, name: server.name, playUrl: `rtspt://${server.host}:${port}/live`,
+  const channel = (server.channel || 'live').replace(/[^a-z0-9_-]/gi, '') || 'live';
+  return { host: server.host, port, name: server.name, channel, playUrl: `rtspt://${server.host}:${port}/${channel}`,
     // Запасная ссылка: обычный HLS с того же сервера. Нужна там, где RTSP не
     // проходит — Quest, строгие сети, старые плееры. Задержка больше, зато берёт везде.
-    hlsUrl: hlsPort ? `http://${server.host}:${hlsPort}/live/index.m3u8` : '',
-    publishUrl: `rtsp://vrcast:${encodeURIComponent(server.publishKey || '')}@${server.host}:${port}/live` };
+    // Запасной HLS с MediaMTX не отдаётся напрямую: сервер отвечает перенаправлением
+    // с cookie, за которым плееры не идут. Для Quest работает режим «Друзья».
+    hlsUrl: '',
+    publishUrl: `rtsp://vrcast:${encodeURIComponent(server.publishKey || '')}@${server.host}:${port}/${channel}` };
 }
 
 function publicAddress() {
@@ -866,7 +896,8 @@ function status() {
     rtsp: { available: Boolean(mediaMtxProcess && rtspPushProcesses.has('local')), url: rtspAddress(),
       lanUrls: getLanAddresses().map(ip => `rtspt://${ip}:${RTSP_PORT}/live`),
       remote: config.outputMode === 'remote'
-        ? { configured: Boolean(remoteRtspTarget()), live: rtspPushProcesses.has('remote'),
+        ? { configured: Boolean(remoteRtspTarget()), live: rtspPushProcesses.has('remote'), reachable: remoteReachable,
+            channel: remoteRtspTarget()?.channel || '',
             url: remoteRtspTarget()?.playUrl || '', hlsUrl: remoteRtspTarget()?.hlsUrl || '' }
         : null },
     tunnel: { state: tunnelState, ready: Boolean(tunnelUrl), provider: tunnelProvider, expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError },
@@ -1294,11 +1325,11 @@ async function startScreenInner() {
   }
   // Компенсацию приглушения делает сам хелпер, ещё во float: усиливать здесь
   // значило бы поднимать вместе с сигналом шум квантования 16 бит.
-  const captureVolume = Math.max(0, Math.min(3, Number(config.captureVolume) || 0));
+  const captureVolume = Math.max(0, Math.min(6, Number(config.captureVolume) || 0));
   // Кадр от Desktop Duplication лежит в памяти видеокарты — забираем его перед фильтрами.
   const fromGpu = ddagrabOutput === null ? '' : 'hwdownload,format=bgra,';
   args.push('-vf', `${fromGpu}scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
-    '-af', `aresample=async=1:first_pts=0:min_hard_comp=0.100,volume=${captureVolume.toFixed(2)}`,
+    '-af', `aresample=async=1:first_pts=0:min_hard_comp=0.100,volume=${captureVolume.toFixed(2)},alimiter=limit=0.97:level=disabled`,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile));
   runScreenProcess(args, audioHelperArgs, windowHelperArgs);
   startPublicTunnel();
@@ -1802,10 +1833,15 @@ function startCacheDownload(item) {
   return promise;
 }
 
+// Долгие ролики не буферизуем: фильм на два часа — это гигабайты, и эфир
+// стоял в ожидании, пока yt-dlp тянет файл целиком. Такие играем прямо из сети.
+const CACHE_MAX_SECONDS = 25 * 60;
+
 function stableQueueMedia(item) {
   if (item.local) return resolveItem(item);
   // Живой поток скачать нельзя: он бесконечный. Играем напрямую.
   if (item.live) return resolveItem(item);
+  if (!cachedMediaPath(item.id) && Number(item.duration) > CACHE_MAX_SECONDS) return resolveItem(item);
   return downloadRemoteMedia(item).then(media => { clearMediaFailure(item.id); return media; }).catch(error => {
     // Прямой поток YouTube живёт минуты и часто отдаёт 403 — на него
     // переключаемся молча, но причину пишем в файл для разбора.
@@ -2056,10 +2092,10 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   }
 
   const speed = Math.max(0.5, Math.min(2, Number(config.playbackSpeed) || 1));
-  const mediaVolume = Math.max(0, Math.min(2, Number(config.mediaVolume) || 0));
+  const mediaVolume = Math.max(0, Math.min(4, Number(config.mediaVolume) || 0));
   args.push('-map', `${videoIndex}:v:0`, '-map', `${audioIndex}:a:0`, '-shortest',
     '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS/${speed}`,
-    '-af', `atempo=${speed},volume=${mediaVolume.toFixed(2)},aresample=async=1000:first_pts=0`,
+    '-af', `atempo=${speed},volume=${mediaVolume.toFixed(2)},alimiter=limit=0.97:level=disabled,aresample=async=1000:first_pts=0`,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...producerEncodeArgs(profile), '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
     '-max_muxing_queue_size', '4096',
     '-output_ts_offset', timestampOffset.toFixed(3), '-mpegts_flags', 'resend_headers', '-muxdelay', '0', '-muxpreload', '0', '-flush_packets', '1', '-f', 'mpegts', 'pipe:1');
@@ -2705,10 +2741,10 @@ const server = http.createServer(async (req, res) => {
         audioOutputId: String(body.audioOutputId || '').slice(0, 500), audioProcessId: String(body.audioProcessId || '').replace(/\D/g, '').slice(0, 16),
         loopMode: ['once', 'one', 'all'].includes(body.loopMode) ? body.loopMode : (config.loopMode || 'once'),
         playbackSpeed: [0.5, 0.75, 1, 1.25, 1.5, 2].includes(Number(body.playbackSpeed)) ? Number(body.playbackSpeed) : (config.playbackSpeed || 1),
-        captureVolume: Math.max(0, Math.min(3, Number(body.captureVolume ?? config.captureVolume ?? 1.5))),
+        captureVolume: Math.max(0, Math.min(6, Number(body.captureVolume ?? config.captureVolume ?? 1.5))),
         localAppVolume: Math.max(0.02, Math.min(1, Number(body.localAppVolume ?? config.localAppVolume ?? 1))),
         rtspTransport: ['tcp', 'udp'].includes(body.rtspTransport) ? body.rtspTransport : (config.rtspTransport || 'tcp'),
-        mediaVolume: Math.max(0, Math.min(2, Number(body.mediaVolume ?? config.mediaVolume ?? 1))),
+        mediaVolume: Math.max(0, Math.min(4, Number(body.mediaVolume ?? config.mediaVolume ?? 1))),
         mediaQuality: body.mediaQuality === '1080p' ? '1080p' : (body.mediaQuality === '720p' ? '720p' : (config.mediaQuality || '720p')),
         mediaFps: body.mediaFps === 60 ? 60 : (body.mediaFps === 30 ? 30 : (config.mediaFps || 30)),
         previewDelay: [0, 3, 5, 7, 10].includes(Number(body.previewDelay)) ? Number(body.previewDelay) : Math.min(10, Number(config.previewDelay) || 0),
@@ -2811,6 +2847,7 @@ server.listen(PORT, HOST, () => {
   logDetail(`=== запуск VRCast Bridge ${APP_VERSION} · ffmpeg: ${tools.ffmpeg ? 'есть' : 'нет'} · yt-dlp: ${ytdlpPath()} · кодировщик: ${encoder.label} ===`);
   startHlsHealthMonitor();
   watchFreeSpace();
+  watchRemoteServer();
   ensureCacheDir();
   cleanupStorage();
   setInterval(cleanupStorage, 10 * 60 * 1000).unref();
