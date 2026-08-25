@@ -140,6 +140,8 @@ function renderStorage(state){
     select.innerHTML=`<option value="">По умолчанию (диск с Windows)</option>`+drives.map(drive=>`<option value="${drive}\\">${drive} диск</option>`).join('');
     select.value=cache.root||'';
   }
+  const channel=state.rtsp?.remote?.channel||'';
+  if(document.activeElement!==$('#activeChannel')&&$('#activeChannel').value!==channel)$('#activeChannel').value=channel;
   $('#cacheSize').textContent=`${cache.sizeMb||0} МБ`;
   const free=state.disk?.freeMb;
   $('#cacheHint').textContent=cache.path?`${cache.path}${free!==null&&free!==undefined?` · свободно ${Math.round(free/1024*10)/10} ГБ`:''}`:'';
@@ -186,8 +188,8 @@ function render(state) {
   else if(state.config.outputMode==='remote'){
     const remote=state.rtsp?.remote||{};
     shownUrl=remote.configured?remote.url:'';
-    hint='Ссылка постоянная, её можно дать друзьям.';
-    linkText=!remote.configured?'Выберите сервер':remote.reachable===false?'Сервер не отвечает':remote.live?'Через ваш сервер':'Подключаюсь…';
+    hint=remote.channelRejected?'Нажмите «Настроить сервер» — старая настройка разрешает только канал live.':'Ссылка постоянная, её можно дать друзьям.';
+    linkText=!remote.configured?'Выберите сервер':remote.reachable===false?'Сервер не отвечает':remote.channelRejected?'Сервер не принимает этот канал':remote.live?'Через ваш сервер':'Подключаюсь…';
     linkGood=Boolean(remote.live);
     linkError=Boolean(remote.configured&&(remote.reachable===false||(!remote.live&&state.running)));
   }
@@ -222,6 +224,7 @@ function render(state) {
   }
   $('#appVersion').textContent=state.appVersion||'';
   const update=state.update||{};
+  offerUpdate(update);
   $('#updateButton').hidden=!update.available;
   if(update.available)$('#updateButton').textContent=update.ready?`Обновить до ${update.version}`:`Скачиваю ${update.version}…`;
   $('#updateButton').disabled=!update.ready;
@@ -239,7 +242,7 @@ function render(state) {
   $('#menuMediaQuality').hidden=screenSource; $('#menuMediaFps').hidden=screenSource;
   $('#menuScreenQuality').hidden=!screenSource; $('#menuScreenFps').hidden=!screenSource;
   renderNowPlaying(state); renderProgress(); renderTemplates(state); renderServers(state); renderStorage(state); startPreview(state);
-  $('#goLive').hidden=state.running; $('#stopLive').hidden=!state.running; $('#skipTrack').hidden=!(state.running&&state.activeKind==='queue');
+  $('#goLive').hidden=true; $('#stopLive').hidden=!state.running; $('#skipTrack').hidden=!(state.running&&state.activeKind==='queue');
   $('#applyCapture').hidden=!(state.running&&ui.source==='screen');
   $('#applyCapture').textContent=state.activeKind==='screen'?'Применить':'Показать экран в эфире';
   $$('.broadcast-mode button').forEach(node=>node.disabled=state.running);
@@ -426,7 +429,7 @@ $('#captureVolume').addEventListener('input',event=>paintVolume(event.target,$('
 
 $('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button.disabled=true;try{await saveConfig();render(await api(`/api/start/${ui.source}`,{method:'POST'}));toast(ui.output==='tunnel'?'Запускаю эфир и получаю публичную ссылку':'Эфир запускается');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
 $('#stopLive').addEventListener('click',async()=>{try{render(await api('/api/stop',{method:'POST'}));}catch(error){toast(error.message,true);}});
-$('#updateButton').addEventListener('click',async()=>{if(!confirm('Программа закроется, установит новую версию и запустится снова. Эфир прервётся на несколько секунд. Продолжить?'))return;try{await api('/api/update/apply',{method:'POST'});toast('Устанавливаю обновление…');}catch(error){toast(error.message,true);}});
+$('#updateButton').addEventListener('click',()=>{const update=ui.status?.update;if(!update?.available)return;ui.offeredVersion=update.version;paintUpdateDialog(update);if(!updateDialog.open)updateDialog.showModal();});
 $('#showLogs').addEventListener('click',()=>$('#logDialog').showModal());
 $('#openLogFolder').addEventListener('click',async()=>{const folder=ui.status?.logFolder;if(!folder)return;const ok=await copyText(folder);toast(ok?'Путь к журналам скопирован: '+folder:folder);}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 $('#shutdownApp').addEventListener('click',async()=>{try{await api('/api/shutdown',{method:'POST'});window.location.href='vrcast://close';}catch(error){toast(error.message,true);}});
@@ -497,3 +500,49 @@ async function startSource(){
   catch(error){ toast(error.message,true); }
   finally{ button.disabled=false; }
 }
+
+// Канал — это просто путь на сервере: меняется на лету, переустановка не нужна.
+$('#activeChannel').addEventListener('change',async()=>{
+  const id=$('#serverSelect').value;
+  if(!id)return toast('Сначала выберите сервер',true);
+  try{
+    render(await api(`/api/servers/${encodeURIComponent(id)}/channel`,{method:'POST',body:JSON.stringify({channel:$('#activeChannel').value})}));
+    toast('Канал изменён — скопируйте ссылку заново');
+  }catch(error){ toast(error.message,true); }
+});
+
+// Обновление: окно появляется само, когда на GitHub вышла версия новее.
+// «Позже» откладывает на сутки, «Пропустить» — до следующей версии.
+const updateDialog=$('#updateDialog');
+function updateBlocked(version){
+  if(localStorage.getItem('skipVersion')===version)return true;
+  const снова=Number(localStorage.getItem('updateSnooze')||0);
+  return Date.now()<снова;
+}
+function paintUpdateDialog(update){
+  $('#updateVersion').textContent=update.version||'';
+  $('#updateNotes').textContent=(update.notes||'').replace(/^#{1,6}\s*/gm,'').replace(/\*\*(.+?)\*\*/g,'$1').replace(/`/g,'').trim()||'Исправления и улучшения.';
+  $('#updateProgress').textContent=update.ready?'Загружено, можно устанавливать.':'Скачиваю…';
+  $('#updateNow').disabled=!update.ready;
+  $('#updateNow').textContent=update.ready?'Обновить':'Скачиваю…';
+}
+function offerUpdate(update){
+  if(!update?.available||!update.version)return;
+  paintUpdateDialog(update);
+  if(updateDialog.open||updateBlocked(update.version))return;
+  ui.offeredVersion=update.version;
+  updateDialog.showModal();
+}
+$('#updateLater').addEventListener('click',()=>{
+  localStorage.setItem('updateSnooze',String(Date.now()+24*60*60*1000));
+  updateDialog.close(); toast('Напомню завтра');
+});
+$('#updateSkip').addEventListener('click',()=>{
+  if(ui.offeredVersion)localStorage.setItem('skipVersion',ui.offeredVersion);
+  updateDialog.close(); toast('Эта версия пропущена');
+});
+$('#updateNow').addEventListener('click',async()=>{
+  $('#updateNow').disabled=true; $('#updateProgress').textContent='Устанавливаю, программа перезапустится…';
+  try{ await api('/api/update/apply',{method:'POST'}); }
+  catch(error){ toast(error.message,true); $('#updateNow').disabled=false; }
+});

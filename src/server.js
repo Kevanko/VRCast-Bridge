@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.34.0';
+const APP_VERSION = '0.35.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -661,6 +661,7 @@ function probeServer(host, port, timeout = 5000) {
 }
 
 let remoteReachable = null;
+let remoteChannelRejected = false;
 function watchRemoteServer() {
   const проверить = async () => {
     const target = remoteRtspTarget();
@@ -897,7 +898,7 @@ function status() {
       lanUrls: getLanAddresses().map(ip => `rtspt://${ip}:${RTSP_PORT}/live`),
       remote: config.outputMode === 'remote'
         ? { configured: Boolean(remoteRtspTarget()), live: rtspPushProcesses.has('remote'), reachable: remoteReachable,
-            channel: remoteRtspTarget()?.channel || '',
+            channel: remoteRtspTarget()?.channel || '', channelRejected: remoteChannelRejected,
             url: remoteRtspTarget()?.playUrl || '', hlsUrl: remoteRtspTarget()?.hlsUrl || '' }
         : null },
     tunnel: { state: tunnelState, ready: Boolean(tunnelUrl), provider: tunnelProvider, expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError },
@@ -1407,7 +1408,15 @@ function startRtspPush() {
         tail = lines.pop() || '';
         for (const line of lines) {
           const text = line.trim();
-          if (text && text !== lastRemotePushError) { lastRemotePushError = text; log(`Свой сервер: ${text.slice(0, 260)}`); }
+          if (text && text !== lastRemotePushError) {
+            lastRemotePushError = text;
+            // 400 на публикацию означает, что сервер принимает только тот путь,
+            // который прописан в его настройке — обычно старый «live».
+            if (/400 Bad Request/i.test(text)) {
+              if (!remoteChannelRejected) { remoteChannelRejected = true; log('Свой сервер отклонил канал: нажмите «Настроить сервер», чтобы разрешить несколько каналов'); }
+            }
+            else log(`Свой сервер: ${text.slice(0, 260)}`);
+          }
         }
       });
       child.on('error', error => log(`Свой сервер: ${error.message}`));
@@ -2669,6 +2678,17 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const server = await deployServer(body);
       return json(res, 201, { server: { id: server.id, name: server.name, host: server.host, rtspPort: server.rtspPort }, status: status() });
+    }
+    if (req.method === 'POST' && /^\/api\/servers\/[^/]+\/channel$/.test(url.pathname)) {
+      const id = decodeURIComponent(url.pathname.split('/')[3]);
+      const body = await readBody(req);
+      const channel = String(body.channel || 'live').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'live';
+      const list = savedServers().map(item => item.id === id ? { ...item, channel } : item);
+      saveConfig({ servers: list });
+      remoteChannelRejected = false;
+      if (config.outputMode === 'remote') { stopRtspPush(); if (relayProcess) startRtspPush(); }
+      log(`Свой сервер: канал ${channel}`);
+      return json(res, 200, status());
     }
     if (req.method === 'POST' && /^\/api\/servers\/[^/]+\/remove$/.test(url.pathname)) {
       const id = decodeURIComponent(url.pathname.split('/')[3]);
