@@ -4,11 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <link rel="icon" type="image/png" href="/logo.png?v=0.29.0">
-  <meta name="theme-color" content="#100c17">
+  <meta name="theme-color" content="#0d1017">
   <title>VRCast Bridge</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Unbounded:wght@700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css?v=0.29.0">
 </head>
 <body>
@@ -37,6 +37,9 @@
 <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
 <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.6 12s3.6-6.4 9.4-6.4S21.4 12 21.4 12s-3.6 6.4-9.4 6.4S2.6 12 2.6 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
 <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M9.6 6a8.6 8.6 0 0 1 2.4-.4c5.8 0 9.4 6.4 9.4 6.4a17 17 0 0 1-3 3.8"/><path d="M6.3 7.8A17 17 0 0 0 2.6 12s3.6 6.4 9.4 6.4c1.5 0 2.8-.4 4-1"/><path d="M4.4 4.4l15.2 15.2"/></symbol>
+<symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.4a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.84 2.84l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56v.18a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.84-2.84l.06-.06a1.7 1.7 0 0 0 .34-1.88 1.7 1.7 0 0 0-1.56-1.04h-.18a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.56-1.1 1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.84-2.84l.06.06a1.7 1.7 0 0 0 1.88.34h.08A1.7 1.7 0 0 0 9.92 4.5v-.18a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.84 2.84l-.06.06a1.7 1.7 0 0 0-.34 1.88v.08a1.7 1.7 0 0 0 1.56 1.04h.18a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.54 1.04z"/></symbol>
+<symbol id="i-sound" viewBox="0 0 24 24"><path d="M5 9.4h3.2L12.6 5.6v12.8L8.2 14.6H5z"/><path d="M15.8 9.6a3.4 3.4 0 0 1 0 4.8M18.4 7a7 7 0 0 1 0 10"/></symbol>
+<symbol id="i-mute" viewBox="0 0 24 24"><path d="M5 9.4h3.2L12.6 5.6v12.8L8.2 14.6H5z"/><path d="M16.4 9.8l4.2 4.4M20.6 9.8l-4.2 4.4"/></symbol>
 <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7.6 10l4.4 4.4L16.4 10"/></symbol>
 </defs></svg>
   <div class="ambient" aria-hidden="true"></div>
@@ -48,85 +51,96 @@
 
     <main class="workspace">
       <aside class="rail">
-        <p class="section-label">Источник</p>
+        <p class="section-label">Что вещаем</p>
         <nav class="source-nav" aria-label="Источник эфира">
-          <button class="nav-item active" data-tab="queue"><span><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg></span><div><b>Медиа</b><small>Видео и плейлисты</small></div></button>
-          <button class="nav-item" data-tab="screen"><span><svg class="ic" aria-hidden="true"><use href="#i-display"/></svg></span><div><b>Захват</b><small>Экран, окно, область</small></div></button>
+          <button class="nav-item active" data-tab="queue"><span><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg></span><div><b>Видео</b><small>Ролики и плейлисты</small></div></button>
+          <button class="nav-item" data-tab="screen"><span><svg class="ic" aria-hidden="true"><use href="#i-display"/></svg></span><div><b>Экран</b><small>Монитор, окно или область</small></div></button>
         </nav>
 
         <details class="rail-card" id="cardLink" open>
-          <summary class="rail-card-head"><svg class="ic" aria-hidden="true"><use href="#i-link"/></svg><span>Ссылка для VRChat</span><svg class="ic chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+          <summary class="rail-card-head"><svg class="ic" aria-hidden="true"><use href="#i-link"/></svg><span>Ссылка</span><svg class="ic chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
           <input type="hidden" id="rtspTransport" value="tcp">
-          <label class="player-mode">Плеер мира<select id="playerMode"><option value="avpro">AVPro · прямой эфир</option><option value="unity">Unity · подготовленный MP4</option></select></label>
+          <label class="player-mode">Плеер в мире<select id="playerMode"><option value="avpro">AVPro — живой эфир</option><option value="unity">Unity — готовый файл</option></select></label>
           <div class="link-row"><code id="playbackUrl">http://127.0.0.1:4717/stream/live.m3u8</code><button id="copyUrl" title="Скопировать ссылку"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
-          <div class="alt-link" id="altLinkRow" hidden><span>Для Quest и строгих сетей</span><div class="link-row"><code id="altLink"></code><button id="copyAltUrl" title="Скопировать запасную ссылку"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button></div></div>
-          <small id="trustHint">Ссылка доступна на этом компьютере</small>
-          <div class="link-state" id="linkState"><i></i><span>Локальный режим</span></div>
+          <div class="alt-link" id="altLinkRow" hidden><span>Запасная — для Quest</span><div class="link-row"><code id="altLink"></code><button id="copyAltUrl" title="Скопировать запасную ссылку"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button></div></div>
+          <small id="trustHint"></small>
+          <div class="link-state" id="linkState"><i></i><span>Готовлю…</span></div>
           <div class="unity-tools" id="unityTools" hidden>
-            <div class="unity-progress"><span id="unityTaskText">Трек не подготовлен</span><b id="unityTaskPercent">0%</b></div>
+            <div class="unity-progress"><span id="unityTaskText">Файл не готов</span><b id="unityTaskPercent">0%</b></div>
             <div class="unity-progress-track"><i id="unityTaskBar"></i></div>
-            <button id="prepareUnityQueue">Подготовить выбранный трек</button>
-            <button id="recordUnityCapture" hidden>Записать клип захвата</button>
-            <small>Выберите трек в очереди — Unity получит только его.</small>
+            <button id="prepareUnityQueue">Собрать файл</button>
+            <button id="recordUnityCapture" hidden>Записать клип</button>
+            <small>Unity играет один ролик — выберите его в списке.</small>
           </div>
         </details>
 
 
         <details class="rail-card" id="cardOutput" open>
-          <summary class="rail-card-head"><svg class="ic" aria-hidden="true"><use href="#i-broadcast"/></svg><span>Куда вещать</span><svg class="ic chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
-          <div class="broadcast-mode"><button class="active" data-output="local" title="Ссылка только для этого компьютера">Локально</button><button data-output="remote" title="Эфир через ваш сервер">Свой сервер</button><button data-output="tunnel" title="Бесплатный туннель, задержка около трёх секунд">Для друзей</button></div>
+          <summary class="rail-card-head"><svg class="ic" aria-hidden="true"><use href="#i-broadcast"/></svg><span>Кто увидит</span><svg class="ic chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+          <div class="broadcast-mode"><button class="active" data-output="local" title="Ссылка работает только на этом компьютере">Только я</button><button data-output="remote" title="Через ваш сервер — ссылка не меняется">Мой сервер</button><button data-output="tunnel" title="Бесплатный туннель, задержка около трёх секунд">Друзья</button></div>
           <section class="output-panel" id="remoteOutput" hidden>
-            <label>Сервер трансляции<select id="serverSelect"></select></label>
+            <label>Сервер<select id="serverSelect"></select></label>
             <div class="server-actions">
               <button id="addServerToggle" type="button"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>Добавить</button>
               <button id="removeServer" type="button" disabled>Удалить</button>
             </div>
             <div id="addServerForm" hidden>
-              <label>Адрес SSH<input id="serverHost" type="text" placeholder="123.45.67.89 или my-server.com" autocomplete="off"></label>
-              <label>Пароль root<input id="serverPassword" type="password" placeholder="пароль" autocomplete="off"></label>
-              <label>Название<input id="serverName" type="text" placeholder="Латвия" autocomplete="off"></label>
-              <button class="deploy-button" id="deployServer" type="button"><svg class="ic" aria-hidden="true"><use href="#i-server"/></svg>Развернуть и подключить</button>
-              <p class="field-help">Пароль нужен только для установки и нигде не сохраняется.</p>
+              <label>Адрес сервера<input id="serverHost" type="text" placeholder="123.45.67.89" autocomplete="off"></label>
+              <label>Пароль root<input id="serverPassword" type="password" placeholder="пароль от сервера" autocomplete="off"></label>
+              <label>Как назвать<input id="serverName" type="text" placeholder="Например: Латвия" autocomplete="off"></label>
+              <button class="deploy-button" id="deployServer" type="button"><svg class="ic" aria-hidden="true"><use href="#i-server"/></svg>Настроить сервер</button>
+              <p class="field-help">Пароль нужен один раз для установки и не сохраняется.</p>
             </div>
             <p class="field-help" id="serverHint"></p>
           </section>
         </details>
 
         <div class="rail-bottom">
-          <div class="encoder"><span>ENC</span><b id="encoderLabel">проверка…</b><small id="streamHealth">поток запускается</small></div>
+          <div class="encoder"><span>Кодирует</span><b id="encoderLabel">проверка…</b><small id="streamHealth">поток запускается</small></div>
           <button class="quiet-button" id="showLogs"><svg class="ic" aria-hidden="true"><use href="#i-log"/></svg>Журнал</button>
         </div>
       </aside>
 
       <section class="studio">
-        <div class="monitor" id="monitor">
+        <div class="player" id="monitor">
           <video id="streamPreview" muted autoplay playsinline></video>
-          <img id="capturePreview" alt="Предпросмотр выбранного источника">
-          <div class="monitor-empty" id="monitorPlaceholder"><span id="monitorPlaceholderIcon"><svg class="ic" aria-hidden="true"><use href="#i-broadcast"/></svg></span><b id="monitorPlaceholderTitle">ИСТОЧНИК НЕ ВЫБРАН</b><small id="monitorPlaceholderText">Выберите медиа, окно, монитор или область</small></div>
-          <div class="monitor-top"><span><i></i> PROGRAM</span><label class="preview-sync" title="Показывать окно с задержкой, как у зрителей">СИНХРОННО <select id="previewDelay"><option value="0" selected>LIVE</option><option value="3">+3 С</option><option value="5">+5 С</option><option value="7">+7 С</option><option value="10">+10 С</option></select></label><button id="previewToggle" type="button" title="Выключить предпросмотр — освободит процессор"></button><span id="monitorBadge">OFFLINE</span></div>
-          <div class="safe-frame" aria-hidden="true"></div>
+          <img id="capturePreview" alt="Предпросмотр">
+          <div class="monitor-empty" id="monitorPlaceholder"><span id="monitorPlaceholderIcon"><svg class="ic" aria-hidden="true"><use href="#i-broadcast"/></svg></span><b id="monitorPlaceholderTitle">Ничего не выбрано</b><small id="monitorPlaceholderText">Выберите видео или экран</small></div>
+          <div class="player-badge"><i></i><span id="monitorBadge">Нет эфира</span></div>
+
+          <div class="player-ui" id="playerUi">
+            <input id="seekBar" class="scrub" type="range" min="0" max="1000" value="0" aria-label="Перемотка">
+            <div class="player-row">
+              <button id="previousTrack" title="Предыдущее"><svg class="ic" aria-hidden="true"><use href="#i-prev"/></svg></button>
+              <button class="play-button" id="togglePause" title="Пауза"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg></button>
+              <button id="nextTrack" title="Следующее"><svg class="ic" aria-hidden="true"><use href="#i-next"/></svg></button>
+              <div class="volume-pop">
+                <button id="previewMute" title="Звук предпросмотра"><svg class="ic" aria-hidden="true"><use href="#i-mute"/></svg></button>
+                <input id="previewVolume" type="range" min="0" max="100" value="0" aria-label="Громкость предпросмотра">
+              </div>
+              <span class="player-time"><b id="elapsedTime">0:00</b><i>/</i><span id="totalTime">0:00</span></span>
+              <span class="player-gap"></span>
+              <button class="chip-button" id="speedSelect" title="Скорость" data-value="1">1×</button>
+              <button class="chip-button" id="loopSelect" title="Повтор" data-value="once"><svg class="ic" aria-hidden="true"><use href="#i-repeat"/></svg></button>
+              <button id="previewToggle" title="Выключить картинку — разгрузит процессор"><svg class="ic" aria-hidden="true"><use href="#i-eye"/></svg></button>
+              <button id="playerSettings" title="Настройки"><svg class="ic" aria-hidden="true"><use href="#i-gear"/></svg></button>
+            </div>
+          </div>
+
+          <div class="player-menu" id="playerMenu" hidden>
+            <div class="menu-row" id="menuMediaQuality"><span>Качество</span><select id="mediaQuality"><option value="720p">720p</option><option value="1080p">1080p</option></select></div>
+            <div class="menu-row" id="menuMediaFps"><span>Плавность</span><select id="mediaFps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></div>
+            <div class="menu-row" id="menuScreenQuality" hidden><span>Качество</span><select id="quality"><option value="720p">720p</option><option value="1080p">1080p</option></select></div>
+            <div class="menu-row" id="menuScreenFps" hidden><span>Плавность</span><select id="fps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></div>
+            <div class="menu-row"><span>Показ с задержкой</span><select id="previewDelay"><option value="0" selected>Без задержки</option><option value="3">3 секунды</option><option value="5">5 секунд</option><option value="10">10 секунд</option></select></div>
+          </div>
         </div>
 
         <div class="now-row">
           <div class="now-cover" id="nowCover"><span><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg></span></div>
-          <div class="now-copy"><small>СЕЙЧАС В ЭФИРЕ</small><h1 id="nowTitle">Эфир не запущен</h1><p id="nowSource">Добавьте источник справа</p></div>
-          <div class="live-clock"><span id="elapsedTime">0:00</span><small id="totalTime">0:00</small></div>
-        </div>
-
-        <div class="transport" id="transport">
-          <div class="transport-buttons">
-            <button id="previousTrack" title="Предыдущий"><svg class="ic" aria-hidden="true"><use href="#i-prev"/></svg></button>
-            <button class="play-button" id="togglePause" title="Пауза или продолжить"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg></button>
-            <button id="nextTrack" title="Следующий"><svg class="ic" aria-hidden="true"><use href="#i-next"/></svg></button>
-          </div>
-          <input id="seekBar" type="range" min="0" max="1000" value="0" aria-label="Позиция трека">
-          <button class="chip-button" id="speedSelect" aria-label="Скорость" data-value="1">1×</button>
-          <button class="chip-button" id="loopSelect" aria-label="Режим повтора" data-value="once"><svg class="ic" aria-hidden="true"><use href="#i-repeat"/></svg></button>
-        </div>
-
-        <div class="actionbar">
+          <div class="now-copy"><small>В эфире</small><h1 id="nowTitle">Эфир не запущен</h1><p id="nowSource">Добавьте видео или выберите экран</p></div>
           <div class="action-buttons">
-            <button class="secondary" id="skipTrack" hidden>Следующий</button>
+            <button class="secondary" id="skipTrack" hidden>Следующее</button>
             <button class="go-live" id="goLive">Начать эфир</button>
             <button class="stop-live" id="stopLive" hidden>Остановить</button>
           </div>
@@ -134,82 +148,80 @@
       </section>
 
       <aside class="inspector">
-        <div class="inspector-head"><div><small>ПАНЕЛЬ</small><h2 id="panelTitle">Медиа-очередь</h2></div><span id="queueCount">0</span></div>
+        <div class="inspector-head"><h2 id="panelTitle">Плейлист</h2><span id="queueCount">0</span></div>
 
         <section id="queuePanel" class="panel-content">
           <form id="addForm" class="add-media">
-            <input id="mediaUrl" type="url" placeholder="Ссылка: YouTube, VK, Rutube, аниме-сайт, .m3u8/.mp4" required>
+            <input id="mediaUrl" type="url" placeholder="Ссылка на видео: YouTube, VK, Rutube, аниме-сайт" required>
             <button id="addButton" type="submit">Добавить</button>
           </form>
-          <button class="drop-button" id="pickLocal"><span><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg></span><div><b>Файлы с компьютера</b><small>Или перетащите их в окно</small></div></button>
-          <label class="volume-control" for="mediaVolume"><span><b>Громкость медиа</b><output id="mediaVolumeValue">100%</output></span><input id="mediaVolume" type="range" min="0" max="200" step="5" value="100"></label>
-          <div class="stream-preset"><div><b>Качество</b></div><div class="quality-row"><label>Разрешение<select id="mediaQuality"><option value="720p">720p</option><option value="1080p">1080p</option></select></label><label>Кадры<select id="mediaFps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></label></div></div>
+          <button class="drop-button" id="pickLocal"><span><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg></span><div><b>Файлы с компьютера</b><small>Или перетащите сюда</small></div></button>
+          <label class="volume-control" for="mediaVolume"><span><b>Громкость в эфире</b><output id="mediaVolumeValue">100%</output></span><input id="mediaVolume" type="range" min="0" max="200" step="5" value="100"></label>
           <div class="storage-box">
-            <div class="storage-head"><span><b>Хранилище</b></span><span id="cacheSize">0 МБ</span></div>
-            <label>Диск для кеша<select id="cacheRoot"></select></label>
+            <div class="storage-head"><span><b>Место на диске</b></span><span id="cacheSize">0 МБ</span></div>
+            <label>Где хранить видео<select id="cacheRoot"></select></label>
             <p class="field-help" id="cacheHint"></p>
-            <button id="clearCache" type="button">Очистить кеш</button>
+            <button id="clearCache" type="button">Удалить скачанное</button>
           </div>
           <div class="template-box">
-            <div class="template-head"><span><b>Шаблоны очереди</b></span><span id="templateCount">0</span></div>
-            <select id="templateSelect" aria-label="Сохранённый шаблон"><option value="">Новый шаблон…</option></select>
-            <input id="templateName" type="text" maxlength="80" placeholder="Например: Музыка для клуба">
+            <div class="template-head"><span><b>Наборы</b></span><span id="templateCount">0</span></div>
+            <select id="templateSelect" aria-label="Сохранённый набор"><option value="">Новый набор…</option></select>
+            <input id="templateName" type="text" maxlength="80" placeholder="Название набора">
             <div class="template-actions">
-              <button id="saveTemplate">Сохранить</button><button id="loadTemplate" disabled>Загрузить</button><button id="appendTemplate" disabled title="Добавить содержимое к текущей очереди"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg></button><button class="danger-mini" id="deleteTemplate" disabled title="Удалить шаблон"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
+              <button id="saveTemplate">Сохранить</button><button id="loadTemplate" disabled>Загрузить</button><button id="appendTemplate" disabled title="Добавить набор к текущему списку"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg></button><button class="danger-mini" id="deleteTemplate" disabled title="Удалить набор"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
             </div>
           </div>
-          <div class="queue-toolbar"><span>ОЧЕРЕДЬ</span><button id="clearQueue">Очистить</button></div>
-          <div class="queue-list" id="queueList"><div class="empty-state">Очередь пуста</div></div>
+          <div class="queue-toolbar"><span>Список</span><button id="clearQueue">Очистить</button></div>
+          <div class="queue-list" id="queueList"><div class="empty-state">Пока пусто</div></div>
         </section>
 
         <section id="screenPanel" class="panel-content" hidden>
-          <label>Что показываем<select id="captureMode">
-            <option value="monitor">Монитор</option><option value="window">Окно приложения</option><option value="region">Область</option><option value="desktop">Все мониторы</option>
+          <label>Показывать<select id="captureMode">
+            <option value="monitor">Монитор</option><option value="window">Окно программы</option><option value="region">Область</option><option value="desktop">Все мониторы</option>
           </select></label>
 
           <div id="monitorFields"><label>Монитор<select id="monitorSource"></select></label></div>
-          <div id="windowFields" hidden><label>Окно<select id="windowSource"></select></label></div>
+          <div id="windowFields" hidden><label>Какое окно<select id="windowSource"></select></label></div>
           <div id="regionFields" hidden>
-            <button class="select-region" id="selectRegion">Выделить область на всех экранах</button>
+            <button class="select-region" id="selectRegion">Выделить область мышью</button>
             <div class="coords"><label>X<input id="regionX" type="number"></label><label>Y<input id="regionY" type="number"></label><label>Ш<input id="regionWidth" type="number" min="64"></label><label>В<input id="regionHeight" type="number" min="64"></label></div>
           </div>
 
           <div class="source-check">
-            <button id="refreshPreview"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg><b>Проверить кадр</b></button>
-            <button id="highlightSource"><svg class="ic" aria-hidden="true"><use href="#i-target"/></svg><b>Найти источник</b></button>
+            <button id="refreshPreview"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg><b>Обновить кадр</b></button>
+            <button id="highlightSource"><svg class="ic" aria-hidden="true"><use href="#i-target"/></svg><b>Подсветить</b></button>
           </div>
-          <button class="apply-capture" id="applyCapture" hidden>Применить источник в эфире</button>
+          <button class="apply-capture" id="applyCapture" hidden>Показать это в эфире</button>
 
           <label>Звук<select id="audioMode">
-            <option value="process">Только выбранное приложение</option>
-            <option value="system">Устройство Windows по умолчанию</option>
-            <option value="output">Конкретный выход / монитор HDMI</option>
-            <option value="device">Микрофон или виртуальный вход</option>
+            <option value="process">Звук выбранного окна</option>
+            <option value="system">Всё, что слышно в Windows</option>
+            <option value="output">Отдельный выход звука</option>
+            <option value="device">Микрофон</option>
             <option value="none">Без звука</option>
           </select></label>
           <p class="field-help" id="audioHelp"></p>
           <div id="localVolumeFields" hidden>
-            <label>Слышать у себя<select id="localAppVolume">
+            <label>Громкость в наушниках<select id="localAppVolume">
               <option value="1">100%</option>
               <option value="0.35">35%</option>
               <option value="0.15">15%</option>
               <option value="0.05">5%</option>
             </select></label>
-            <p class="field-help">Приложение станет тише в наушниках. В эфире громкость не изменится.</p>
+            <p class="field-help">Тише только у вас. В эфире громкость прежняя.</p>
           </div>
-          <div id="audioOutputFields" hidden><label>Выход звука<select id="audioOutput"></select></label></div>
-          <div id="audioDeviceFields" hidden><label>Вход<select id="audioDevice"></select></label></div>
-          <label class="volume-control" for="captureVolume"><span><b>Громкость захвата</b><output id="captureVolumeValue">150%</output></span><input id="captureVolume" type="range" min="0" max="300" step="5" value="150"></label>
+          <div id="audioOutputFields" hidden><label>Какой выход<select id="audioOutput"></select></label></div>
+          <div id="audioDeviceFields" hidden><label>Какой микрофон<select id="audioDevice"></select></label></div>
+          <label class="volume-control" for="captureVolume"><span><b>Громкость в эфире</b><output id="captureVolumeValue">150%</output></span><input id="captureVolume" type="range" min="0" max="300" step="5" value="150"></label>
 
-          <div class="quality-row"><label>Качество<select id="quality"><option value="720p">720p</option><option value="1080p">1080p</option></select></label><label>Кадры<select id="fps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></label></div>
-          <button class="refresh-list" id="refreshSources">Обновить окна и устройства</button>
+          <button class="refresh-list" id="refreshSources">Обновить список окон</button>
         </section>
 
       </aside>
     </main>
   </div>
 
-  <dialog id="logDialog"><div class="dialog-head"><b>Журнал</b><button id="openLogFolder" title="Скопировать путь к файлам журнала">Файлы журнала</button><button id="closeLogs" title="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div><pre id="logs">Запуск…</pre><button class="shutdown" id="shutdownApp">Закрыть VRCast Bridge</button></dialog>
+  <dialog id="logDialog"><div class="dialog-head"><b>Журнал</b><button id="copyLogs" title="Скопировать весь журнал"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg>Скопировать</button><button id="openLogFolder" title="Скопировать путь к папке с журналом"><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg>Папка</button><button id="closeLogs" title="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div><pre id="logs">Запуск…</pre><button class="shutdown" id="shutdownApp">Закрыть программу</button></dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/vendor/hls.min.js?v=0.29.0"></script>
   <script type="module" src="/app.js?v=0.29.0"></script>

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.32.0';
+const APP_VERSION = '0.33.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
