@@ -239,3 +239,5 @@ option{background:var(--dusk);color:var(--text)}
 .tool-progress{position:relative;display:inline-flex;align-items:center;min-width:250px;height:24px;padding:0;overflow:hidden}
 .tool-progress i{position:absolute;left:0;top:0;bottom:0;background:rgba(122,120,207,.30);transition:width .3s var(--ease)}
 .tool-progress span{position:relative;padding:0 12px;white-space:nowrap}
+/* display:inline-flex перебивал атрибут hidden — пустая плашка висела в шапке */
+.tool-progress[hidden]{display:none}

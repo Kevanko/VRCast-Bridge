@@ -96,8 +96,15 @@ function previewAllowed() {
 function stopPreview() {
   ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl='';
   const video=$('#streamPreview');
-  video.pause(); video.removeAttribute('src'); video.load?.();
-  $('#monitor').classList.remove('previewing');
+  video.pause(); video.srcObject=null; video.removeAttribute('src'); video.load?.();
+  // Кадр захвата — отдельная картинка: без этого при выключении оставался экран.
+  const снимок=$('#capturePreview');
+  snapshotClear(снимок);
+  $('#monitor').classList.remove('previewing','source-preview');
+}
+
+function snapshotClear(image){
+  image.removeAttribute('src');
 }
 
 function paintPreviewToggle() {
@@ -112,7 +119,7 @@ function startPreview(state) {
   const video=$('#streamPreview'), monitor=$('#monitor');
   if (!previewAllowed()) {
     if (ui.hls||ui.previewUrl) stopPreview();
-    if (state.running && ui.previewOn===false) monitorPlaceholder('ПРЕДПРОСМОТР ВЫКЛЮЧЕН','Эфир идёт, окно не декодирует видео','eye-off');
+    if (state.running && ui.previewOn===false) monitorPlaceholder('Картинка выключена','Эфир идёт, окно не тратит процессор','eye-off');
     return;
   }
   if (!state.running) {
@@ -120,12 +127,14 @@ function startPreview(state) {
   }
   const delay=Math.max(0,Number(state.config.previewDelay)||0);
   const previewSource=(state.localPlaybackUrl||state.playbackUrl).replace(/live\.m3u8(?:\?.*)?$/,'preview.m3u8');
-  const previewKey=`${previewSource}|${delay}`;
-  if (ui.previewUrl===previewKey && ui.hls) return;
-  ui.hls?.destroy(); ui.previewUrl=previewKey;
-  // Сначала пробуем WebRTC: он отдаёт живой кадр почти без задержки.
-  if (state.webrtcUrl && !ui.webrtcFailed) {
-    startWebrtcPreview(state.webrtcUrl, video, monitor);
+  const черезWebrtc=Boolean(state.webrtcUrl)&&!ui.webrtcFailed;
+  const previewKey=`${черезWebrtc?'rtc':'hls'}|${previewSource}|${delay}`;
+  // Ключ включает способ показа: без этого связь WebRTC пересоздавалась на
+  // каждом обновлении состояния, и картинка дёргалась.
+  if (ui.previewUrl===previewKey && (ui.hls||ui.rtc)) return;
+  ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl=previewKey;
+  if (черезWebrtc) {
+    startWebrtcPreview(state.webrtcUrl, video, monitor, previewKey);
     return;
   }
   if (window.Hls?.isSupported()) {
@@ -320,7 +329,7 @@ function selectedRect() {
   if(mode==='desktop'&&ui.sources.monitors.length){const left=Math.min(...ui.sources.monitors.map(x=>x.x)),top=Math.min(...ui.sources.monitors.map(x=>x.y)),right=Math.max(...ui.sources.monitors.map(x=>x.x+x.width)),bottom=Math.max(...ui.sources.monitors.map(x=>x.y+x.height));return{x:left,y:top,width:right-left,height:bottom-top};} return null;
 }
 async function refreshCapturePreview(save = true) {
-  if (ui.source!=='screen'||ui.previewBusy||ui.status?.running) return; ui.previewBusy=true;
+  if (ui.source!=='screen'||ui.previewBusy||ui.status?.running||!previewAllowed()) return; ui.previewBusy=true;
   try {
     if(save)await saveConfig(); const result=await api('/api/capture-preview',{method:'POST'}); const monitor=$('#monitor');
     monitor.classList.toggle('window-paused',Boolean(result.minimized||result.unavailable));
@@ -412,7 +421,7 @@ $('#previewToggle').addEventListener('click',()=>{
   localStorage.setItem('previewOn',ui.previewOn?'1':'0');
   paintPreviewToggle();
   if (ui.previewOn) { if (ui.status) startPreview(ui.status); }
-  else { stopPreview(); if (ui.status?.running) monitorPlaceholder('ПРЕДПРОСМОТР ВЫКЛЮЧЕН','Эфир идёт, окно не декодирует видео','eye-off'); }
+  else { stopPreview(); if (ui.status?.running) monitorPlaceholder('Картинка выключена','Эфир идёт, окно не тратит процессор','eye-off'); }
   toast(ui.previewOn?'Предпросмотр включён':'Предпросмотр выключен — процессор свободнее');
 });
 // Свёрнутое окно программы не должно ничего декодировать.
@@ -572,7 +581,7 @@ $('#updateNow').addEventListener('click',async()=>{
 
 // WHEP: браузер отправляет предложение, медиасервер отвечает — и картинка идёт
 // напрямую, без нарезки на куски. Не получилось — откатываемся на HLS.
-async function startWebrtcPreview(url, video, monitor){
+async function startWebrtcPreview(url, video, monitor, key){
   try{
     ui.rtc?.close();
     const rtc=new RTCPeerConnection({iceServers:[]});
@@ -591,8 +600,8 @@ async function startWebrtcPreview(url, video, monitor){
     await rtc.setLocalDescription(offer);
     const ответ=await fetch(url,{method:'POST',headers:{'Content-Type':'application/sdp'},body:offer.sdp});
     if(!ответ.ok)throw new Error(`медиасервер ответил ${ответ.status}`);
+    if(!previewAllowed()||ui.previewUrl!==key){ rtc.close(); if(ui.rtc===rtc)ui.rtc=null; return; }
     await rtc.setRemoteDescription({type:'answer',sdp:await ответ.text()});
-    ui.previewUrl=`webrtc|${url}`;
   }catch(error){
     ui.rtc?.close(); ui.rtc=null; ui.webrtcFailed=true; ui.previewUrl='';
     console.warn('WebRTC-предпросмотр недоступен, перехожу на HLS:',error.message);
