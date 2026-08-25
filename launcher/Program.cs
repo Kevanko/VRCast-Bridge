@@ -11,7 +11,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.37.0";
+    private const string AppVersion = "0.37.1";
 
     [STAThread]
     private static void Main(string[] args)
@@ -134,11 +134,29 @@ internal static class Program
                 WorkingDirectory = runtimeDirectory,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
+                WindowStyle = ProcessWindowStyle.Hidden,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true
             };
             // Путь к своему EXE нужен серверу, чтобы поставить обновление.
             startInfo.EnvironmentVariables["VRCAST_EXE"] = Environment.ProcessPath ?? Application.ExecutablePath;
             server = Process.Start(startInfo);
+            // Вывод сервера пишем в файл: если он не поднимется, причина видна,
+            // а не теряется вместе с невидимым окном консоли.
+            if (server is not null)
+            {
+                var logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "launcher.log");
+                try { Directory.CreateDirectory(Path.GetDirectoryName(logPath)!); File.WriteAllText(logPath, string.Empty); } catch { }
+                void Save(string? line)
+                {
+                    if (line is null) return;
+                    try { File.AppendAllText(logPath, line + Environment.NewLine); } catch { }
+                }
+                server.OutputDataReceived += (_, args) => Save(args.Data);
+                server.ErrorDataReceived += (_, args) => Save(args.Data);
+                server.BeginOutputReadLine();
+                server.BeginErrorReadLine();
+            }
         }
         catch (Exception error)
         {
@@ -146,14 +164,21 @@ internal static class Program
             return null;
         }
 
-        for (var attempt = 0; attempt < 100; attempt++)
+        for (var attempt = 0; attempt < 900; attempt++)
         {
             if (await IsReady()) return server;
             if (server?.HasExited == true) break;
             await Task.Delay(120);
         }
 
-        ShowError("Сервер не запустился. Проверьте, что FFmpeg и yt-dlp доступны в PATH.");
+        var tail = string.Empty;
+        try
+        {
+            var logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "launcher.log");
+            if (File.Exists(logPath)) tail = string.Join(Environment.NewLine, File.ReadAllLines(logPath).TakeLast(6));
+        }
+        catch { }
+        ShowError("Сервер не запустился." + (tail.Length > 0 ? Environment.NewLine + Environment.NewLine + tail : Environment.NewLine + Environment.NewLine + "Проверьте интернет: при первом запуске догружаются компоненты."));
         return null;
     }
 
@@ -452,13 +477,46 @@ internal sealed class MainWindow : Form
                     BeginInvoke(Close);
                 }
             };
-            _webView.Source = new Uri(Program.AppUrl);
+            // На первом запуске программа докачивает Node и кодировщик — это минуты.
+            // Раньше окно сразу шло на адрес сервера и показывало «не удалось открыть
+            // страницу». Теперь показываем заставку и повторяем, пока сервер не ответит.
+            _webView.CoreWebView2.NavigationCompleted += (_, args) =>
+            {
+                if (args.IsSuccess || _closing) return;
+                BeginInvoke(async () =>
+                {
+                    ShowSplash();
+                    await Task.Delay(1500);
+                    if (!_closing) _webView.CoreWebView2.Navigate(Program.AppUrl);
+                });
+            };
+            ShowSplash();
+            _webView.CoreWebView2.Navigate(Program.AppUrl);
         }
         catch (Exception error)
         {
             Program.ShowError($"Не удалось открыть окно программы:\n{error.Message}\n\nУбедитесь, что Microsoft Edge WebView2 Runtime установлен.");
             Close();
         }
+    }
+
+    private void ShowSplash()
+    {
+        try
+        {
+            _webView.CoreWebView2?.NavigateToString(
+                "<!doctype html><meta charset=\"utf-8\">" +
+                "<style>html,body{height:100%;margin:0;display:grid;place-items:center;background:#0d1017;" +
+                "color:#8a91a6;font:14px 'Segoe UI',system-ui,sans-serif}" +
+                "div{display:grid;gap:10px;justify-items:center}" +
+                "b{color:#e3e6ef;font-size:15px;font-weight:600}" +
+                "i{width:26px;height:26px;border:2px solid #2a3145;border-top-color:#7a78cf;border-radius:50%;" +
+                "animation:spin 1s linear infinite}" +
+                "@keyframes spin{to{transform:rotate(360deg)}}</style>" +
+                "<div><i></i><b>VRCast Bridge готовится к работе</b>" +
+                "<span>Первый запуск: догружаются недостающие компоненты.</span></div>");
+        }
+        catch { }
     }
 
     private async void PickMediaFiles()
