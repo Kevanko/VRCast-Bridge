@@ -8,14 +8,18 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.40.0';
+const APP_VERSION = '0.40.1';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
 let freeDiskMb = null;
+let totalDiskMb = null;
 function watchFreeSpace() {
-  const measure = () => statfs(DATA_DIR)
-    .then(info => { freeDiskMb = Math.round(info.bsize * info.bavail / 1048576); })
+  const measure = () => statfs(mediaCacheDir())
+    .then(info => {
+      freeDiskMb = Math.round(info.bsize * info.bavail / 1048576);
+      totalDiskMb = Math.round(info.bsize * info.blocks / 1048576);
+    })
     .catch(() => {});
   measure();
   setInterval(measure, 30000).unref();
@@ -76,6 +80,7 @@ const defaults = {
   captureVolume: 1.5, mediaVolume: 1, mediaQuality: '720p', mediaFps: 60, previewDelay: 0, localAppVolume: 1, rtspTransport: 'tcp',
   cacheRoot: '',
   videoBitrate: 0,
+  cacheLimitGb: 0,
 };
 
 function loadConfig() {
@@ -1020,12 +1025,13 @@ function status() {
   const runningElapsed = currentStartedAt ? Math.max(0, (Date.now() - currentStartedAt) / 1000) * speed : 0;
   const elapsed = queuePaused ? pausedPosition : sourcePosition + runningElapsed;
   return {
-    appVersion: APP_VERSION, tools, toolDownloads, disk: { freeMb: freeDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(),
+    appVersion: APP_VERSION, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(),
     progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
     cache: { ready: cachedReadyCount(), total: queue.length, downloading: [...mediaCacheJobs.keys()],
-      root: config.cacheRoot || '', path: mediaCacheDir(), drives: storageInfo.drives, sizeMb: storageInfo.sizeMb },
+      root: config.cacheRoot || '', path: mediaCacheDir(), drives: storageInfo.drives, sizeMb: storageInfo.sizeMb,
+      limitGb: Number(config.cacheLimitGb) || 0 },
     audio: { levelDb: audioLevelDb, silent: audioLevelDb < -70 },
     performance: { encoder: encoder.label, hardware: encoder.hardware, continuousQueue: true, outputProfile: relayProfile,
       streamClock: Number(streamTimestamp().toFixed(3)),
@@ -1908,6 +1914,9 @@ async function cachedMedia(item, filePath) {
 // На тесном диске кеш ужимается: иначе он доедает остаток места, а без места
 // ffmpeg не может дописывать сегменты и эфир встаёт рывками.
 function mediaCacheLimit() {
+  const заданный = Number(config.cacheLimitGb) || 0;
+  if (заданный > 0) return заданный * 1024 * 1024 * 1024;
+  // На тесном диске кеш ужимается сам, иначе он доедает остаток места.
   return freeDiskMb !== null && freeDiskMb < 4000 ? 1024 * 1024 * 1024 : 4 * 1024 * 1024 * 1024;
 }
 
@@ -2921,6 +2930,7 @@ const server = http.createServer(async (req, res) => {
         outputMode: ['local', 'tunnel', 'remote'].includes(body.outputMode) ? body.outputMode : 'local',
         cacheRoot: typeof body.cacheRoot === 'string' ? body.cacheRoot.trim().slice(0, 300) : config.cacheRoot,
         videoBitrate: Math.max(0, Math.min(20000, Number(body.videoBitrate ?? config.videoBitrate ?? 0) || 0)),
+        cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')), quality: body.quality === '1080p' ? '1080p' : '720p', fps: body.fps === 60 ? 60 : 30,
         captureMode: ['desktop', 'monitor', 'window', 'region'].includes(body.captureMode) ? body.captureMode : 'monitor',
