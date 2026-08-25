@@ -235,3 +235,7 @@ option{background:var(--dusk);color:var(--text)}
 .player.capture .scrub,.player.capture #previousTrack,.player.capture #nextTrack,
 .player.capture #togglePause,.player.capture .player-time,
 .player.capture #speedSelect,.player.capture #loopSelect{display:none}
+/* Полоса загрузки компонентов */
+.tool-progress{position:relative;display:inline-flex;align-items:center;min-width:250px;height:24px;padding:0;overflow:hidden}
+.tool-progress i{position:absolute;left:0;top:0;bottom:0;background:rgba(122,120,207,.30);transition:width .3s var(--ease)}
+.tool-progress span{position:relative;padding:0 12px;white-space:nowrap}

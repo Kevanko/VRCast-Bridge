@@ -11,13 +11,20 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.38.0";
+    private const string AppVersion = "0.39.0";
 
     [STAThread]
     private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
         var noWindow = args.Any(arg => arg.Equals("--no-browser", StringComparison.OrdinalIgnoreCase));
+        // Пока программа не установлена, файл работает установщиком: спрашивает
+        // папку и ярлык, ставит себя туда и запускает уже оттуда.
+        if (!noWindow && !IsInstalled() && !args.Any(arg => arg.Equals("--run", StringComparison.OrdinalIgnoreCase)))
+        {
+            Application.Run(new SetupWindow());
+            return;
+        }
         // Если уже запущена ДРУГАЯ версия, новый запуск её закрывает и продолжает:
         // иначе после обновления снова открывалось старое окно, и выглядело это
         // так, будто обновление не сработало.
@@ -44,7 +51,7 @@ internal static class Program
             }
             if (!firstInstance)
             {
-                ShowError("VRCast Bridge уже запущен. Закройте открытое окно и запустите снова.");
+                FocusRunningWindow();
                 singleInstance.Dispose();
                 return;
             }
@@ -63,7 +70,13 @@ internal static class Program
         using var boot = noWindow ? null : new BootWindow();
         boot?.Show();
         Application.DoEvents();
-        var server = EnsureServer(runtimeDirectory).GetAwaiter().GetResult();
+        var подготовка = Task.Run(() => EnsureServer(runtimeDirectory));
+        while (!подготовка.IsCompleted)
+        {
+            Application.DoEvents();
+            Thread.Sleep(40);
+        }
+        var server = подготовка.GetAwaiter().GetResult();
         boot?.Hide();
         if (server is null && !IsReady().GetAwaiter().GetResult()) return;
         if (noWindow) return;
@@ -98,15 +111,16 @@ internal static class Program
             var destination = Path.Combine(runtimeDirectory, resource.Value);
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
             var input = assembly.GetManifestResourceStream(resource.Key);
-            // Pinggy собирается не всегда: его отсутствие не должно ломать запуск.
+            // Сторонние утилиты внутрь могут не попасть — они докачиваются.
+            // Обязательны только файлы самой программы.
             if (input is null)
             {
-                if (resource.Key.Contains("Pinggy")) continue;
+                if (resource.Value.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
                 throw new InvalidOperationException($"Не найден встроенный компонент {resource.Key}");
             }
-            using var _ = input;
+            using var payloadStream = input;
             using var memory = new MemoryStream();
-            input.CopyTo(memory);
+            payloadStream.CopyTo(memory);
             var payload = memory.ToArray();
             if (File.Exists(destination) && File.ReadAllBytes(destination).AsSpan().SequenceEqual(payload)) continue;
             File.WriteAllBytes(destination, payload);
@@ -131,6 +145,35 @@ internal static class Program
             }
         }
         catch { }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr window, int command);
+
+    private static void FocusRunningWindow()
+    {
+        try
+        {
+            var mine = Environment.ProcessId;
+            foreach (var process in Process.GetProcessesByName("VRCast Bridge"))
+            {
+                if (process.Id == mine || process.MainWindowHandle == IntPtr.Zero) continue;
+                ShowWindow(process.MainWindowHandle, 9); // SW_RESTORE
+                SetForegroundWindow(process.MainWindowHandle);
+                return;
+            }
+        }
+        catch { }
+    }
+
+    internal const string InstalledMarker = "vrcast.installed";
+
+    internal static bool IsInstalled()
+    {
+        var folder = Path.GetDirectoryName(Environment.ProcessPath ?? Application.ExecutablePath);
+        return folder is not null && File.Exists(Path.Combine(folder, InstalledMarker));
     }
 
     internal static Action<string>? BootStatus;
@@ -404,6 +447,94 @@ internal sealed class ChildProcessJob : IDisposable
         public JobObjectBasicLimitInformation BasicLimitInformation;
         public IoCounters IoInfo;
         public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+}
+
+// Установщик: куда положить программу и делать ли ярлык.
+internal sealed class SetupWindow : Form
+{
+    private readonly TextBox _folder = new() { Left = 20, Top = 76, Width = 380, Height = 26 };
+    private readonly Button _browse = new() { Left = 408, Top = 75, Width = 92, Height = 28, Text = "Обзор…" };
+    private readonly CheckBox _desktop = new() { Left = 20, Top = 118, Width = 480, Text = "Создать ярлык на рабочем столе", Checked = true };
+    private readonly CheckBox _menu = new() { Left = 20, Top = 144, Width = 480, Text = "Добавить в меню «Пуск»", Checked = true };
+    private readonly Button _install = new() { Left = 380, Top = 216, Width = 120, Height = 34, Text = "Установить" };
+    private readonly Label _status = new() { Left = 20, Top = 186, Width = 480, Height = 20, Text = "Программа займёт около 60 МБ." };
+    private readonly ProgressBar _bar = new() { Left = 20, Top = 208, Width = 340, Height = 12, Visible = false };
+
+    internal SetupWindow()
+    {
+        Text = "Установка VRCast Bridge";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        ClientSize = new Size(520, 270);
+        BackColor = Color.FromArgb(13, 16, 23);
+        ForeColor = Color.FromArgb(227, 230, 239);
+        Font = new Font("Segoe UI", 9F);
+        Icon = MainWindow.LoadAppIcon();
+
+        Controls.Add(new Label { Left = 20, Top = 20, Width = 480, Height = 24, Font = new Font("Segoe UI", 12F, FontStyle.Bold), Text = "VRCast Bridge" });
+        Controls.Add(new Label { Left = 20, Top = 50, Width = 480, Text = "Куда установить:" });
+        _folder.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "VRCast Bridge");
+        Controls.AddRange(new Control[] { _folder, _browse, _desktop, _menu, _status, _bar, _install });
+
+        _browse.Click += (_, _) =>
+        {
+            using var dialog = new FolderBrowserDialog { SelectedPath = _folder.Text };
+            if (dialog.ShowDialog(this) == DialogResult.OK) _folder.Text = Path.Combine(dialog.SelectedPath, "VRCast Bridge");
+        };
+        AcceptButton = _install;
+        _install.Click += async (_, _) => await InstallAsync();
+    }
+
+    private async Task InstallAsync()
+    {
+        _install.Enabled = false; _browse.Enabled = false; _folder.Enabled = false;
+        _bar.Visible = true; _bar.Style = ProgressBarStyle.Marquee;
+        _status.Text = "Копирую программу…";
+        try
+        {
+            var target = _folder.Text.Trim();
+            Directory.CreateDirectory(target);
+            var source = Environment.ProcessPath ?? Application.ExecutablePath;
+            var destination = Path.Combine(target, "VRCast Bridge.exe");
+            if (!string.Equals(source, destination, StringComparison.OrdinalIgnoreCase))
+                await Task.Run(() => File.Copy(source, destination, true));
+            await File.WriteAllTextAsync(Path.Combine(target, Program.InstalledMarker), DateTime.Now.ToString("s"));
+
+            if (_desktop.Checked) MakeShortcut(destination, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "VRCast Bridge.lnk"));
+            if (_menu.Checked) MakeShortcut(destination, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "VRCast Bridge.lnk"));
+
+            _status.Text = "Готово. Запускаю…";
+            Process.Start(new ProcessStartInfo(destination) { WorkingDirectory = target, UseShellExecute = true });
+            await Task.Delay(600);
+            Close();
+        }
+        catch (Exception error)
+        {
+            _bar.Visible = false;
+            _status.Text = $"Не удалось установить: {error.Message}";
+            _install.Enabled = true; _browse.Enabled = true; _folder.Enabled = true;
+        }
+    }
+
+    // Ярлык делаем через WScript.Shell: своих библиотек для этого не нужно.
+    private static void MakeShortcut(string target, string linkPath)
+    {
+        try
+        {
+            var script = $"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{linkPath}');" +
+                         $"$s.TargetPath='{target}';$s.WorkingDirectory='{Path.GetDirectoryName(target)}';$s.Save()";
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -NonInteractive -Command \"{script}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            process?.WaitForExit(15000);
+        }
+        catch { }
     }
 }
 
