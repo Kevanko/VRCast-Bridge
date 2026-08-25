@@ -1048,13 +1048,32 @@ function streamTimestamp() {
 let producerClock = null;
 function nextProducerTimestamp() {
   const base = streamTimestamp();
-  if (!producerClock) return base;
-  const previousNow = producerClock.startTs + (Date.now() - producerClock.startWall) / 1000;
-  // Уходящий производитель успевает выбросить кадры чуть вперёд своей
-  // номинальной позиции — запас это покрывает. На задержку он не влияет:
-  // замеры «нажал → увидел» с ним и без него совпадают, а шкала сдвигается
-  // ровно на уже отданный в эфир материал, без дырок в потоке.
-  return Math.max(base, previousNow + 0.15);
+  const previousNow = producerClock
+    ? producerClock.startTs + (Date.now() - producerClock.startWall) / 1000
+    : 0;
+  // Раньше точка стыка угадывалась по настенным часам с запасом 0,15 с. Уходящий
+  // ffmpeg успевает выбросить в эфир до секунды вперёд, и следующий ролик
+  // начинался ЗА уже отданными кадрами: плеер отматывался назад, показывал
+  // старое и мигал. Теперь берём фактические часы потока — PCR последнего
+  // отданного пакета — и продолжаем строго после них.
+  return Math.max(base, previousNow, lastRelayPcr + 0.05);
+}
+
+// PCR — часы транспортного потока, лежат прямо в заголовке пакета. Читаем их
+// на лету у всего, что уходит в релей: 188 байт на пакет, поиск по флагу.
+let lastRelayPcr = 0;
+
+function trackRelayClock(chunk) {
+  for (let offset = 0; offset + 188 <= chunk.length; offset += 188) {
+    if (chunk[offset] !== 0x47) continue;                    // не начало пакета
+    if ((chunk[offset + 3] & 0x20) === 0) continue;          // нет поля адаптации
+    if (chunk[offset + 4] === 0) continue;                   // поле пустое
+    if ((chunk[offset + 5] & 0x10) === 0) continue;          // нет PCR
+    const base = chunk[offset + 6] * 33554432 + chunk[offset + 7] * 131072
+      + chunk[offset + 8] * 512 + chunk[offset + 9] * 2 + (chunk[offset + 10] >> 7);
+    const seconds = base / 90000;
+    if (seconds > lastRelayPcr) lastRelayPcr = seconds;
+  }
 }
 
 function markProducerTimestamp(timestamp) {
@@ -1067,7 +1086,12 @@ function markProducerTimestamp(timestamp) {
 // а мягкое завершение через «q» создавало наложение двух писателей в релей.
 function stopProducer(child) {
   if (!child) return;
+  // Хвост уходящего процесса не должен попасть в эфир после того, как начал
+  // писать следующий: его пакеты со старым временем отматывали плеер назад.
+  // Поэтому сначала полностью отцепляем вывод, и только потом гасим процесс.
   child.stdout?.unpipe();
+  child.stdout?.removeAllListeners('data');
+  child.stdout?.resume();
   try { child.kill('SIGTERM'); } catch {}
 }
 
@@ -1382,6 +1406,7 @@ function pipeToRelay(child) {
   relayProcess.stdin.on('error', () => {});
   child.stdout.pipe(relayProcess.stdin, { end: false });
   child.stdout.on('data', chunk => {
+    trackRelayClock(chunk);
     for (const pusher of rtspPushProcesses.values()) {
       const sink = pusher.stdin;
       // Медленный получатель (свой сервер на слабом канале) не должен копить
@@ -1530,6 +1555,7 @@ function ensureRelay(profile = streamProfile()) {
   if (!relayProcess) {
     cleanHls();
     producerClock = null;
+    lastRelayPcr = 0;
     relayStartedAt = Date.now();
     try { startRelay(profile); }
     catch (error) { relayStartedAt = 0; relayProfile = null; throw error; }
