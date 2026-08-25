@@ -2,13 +2,13 @@ import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
-import { basename, extname, join, normalize, resolve } from 'node:path';
+import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.35.1';
+const APP_VERSION = '0.36.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -164,6 +164,8 @@ function saveUnityBuildState() {
 // обновляем её сами, а системную используем только как запасной вариант.
 function ytdlpPath() {
   if (existsSync(YTDLP_UPDATED)) return YTDLP_UPDATED;
+  const own = join(DATA_DIR, 'tools', 'yt-dlp.exe');
+  if (existsSync(own)) return own;
   if (existsSync(YTDLP_BUNDLED)) return YTDLP_BUNDLED;
   return 'yt-dlp';
 }
@@ -213,22 +215,42 @@ function encoderWorks(name) {
   return !result.error && result.status === 0;
 }
 
-const CLOUDFLARED = join(ROOT, 'tools', 'cloudflared.exe');
-const PINGGY = join(ROOT, 'tools', 'pinggy.exe');
-const MEDIAMTX = join(ROOT, 'tools', 'mediamtx.exe');
-const PLINK = join(ROOT, 'tools', 'plink.exe');
+// Тяжёлые сторонние утилиты больше не лежат внутри программы: EXE весил из-за
+// них 200 МБ. Теперь они докачиваются при первом запуске в папку данных, и
+// туда же кладётся ffmpeg, если его нет в системе.
+const TOOL_DIR = join(DATA_DIR, 'tools');
+const TOOL_SOURCES = {
+  'yt-dlp.exe': { label: 'загрузчик видео', url: 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' },
+  'cloudflared.exe': { label: 'публичные ссылки', url: 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' },
+  'mediamtx.exe': { label: 'мгновенный канал', github: 'bluenviron/mediamtx', asset: /windows_amd64\.zip$/i, unpack: ['mediamtx.exe'] },
+  'ffmpeg.exe': { label: 'кодировщик', url: 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip', unpack: ['ffmpeg.exe', 'ffprobe.exe'] },
+};
+let toolDownloads = {};
+
+function toolPath(name) {
+  const own = join(TOOL_DIR, name);
+  if (existsSync(own)) return own;
+  const bundled = join(ROOT, 'tools', name);
+  if (existsSync(bundled)) return bundled;
+  return '';
+}
+
+const CLOUDFLARED = () => toolPath('cloudflared.exe');
+const PINGGY = () => toolPath('pinggy.exe');
+const MEDIAMTX = () => toolPath('mediamtx.exe');
+const PLINK = () => toolPath('plink.exe');
 const YTDLP_BUNDLED = join(ROOT, 'tools', 'yt-dlp.exe');
 // Обновлённая копия живёт в данных приложения: она переживает обновление
 // программы и не затирается распаковкой встроенных компонентов.
 const YTDLP_UPDATED = join(DATA_DIR, 'tools', 'yt-dlp.exe');
 const SERVER_RTSP_PORT = 8554;
 const PINGGY_DATA_DIR = join(DATA_DIR, 'pinggy-runtime');
-const tools = {
+let tools = {
   ffmpeg: toolAvailable('ffmpeg', ['-version']), ytdlp: toolAvailable(ytdlpPath()),
-  cloudflared: existsSync(CLOUDFLARED) && toolAvailable(CLOUDFLARED),
-  pinggy: existsSync(PINGGY) && toolAvailable(PINGGY),
-  mediamtx: existsSync(MEDIAMTX),
-  plink: existsSync(PLINK),
+  cloudflared: Boolean(CLOUDFLARED()) && toolAvailable(CLOUDFLARED()),
+  pinggy: Boolean(PINGGY()) && toolAvailable(PINGGY()),
+  mediamtx: Boolean(MEDIAMTX()),
+  plink: Boolean(PLINK()),
 };
 const encoder = encoderWorks('h264_nvenc')
   ? { name: 'h264_nvenc', label: 'NVIDIA NVENC', hardware: true }
@@ -243,7 +265,7 @@ function pinggyEnvironment() {
 function stopPinggyDaemon() {
   if (!tools.pinggy || !pinggyStarted) return;
   pinggyStarted = false;
-  const stopper = spawn(PINGGY, ['daemon', 'stop'], { windowsHide: true, stdio: 'ignore', env: pinggyEnvironment() });
+  const stopper = spawn(PINGGY(), ['daemon', 'stop'], { windowsHide: true, stdio: 'ignore', env: pinggyEnvironment() });
   stopper.on('error', () => {});
   const escaped = PINGGY.replace(/'/g, "''");
   spawnCollect('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
@@ -435,7 +457,7 @@ function trackTunnelChild(child, provider) {
 }
 
 function startCloudflareCandidate() {
-  const child = trackTunnelChild(spawn(CLOUDFLARED, ['tunnel', '--no-autoupdate', '--protocol', 'http2', '--url', `http://127.0.0.1:${PORT}`], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }), 'Cloudflare');
+  const child = trackTunnelChild(spawn(CLOUDFLARED(), ['tunnel', '--no-autoupdate', '--protocol', 'http2', '--url', `http://127.0.0.1:${PORT}`], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }), 'Cloudflare');
   let pending = '', candidateUrl = '', announced = false;
   const inspect = chunk => {
     pending = (pending + String(chunk)).slice(-16000);
@@ -450,7 +472,7 @@ function startCloudflareCandidate() {
 
 function startPinggyCandidate() {
   pinggyStarted = true;
-  const child = trackTunnelChild(spawn(PINGGY, ['--noTui', '-l', `http://127.0.0.1:${PORT}`], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: pinggyEnvironment() }), 'Pinggy');
+  const child = trackTunnelChild(spawn(PINGGY(), ['--noTui', '-l', `http://127.0.0.1:${PORT}`], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: pinggyEnvironment() }), 'Pinggy');
   let pending = '';
   const inspect = chunk => {
     pending = (pending + String(chunk)).slice(-16000);
@@ -601,7 +623,7 @@ function sshArgs(server, passwordFile) {
 // Первое подключение: узнаём отпечаток ключа хоста, ничего не выполняя.
 function sshDiscoverHostKey(server) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(PLINK, ['-ssh', '-P', String(server.sshPort || 22), '-l', String(server.user || 'root'),
+    const child = spawn(PLINK(), ['-ssh', '-P', String(server.sshPort || 22), '-l', String(server.user || 'root'),
       server.host, 'exit'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     const timer = setTimeout(() => { child.kill(); reject(new Error('Сервер не отвечает по SSH.')); }, 25000);
@@ -626,7 +648,7 @@ function sshRun(server, password, script, timeout = 180000) {
     try { writeFileSync(passwordFile, `${password}\n`, { encoding: 'utf8', mode: 0o600 }); }
     catch (error) { return reject(error); }
     const cleanup = () => { try { rmSync(passwordFile, { force: true }); } catch {} };
-    const child = spawn(PLINK, sshArgs(server, passwordFile), { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(PLINK(), sshArgs(server, passwordFile), { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     const timer = setTimeout(() => child.kill(), timeout);
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
@@ -812,6 +834,119 @@ function versionIsNewer(candidate, current) {
   return false;
 }
 
+
+// Докачка недостающих компонентов. Идёт в фоне и по одному, чтобы не забивать
+// канал: программа тем временем уже открыта и показывает, чего ждёт.
+async function downloadTool(name) {
+  const source = TOOL_SOURCES[name];
+  if (!source || toolDownloads[name]?.state === 'work') return;
+  mkdirSync(TOOL_DIR, { recursive: true });
+  toolDownloads = { ...toolDownloads, [name]: { state: 'work', percent: 0, label: source.label } };
+  try {
+    let url = source.url;
+    if (source.github) {
+      const release = await fetch(`https://api.github.com/repos/${source.github}/releases/latest`,
+        { headers: { 'User-Agent': 'VRCast-Bridge' }, signal: AbortSignal.timeout(20000) }).then(r => r.json());
+      url = (release.assets || []).find(item => source.asset.test(item.name))?.browser_download_url;
+      if (!url) throw new Error('нет подходящего файла в релизе');
+    }
+    log(`Догружаю компонент: ${source.label}`);
+    const response = await fetch(url, { headers: { 'User-Agent': 'VRCast-Bridge' }, signal: AbortSignal.timeout(600000) });
+    if (!response.ok) throw new Error(`сервер ответил ${response.status}`);
+    const total = Number(response.headers.get('content-length')) || 0;
+    const temporary = join(TOOL_DIR, `${name}.part`);
+    const chunks = [];
+    let received = 0;
+    for await (const chunk of response.body) {
+      chunks.push(chunk);
+      received += chunk.length;
+      if (total) toolDownloads = { ...toolDownloads, [name]: { state: 'work', percent: Math.round(received / total * 100), label: source.label } };
+    }
+    writeFileSync(temporary, Buffer.concat(chunks));
+    if (source.unpack) {
+      // В Windows есть встроенный tar, он же распаковывает zip — свои
+      // распаковщики и лишние зависимости для этого не нужны.
+      const unpackDir = join(TOOL_DIR, `${name}-unpack`);
+      rmSync(unpackDir, { recursive: true, force: true });
+      mkdirSync(unpackDir, { recursive: true });
+      const systemTar = join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe');
+      const result = await spawnCollect(existsSync(systemTar) ? systemTar : 'tar', ['-xf', temporary, '-C', unpackDir], 180000);
+      if (result.status !== 0) logDetail(`Распаковка ${name}: ${String(result.stderr || '').slice(0, 200)}`);
+      if (result.status !== 0) throw new Error('не удалось распаковать архив');
+      for (const wanted of source.unpack) {
+        const found = findFile(unpackDir, wanted);
+        if (!found) throw new Error(`в архиве нет ${wanted}`);
+        copyFileSync(found, join(TOOL_DIR, wanted));
+      }
+      rmSync(unpackDir, { recursive: true, force: true });
+      rmSync(temporary, { force: true });
+    } else {
+      renameSync(temporary, join(TOOL_DIR, name));
+    }
+    toolDownloads = { ...toolDownloads, [name]: { state: 'done', percent: 100, label: source.label } };
+    log(`Компонент готов: ${source.label}`);
+    refreshTools();
+  } catch (error) {
+    toolDownloads = { ...toolDownloads, [name]: { state: 'error', percent: 0, label: source.label, error: String(error.message || error) } };
+    log(`Не удалось скачать «${source.label}»: ${error.message}`);
+  }
+}
+
+function findFile(directory, name) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const full = join(directory, entry.name);
+    if (entry.isDirectory()) { const nested = findFile(full, name); if (nested) return nested; }
+    else if (entry.name.toLowerCase() === name.toLowerCase()) return full;
+  }
+  return null;
+}
+
+function refreshTools() {
+  // ffmpeg зовут по имени из десятка мест — проще добавить свою папку в PATH,
+  // чем тащить путь через все вызовы.
+  if (existsSync(join(TOOL_DIR, 'ffmpeg.exe')) && !process.env.PATH.includes(TOOL_DIR)) {
+    process.env.PATH = `${TOOL_DIR};${process.env.PATH}`;
+  }
+  tools.ffmpeg = toolAvailable('ffmpeg', ['-version']);
+  tools.ytdlp = toolAvailable(ytdlpPath());
+  tools.cloudflared = Boolean(CLOUDFLARED()) && toolAvailable(CLOUDFLARED());
+  tools.pinggy = Boolean(PINGGY()) && toolAvailable(PINGGY());
+  tools.mediamtx = Boolean(MEDIAMTX());
+  tools.plink = Boolean(PLINK());
+}
+
+// Если утилита лежит рядом с программой (папка tools возле EXE) — берём её
+// оттуда и не качаем. Так же переезжает pinggy: публичной ссылки на него нет.
+function importLocalTools() {
+  const exe = process.env.VRCAST_EXE;
+  if (!exe) return;
+  const рядом = join(dirname(exe), 'tools');
+  if (!existsSync(рядом)) return;
+  mkdirSync(TOOL_DIR, { recursive: true });
+  for (const name of ['pinggy.exe', 'yt-dlp.exe', 'mediamtx.exe', 'cloudflared.exe', 'ffmpeg.exe', 'ffprobe.exe']) {
+    const источник = join(рядом, name);
+    if (existsSync(источник) && !existsSync(join(TOOL_DIR, name))) {
+      try { copyFileSync(источник, join(TOOL_DIR, name)); log(`Взял ${name} из папки рядом с программой`); } catch {}
+    }
+  }
+}
+
+async function ensureTools() {
+  importLocalTools();
+  refreshTools();
+  const нужно = [];
+  if (!existsSync(join(TOOL_DIR, 'yt-dlp.exe')) && !existsSync(YTDLP_UPDATED)) нужно.push('yt-dlp.exe');
+  if (!tools.mediamtx) нужно.push('mediamtx.exe');
+  if (!tools.ffmpeg) нужно.push('ffmpeg.exe');
+  if (!tools.cloudflared) нужно.push('cloudflared.exe');
+  for (const name of нужно) await downloadTool(name);
+  if (нужно.length) {
+    refreshTools();
+    if (tools.mediamtx && !mediaMtxProcess) startMediaMtx();
+    if (tools.ffmpeg && !relayProcess) { try { ensureRelay(streamProfile('queue')); } catch {} }
+  }
+}
+
 async function checkForUpdate() {
   if (!process.env.VRCAST_EXE) return;
   try {
@@ -881,7 +1016,7 @@ function status() {
   const runningElapsed = currentStartedAt ? Math.max(0, (Date.now() - currentStartedAt) / 1000) * speed : 0;
   const elapsed = queuePaused ? pausedPosition : sourcePosition + runningElapsed;
   return {
-    appVersion: APP_VERSION, tools, disk: { freeMb: freeDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(),
+    appVersion: APP_VERSION, tools, toolDownloads, disk: { freeMb: freeDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(),
     progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
@@ -1360,7 +1495,7 @@ function startMediaMtx() {
     `- user: vrcast`, `  pass: ${rtspPublishPass}`, `  ips: ['127.0.0.1']`, '  permissions:', '  - action: publish',
     'paths:', '  live: {}', '',
   ].join('\n'), 'utf8');
-  const child = spawn(MEDIAMTX, [configFile], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  const child = spawn(MEDIAMTX(), [configFile], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
   mediaMtxProcess = child;
   attachProcessLogs(child, 'RTSP server');
   child.on('close', code => {
@@ -2874,6 +3009,7 @@ server.listen(PORT, HOST, () => {
   // Скачанный установщик после перезапуска уже не нужен — это 200 МБ на диске.
   try { rmSync(UPDATE_DIR, { recursive: true, force: true }); } catch {}
   refreshYtdlp();
+  ensureTools();
   // Проверяем не сразу: пусть эфир поднимется первым, обновление подождёт.
   setTimeout(() => { checkForUpdate(); }, 8000);
   if (tools.mediamtx) { startMediaMtx(); log(`Мгновенный канал RTSP: rtspt://127.0.0.1:${RTSP_PORT}/live`); }
