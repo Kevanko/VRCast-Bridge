@@ -11,7 +11,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.36.0";
+    private const string AppVersion = "0.37.0";
 
     [STAThread]
     private static void Main(string[] args)
@@ -377,10 +377,44 @@ internal sealed class MainWindow : Form
         };
     }
 
+    // Окно программы рисует WebView2. Если рантайма нет, раньше показывалась
+    // ошибка и программа закрывалась — теперь ставим его сами, как и остальные
+    // зависимости.
+    private static async Task<bool> EnsureWebView2()
+    {
+        try { CoreWebView2Environment.GetAvailableBrowserVersionString(); return true; }
+        catch { }
+        try
+        {
+            var setup = Path.Combine(Path.GetTempPath(), "MicrosoftEdgeWebview2Setup.exe");
+            using (var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) })
+            await using (var source = await http.GetStreamAsync("https://go.microsoft.com/fwlink/p/?LinkId=2124703"))
+            await using (var file = File.Create(setup))
+                await source.CopyToAsync(file);
+            using var installer = Process.Start(new ProcessStartInfo
+            {
+                FileName = setup,
+                Arguments = "/silent /install",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            if (installer is not null) await installer.WaitForExitAsync();
+            CoreWebView2Environment.GetAvailableBrowserVersionString();
+            return true;
+        }
+        catch { return false; }
+    }
+
     private async void InitializeWebView(object? sender, EventArgs eventArgs)
     {
         try
         {
+            if (!await EnsureWebView2())
+            {
+                Program.ShowError("Не удалось установить Microsoft Edge WebView2 Runtime.\nПроверьте интернет и запустите программу снова.");
+                Close();
+                return;
+            }
             var userData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "WebView2");
             var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: userData);
             await _webView.EnsureCoreWebView2Async(environment);

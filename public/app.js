@@ -69,7 +69,8 @@ function renderNowPlaying(state) {
   $('#togglePause').innerHTML=icon(state.playback?.paused?'play':'pause');
   if(Date.now()>ui.speedPendingUntil)paintSpeed(state.playback?.speed||1);
   if(Date.now()>ui.loopPendingUntil)paintLoop(state.playback?.loopMode||'once');
-  $('#playerUi').classList.toggle('disabled',state.activeKind!=='queue'||!state.running);
+  $('#playerUi').classList.toggle('disabled',ui.source==='queue'&&(state.activeKind!=='queue'||!state.running));
+  $('#monitor').classList.toggle('capture',ui.source==='screen');
   $('#monitor').classList.toggle('idle',!state.running);
 }
 
@@ -224,12 +225,17 @@ function render(state) {
   }
   $('#appVersion').textContent=state.appVersion||'';
   const update=state.update||{};
+  const качается=Object.values(state.toolDownloads||{}).find(item=>item.state==='work');
+  $('#toolProgress').hidden=!качается;
+  if(качается)$('#toolProgress').textContent=`Догружаю: ${качается.label} ${качается.percent}%`;
   offerUpdate(update);
   $('#updateButton').hidden=!update.available;
   if(update.available)$('#updateButton').textContent=update.ready?`Обновить до ${update.version}`:`Скачиваю ${update.version}…`;
   $('#updateButton').disabled=!update.ready;
   $('#encoderLabel').textContent=state.performance?.encoder||'неизвестно';
-  const ratio=Number(state.performance?.realtimeRatio||0); $('#streamHealth').textContent=streamReady?(ratio&&ratio<0.97?`отстаёт на ${Math.round((1-ratio)*100)}%`:'идёт вовремя'):streamStalled?'не успевает — снизьте качество':'набирает буфер';
+  const слабый=state.performance&&state.performance.hardware===false;
+  const тяжело=слабый&&(ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30));
+  const ratio=Number(state.performance?.realtimeRatio||0); $('#streamHealth').textContent=тяжело?'видеокарта не кодирует — поставьте 720p и 30 кадров':streamReady?(ratio&&ratio<0.97?`отстаёт на ${Math.round((1-ratio)*100)}%`:'идёт вовремя'):streamStalled?'не успевает — снизьте качество':'набирает буфер';
   $('#queueCount').textContent=state.queue.length; $('#logs').textContent=state.logs.join('\n')||'Журнал пуст';
   $('#monitorBadge').textContent=state.running?(state.activeKind==='screen'?'Экран':'Видео'):'Нет эфира';
   const monitor=$('#monitor');
@@ -243,8 +249,8 @@ function render(state) {
   $('#menuScreenQuality').hidden=!screenSource; $('#menuScreenFps').hidden=!screenSource;
   renderNowPlaying(state); renderProgress(); renderTemplates(state); renderServers(state); renderStorage(state); startPreview(state);
   $('#goLive').hidden=true; $('#stopLive').hidden=!state.running; $('#skipTrack').hidden=!(state.running&&state.activeKind==='queue');
-  $('#applyCapture').hidden=!(state.running&&ui.source==='screen');
-  $('#applyCapture').textContent=state.activeKind==='screen'?'Применить':'Показать экран в эфире';
+  $('#applyCapture').hidden=ui.source!=='screen';
+  $('#applyCapture').textContent=state.activeKind==='screen'?'Применить изменения':'Показать экран в эфире';
   $$('.broadcast-mode button').forEach(node=>node.disabled=state.running);
 }
 
@@ -431,7 +437,7 @@ $('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button
 $('#stopLive').addEventListener('click',async()=>{try{render(await api('/api/stop',{method:'POST'}));}catch(error){toast(error.message,true);}});
 $('#updateButton').addEventListener('click',()=>{const update=ui.status?.update;if(!update?.available)return;ui.offeredVersion=update.version;paintUpdateDialog(update);if(!updateDialog.open)updateDialog.showModal();});
 $('#showLogs').addEventListener('click',()=>$('#logDialog').showModal());
-$('#openLogFolder').addEventListener('click',async()=>{const folder=ui.status?.logFolder;if(!folder)return;const ok=await copyText(folder);toast(ok?'Путь к журналам скопирован: '+folder:folder);}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
+$('#openLogFolder').addEventListener('click',async()=>{try{await api('/api/logs/open',{method:'POST'});}catch{const folder=ui.status?.logFolder;if(folder)await copyText(folder);toast('Не удалось открыть папку, путь скопирован',true);}}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
 async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
 async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#previewDelay').value=String(state.config.previewDelay??5);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#rtspTransport').value=state.config.rtspTransport||'tcp';paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);paintPreviewToggle();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);ui.previewTimer=setInterval(()=>refreshCapturePreview(false).catch(()=>{}),2000);
@@ -542,6 +548,8 @@ $('#updateSkip').addEventListener('click',()=>{
 });
 $('#updateNow').addEventListener('click',async()=>{
   $('#updateNow').disabled=true; $('#updateProgress').textContent='Устанавливаю, программа перезапустится…';
+  // Сервер закрывается сразу после ответа, поэтому оборванный запрос здесь
+  // означает «пошла установка», а не сбой.
   try{ await api('/api/update/apply',{method:'POST'}); }
-  catch(error){ toast(error.message,true); $('#updateNow').disabled=false; }
+  catch(error){ if(!/fetch|network|Failed/i.test(String(error.message))){ toast(error.message,true); $('#updateNow').disabled=false; } }
 });

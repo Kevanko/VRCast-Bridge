@@ -229,3 +229,9 @@ option{background:var(--dusk);color:var(--text)}
 .player-row #previewToggle{width:34px;height:34px;margin:0;border:0;border-radius:6px;background:transparent;color:#dfe3ee}
 .player-row #previewToggle:hover{background:rgba(255,255,255,.10)}
 .player-row #previewToggle.off{color:var(--cue)}
+/* Что программа сейчас догружает */
+.tool-progress{margin-left:auto;padding:4px 10px;border:1px solid var(--edge);border-radius:99px;background:var(--haze);color:var(--iris-soft);font:500 11px "Golos Text",system-ui,sans-serif}
+/* Захват экрана: перематывать и менять скорость нечего */
+.player.capture .scrub,.player.capture #previousTrack,.player.capture #nextTrack,
+.player.capture #togglePause,.player.capture .player-time,
+.player.capture #speedSelect,.player.capture #loopSelect{display:none}
