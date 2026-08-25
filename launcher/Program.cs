@@ -11,7 +11,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.37.2";
+    private const string AppVersion = "0.38.0";
 
     [STAThread]
     private static void Main(string[] args)
@@ -84,6 +84,10 @@ internal static class Program
             ["VRCast.Payload.AudioCapture.exe"] = Path.Combine("tools", "VRCast.AudioCapture.exe"),
             ["VRCast.Payload.WindowCapture.exe"] = Path.Combine("tools", "VRCast.WindowCapture.exe"),
             ["VRCast.Payload.Plink.exe"] = Path.Combine("tools", "plink.exe"),
+            ["VRCast.Payload.Cloudflared.exe"] = Path.Combine("tools", "cloudflared.exe"),
+            ["VRCast.Payload.Pinggy.exe"] = Path.Combine("tools", "pinggy.exe"),
+            ["VRCast.Payload.MediaMtx.exe"] = Path.Combine("tools", "mediamtx.exe"),
+            ["VRCast.Payload.ytdlp.exe"] = Path.Combine("tools", "yt-dlp.exe"),
             ["VRCast.Payload.logo.png"] = Path.Combine("public", "logo.png"),
             ["VRCast.Payload.standby.png"] = Path.Combine("public", "standby.png")
         };
@@ -93,8 +97,14 @@ internal static class Program
         {
             var destination = Path.Combine(runtimeDirectory, resource.Value);
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            using var input = assembly.GetManifestResourceStream(resource.Key)
-                ?? throw new InvalidOperationException($"Не найден встроенный компонент {resource.Key}");
+            var input = assembly.GetManifestResourceStream(resource.Key);
+            // Pinggy собирается не всегда: его отсутствие не должно ломать запуск.
+            if (input is null)
+            {
+                if (resource.Key.Contains("Pinggy")) continue;
+                throw new InvalidOperationException($"Не найден встроенный компонент {resource.Key}");
+            }
+            using var _ = input;
             using var memory = new MemoryStream();
             input.CopyTo(memory);
             var payload = memory.ToArray();
