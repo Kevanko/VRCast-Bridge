@@ -5,8 +5,20 @@ import { networkInterfaces } from 'node:os';
 import { basename, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.30.2';
+const APP_VERSION = '0.30.3';
+
+// Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
+// дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
+let freeDiskMb = null;
+function watchFreeSpace() {
+  const measure = () => statfs(DATA_DIR)
+    .then(info => { freeDiskMb = Math.round(info.bsize * info.bavail / 1048576); })
+    .catch(() => {});
+  measure();
+  setInterval(measure, 30000).unref();
+}
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PUBLIC_DIR = join(ROOT, 'public');
@@ -815,7 +827,7 @@ function status() {
   const runningElapsed = currentStartedAt ? Math.max(0, (Date.now() - currentStartedAt) / 1000) * speed : 0;
   const elapsed = queuePaused ? pausedPosition : sourcePosition + runningElapsed;
   return {
-    appVersion: APP_VERSION, tools, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(),
+    appVersion: APP_VERSION, tools, disk: { freeMb: freeDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(),
     progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
@@ -1636,7 +1648,13 @@ async function cachedMedia(item, filePath) {
     hasVideo: info.hasVideo, hasAudio: info.hasAudio, cached: true, unityCompatible: info.unityCompatible };
 }
 
-function trimMediaCache(maxBytes = 4 * 1024 * 1024 * 1024) {
+// На тесном диске кеш ужимается: иначе он доедает остаток места, а без места
+// ffmpeg не может дописывать сегменты и эфир встаёт рывками.
+function mediaCacheLimit() {
+  return freeDiskMb !== null && freeDiskMb < 4000 ? 1024 * 1024 * 1024 : 4 * 1024 * 1024 * 1024;
+}
+
+function trimMediaCache(maxBytes = mediaCacheLimit()) {
   try {
     const entries = readdirSync(MEDIA_CACHE_DIR).flatMap(name => {
       const directory = join(MEDIA_CACHE_DIR, name);
@@ -2646,6 +2664,9 @@ server.listen(PORT, HOST, () => {
   log(`Кодировщик: ${encoder.label} · FFmpeg: ${tools.ffmpeg ? 'готов' : 'не найден'} · yt-dlp: ${tools.ytdlp ? 'готов' : 'не найден'}`);
   logDetail(`=== запуск VRCast Bridge ${APP_VERSION} · ffmpeg: ${tools.ffmpeg ? 'есть' : 'нет'} · yt-dlp: ${ytdlpPath()} · кодировщик: ${encoder.label} ===`);
   startHlsHealthMonitor();
+  watchFreeSpace();
+  // Скачанный установщик после перезапуска уже не нужен — это 200 МБ на диске.
+  try { rmSync(UPDATE_DIR, { recursive: true, force: true }); } catch {}
   refreshYtdlp();
   // Проверяем не сразу: пусть эфир поднимется первым, обновление подождёт.
   setTimeout(() => { checkForUpdate(); }, 8000);
