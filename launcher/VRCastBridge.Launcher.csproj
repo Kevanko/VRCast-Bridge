@@ -7,9 +7,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>VRCast Bridge</AssemblyName>
     <RootNamespace>VRCastBridge.Launcher</RootNamespace>
-    <Version>0.37.2</Version>
-    <FileVersion>0.37.2.0</FileVersion>
-    <AssemblyVersion>0.37.2.0</AssemblyVersion>
+    <Version>0.38.0</Version>
+    <FileVersion>0.38.0.0</FileVersion>
+    <AssemblyVersion>0.38.0.0</AssemblyVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -27,6 +27,10 @@
     <EmbeddedResource Include="..\tools\VRCast.AudioCapture.exe" LogicalName="VRCast.Payload.AudioCapture.exe" />
     <EmbeddedResource Include="..\tools\VRCast.WindowCapture.exe" LogicalName="VRCast.Payload.WindowCapture.exe" />
     <EmbeddedResource Include="..\tools\plink.exe" LogicalName="VRCast.Payload.Plink.exe" />
+    <EmbeddedResource Include="..\tools\cloudflared.exe" LogicalName="VRCast.Payload.Cloudflared.exe" />
+    <EmbeddedResource Include="..\tools\pinggy.exe" LogicalName="VRCast.Payload.Pinggy.exe" Condition="Exists('..\tools\pinggy.exe')" />
+    <EmbeddedResource Include="..\tools\mediamtx.exe" LogicalName="VRCast.Payload.MediaMtx.exe" />
+    <EmbeddedResource Include="..\tools\yt-dlp.exe" LogicalName="VRCast.Payload.ytdlp.exe" />
     <EmbeddedResource Include="assets\vrcast-icon.ico" LogicalName="VRCast.Payload.icon.ico" />
     <EmbeddedResource Include="..\public\logo.png" LogicalName="VRCast.Payload.logo.png" />
     <EmbeddedResource Include="..\public\standby.png" LogicalName="VRCast.Payload.standby.png" />
