@@ -222,3 +222,10 @@ option{background:var(--dusk);color:var(--text)}
 .update-actions .update-now:hover{background:var(--iris-soft)}
 .update-actions .update-now:disabled{opacity:.5}
 .update-actions .update-skip{color:var(--muted)}
+/* Кнопки журнала: иконка не липнет к подписи */
+.dialog-head button{display:inline-flex;align-items:center;gap:8px}
+.dialog-head button .ic{width:15px;height:15px}
+/* Глазик стоял по правому краю — наследство от старой панели над кадром */
+.player-row #previewToggle{width:34px;height:34px;margin:0;border:0;border-radius:6px;background:transparent;color:#dfe3ee}
+.player-row #previewToggle:hover{background:rgba(255,255,255,.10)}
+.player-row #previewToggle.off{color:var(--cue)}
