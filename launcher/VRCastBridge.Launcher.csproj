@@ -7,9 +7,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>VRCast Bridge</AssemblyName>
     <RootNamespace>VRCastBridge.Launcher</RootNamespace>
-    <Version>0.35.0</Version>
-    <FileVersion>0.35.0.0</FileVersion>
-    <AssemblyVersion>0.35.0.0</AssemblyVersion>
+    <Version>0.35.1</Version>
+    <FileVersion>0.35.1.0</FileVersion>
+    <AssemblyVersion>0.35.1.0</AssemblyVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
