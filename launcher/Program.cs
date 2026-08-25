@@ -11,19 +11,45 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.37.1";
+    private const string AppVersion = "0.37.2";
 
     [STAThread]
     private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
         var noWindow = args.Any(arg => arg.Equals("--no-browser", StringComparison.OrdinalIgnoreCase));
-        using var singleInstance = new Mutex(true, "Local\\VRCastBridge.Desktop", out var firstInstance);
+        // Если уже запущена ДРУГАЯ версия, новый запуск её закрывает и продолжает:
+        // иначе после обновления снова открывалось старое окно, и выглядело это
+        // так, будто обновление не сработало.
+        var singleInstance = new Mutex(true, "Local\\VRCastBridge.Desktop", out var firstInstance);
         if (!firstInstance && !noWindow)
         {
-            ShowError("VRCast Bridge уже запущен. Закройте открытое окно перед повторным запуском.");
-            return;
+            var runningVersion = GetServerVersion().GetAwaiter().GetResult();
+            if (runningVersion is not null && runningVersion != AppVersion)
+            {
+                // Идущий эфир не рвём без спроса: человек может вещать прямо сейчас.
+                if (IsBroadcasting().GetAwaiter().GetResult()
+                    && MessageBox.Show(
+                        $"Открыта версия {runningVersion}, и в ней идёт эфир.\nЗакрыть её и запустить {AppVersion}?",
+                        "VRCast Bridge", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                {
+                    singleInstance.Dispose();
+                    return;
+                }
+                ShutdownServer();
+                for (var attempt = 0; attempt < 60 && GetServerVersion().GetAwaiter().GetResult() is not null; attempt++)
+                    Thread.Sleep(200);
+                singleInstance.Dispose();
+                singleInstance = new Mutex(true, "Local\\VRCastBridge.Desktop", out firstInstance);
+            }
+            if (!firstInstance)
+            {
+                ShowError("VRCast Bridge уже запущен. Закройте открытое окно и запустите снова.");
+                singleInstance.Dispose();
+                return;
+            }
         }
+        using var instanceLock = singleInstance;
         string runtimeDirectory;
         try { runtimeDirectory = EnsurePayload(); }
         catch (Exception error)
@@ -32,7 +58,13 @@ internal static class Program
             return;
         }
         CleanupOrphanHelpers();
+        // Первый запуск ставит Node и кодировщик — это минуты. Без окна выглядит
+        // так, будто программа не открылась вовсе, поэтому показываем ход дела.
+        using var boot = noWindow ? null : new BootWindow();
+        boot?.Show();
+        Application.DoEvents();
         var server = EnsureServer(runtimeDirectory).GetAwaiter().GetResult();
+        boot?.Hide();
         if (server is null && !IsReady().GetAwaiter().GetResult()) return;
         if (noWindow) return;
         using var processJob = server is null ? null : ChildProcessJob.Attach(server);
@@ -91,6 +123,8 @@ internal static class Program
         catch { }
     }
 
+    internal static Action<string>? BootStatus;
+
     private static async Task<Process?> EnsureServer(string runtimeDirectory)
     {
         var existingVersion = await GetServerVersion();
@@ -116,6 +150,7 @@ internal static class Program
         var nodePath = FindNode();
         if (nodePath is null)
         {
+            BootStatus?.Invoke("Устанавливаю Node.js…");
             nodePath = await DownloadNode();
             if (nodePath is null)
             {
@@ -164,6 +199,7 @@ internal static class Program
             return null;
         }
 
+        BootStatus?.Invoke("Запускаю сервер…");
         for (var attempt = 0; attempt < 900; attempt++)
         {
             if (await IsReady()) return server;
@@ -273,6 +309,18 @@ internal static class Program
         catch { return null; }
     }
 
+    // Идёт ли сейчас эфир в уже запущенной копии.
+    internal static async Task<bool> IsBroadcasting()
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+            var text = await http.GetStringAsync($"{AppUrl}api/status");
+            return text.Contains("\"running\":true", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
     internal static async Task<bool> IsReady() => await GetServerVersion() == AppVersion;
 
     internal static void ShutdownServer()
@@ -346,6 +394,33 @@ internal sealed class ChildProcessJob : IDisposable
         public JobObjectBasicLimitInformation BasicLimitInformation;
         public IoCounters IoInfo;
         public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+}
+
+// Маленькое окно на время подготовки: видно, что программа жива.
+internal sealed class BootWindow : Form
+{
+    private readonly Label _text = new()
+    {
+        Dock = DockStyle.Fill,
+        TextAlign = ContentAlignment.MiddleCenter,
+        ForeColor = Color.FromArgb(227, 230, 239),
+        Font = new Font("Segoe UI", 10F),
+        Text = "VRCast Bridge готовится к работе…"
+    };
+
+    internal BootWindow()
+    {
+        FormBorderStyle = FormBorderStyle.FixedSingle;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        ClientSize = new Size(420, 130);
+        BackColor = Color.FromArgb(13, 16, 23);
+        Text = "VRCast Bridge";
+        Icon = MainWindow.LoadAppIcon();
+        Controls.Add(_text);
+        Program.BootStatus = message => { try { BeginInvoke(() => { _text.Text = message; Application.DoEvents(); }); } catch { } };
     }
 }
 
@@ -480,23 +555,34 @@ internal sealed class MainWindow : Form
             // На первом запуске программа докачивает Node и кодировщик — это минуты.
             // Раньше окно сразу шло на адрес сервера и показывало «не удалось открыть
             // страницу». Теперь показываем заставку и повторяем, пока сервер не ответит.
-            _webView.CoreWebView2.NavigationCompleted += (_, args) =>
+            if (await Program.IsReady())
             {
-                if (args.IsSuccess || _closing) return;
-                BeginInvoke(async () =>
-                {
-                    ShowSplash();
-                    await Task.Delay(1500);
-                    if (!_closing) _webView.CoreWebView2.Navigate(Program.AppUrl);
-                });
-            };
-            ShowSplash();
-            _webView.CoreWebView2.Navigate(Program.AppUrl);
+                _webView.CoreWebView2.Navigate(Program.AppUrl);
+            }
+            else
+            {
+                ShowSplash();
+                _ = WaitForServerAsync();
+            }
         }
         catch (Exception error)
         {
             Program.ShowError($"Не удалось открыть окно программы:\n{error.Message}\n\nУбедитесь, что Microsoft Edge WebView2 Runtime установлен.");
             Close();
+        }
+    }
+
+    // Ждём готовности сервера в фоне и открываем окно ровно один раз.
+    private async Task WaitForServerAsync()
+    {
+        for (var attempt = 0; attempt < 600 && !_closing; attempt++)
+        {
+            if (await Program.IsReady())
+            {
+                if (!_closing) BeginInvoke(() => _webView.CoreWebView2?.Navigate(Program.AppUrl));
+                return;
+            }
+            await Task.Delay(300);
         }
     }
 
