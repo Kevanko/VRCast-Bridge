@@ -80,6 +80,7 @@
           <div class="broadcast-mode"><button class="active" data-output="local" title="Ссылка работает только на этом компьютере">Только я</button><button data-output="remote" title="Через ваш сервер — ссылка не меняется">Мой сервер</button><button data-output="tunnel" title="Бесплатный туннель, задержка около трёх секунд">Друзья</button></div>
           <section class="output-panel" id="remoteOutput" hidden>
             <label>Сервер<select id="serverSelect"></select></label>
+            <label>Имя канала<input id="activeChannel" type="text" placeholder="live" autocomplete="off" maxlength="40"></label>
             <div class="server-actions">
               <button id="addServerToggle" type="button"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>Добавить</button>
               <button id="removeServer" type="button" disabled>Удалить</button>
@@ -223,6 +224,16 @@
   </div>
 
   <dialog id="logDialog"><div class="dialog-head"><b>Журнал</b><button id="copyLogs" title="Скопировать весь журнал"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg>Скопировать</button><button id="openLogFolder" title="Скопировать путь к папке с журналом"><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg>Папка</button><button id="closeLogs" title="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div><pre id="logs">Запуск…</pre><button class="shutdown" id="shutdownApp">Закрыть программу</button></dialog>
+  <dialog id="updateDialog">
+    <div class="update-head"><b>Новая версия</b><span id="updateVersion"></span></div>
+    <p class="update-note" id="updateNotes"></p>
+    <div class="update-state" id="updateProgress">Скачиваю…</div>
+    <div class="update-actions">
+      <button class="update-later" id="updateLater">Позже</button>
+      <button class="update-skip" id="updateSkip">Пропустить версию</button>
+      <button class="update-now" id="updateNow">Обновить</button>
+    </div>
+  </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/vendor/hls.min.js?v=0.29.0"></script>
   <script type="module" src="/app.js?v=0.29.0"></script>

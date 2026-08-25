@@ -208,3 +208,17 @@ option{background:var(--dusk);color:var(--text)}
 .preview-off{position:absolute;inset:0;z-index:2;display:grid;place-items:center;gap:10px;align-content:center;color:var(--muted)}
 .preview-off button{padding:9px 16px;border:1px solid var(--edge);border-radius:var(--r);background:var(--haze);color:var(--text);font-size:12px}
 .preview-off button:hover{border-color:var(--iris)}
+/* Окно обновления */
+#updateDialog{width:min(460px,86vw);padding:18px}
+.update-head{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.update-head b{font-size:16px;font-weight:600}
+.update-head span{color:var(--iris-soft);font:500 13px "JetBrains Mono",ui-monospace,monospace}
+.update-note{max-height:190px;overflow:auto;margin-bottom:12px;color:var(--muted);font-size:12px;line-height:1.5;white-space:pre-wrap}
+.update-state{margin-bottom:12px;color:var(--muted);font-size:12px}
+.update-actions{display:flex;justify-content:flex-end;gap:8px}
+.update-actions button{min-height:34px;padding:0 14px;border:1px solid var(--edge);border-radius:var(--r);background:var(--haze);color:var(--text);font-size:12px}
+.update-actions button:hover{border-color:var(--iris)}
+.update-actions .update-now{border-color:#3f5aa0;background:var(--iris);color:#0d1017;font-weight:600}
+.update-actions .update-now:hover{background:var(--iris-soft)}
+.update-actions .update-now:disabled{opacity:.5}
+.update-actions .update-skip{color:var(--muted)}
