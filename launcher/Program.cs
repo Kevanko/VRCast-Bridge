@@ -11,7 +11,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.40.0";
+    private const string AppVersion = "0.40.1";
 
     [STAThread]
     private static void Main(string[] args)
@@ -685,6 +685,16 @@ internal sealed class MainWindow : Form
                 {
                     args.Cancel = true;
                     BeginInvoke(() => HighlightSource(args.Uri));
+                    return;
+                }
+                if (args.Uri.StartsWith("vrcast://open-folder", StringComparison.OrdinalIgnoreCase))
+                {
+                    args.Cancel = true;
+                    var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge");
+                    BeginInvoke(() =>
+                    {
+                        try { Process.Start(new ProcessStartInfo(folder) { UseShellExecute = true }); } catch { }
+                    });
                     return;
                 }
                 if (args.Uri.StartsWith("vrcast://close", StringComparison.OrdinalIgnoreCase))

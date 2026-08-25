@@ -134,7 +134,7 @@
             <div class="menu-row" id="menuMediaFps"><span>Плавность</span><select id="mediaFps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></div>
             <div class="menu-row" id="menuScreenQuality" hidden><span>Качество</span><select id="quality"><option value="720p">720p</option><option value="1080p">1080p</option></select></div>
             <div class="menu-row" id="menuScreenFps" hidden><span>Плавность</span><select id="fps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></div>
-            <div class="menu-row"><span>Битрейт</span><select id="videoBitrate"><option value="0">Авто</option><option value="2000">2 Мбит/с</option><option value="3500">3,5 Мбит/с</option><option value="6000">6 Мбит/с</option><option value="9000">9 Мбит/с</option><option value="12000">12 Мбит/с</option></select></div>
+            <div class="menu-row"><span>Битрейт</span><select id="videoBitrate"><option value="0">Авто</option><option value="1500">1500 Кбит/с</option><option value="2500">2500 Кбит/с</option><option value="3500">3500 Кбит/с</option><option value="4500">4500 Кбит/с</option><option value="6000">6000 Кбит/с</option><option value="8000">8000 Кбит/с</option><option value="12000">12000 Кбит/с</option></select></div>
             <input type="hidden" id="previewDelay" value="0">
           </div>
         </div>
@@ -163,6 +163,7 @@
           <div class="storage-box">
             <div class="storage-head"><span><b>Место на диске</b></span><span id="cacheSize">0 МБ</span></div>
             <label>Где хранить видео<select id="cacheRoot"></select></label>
+            <label>Сколько занимать<select id="cacheLimit"><option value="0">Авто</option><option value="1">1 ГБ</option><option value="2">2 ГБ</option><option value="4">4 ГБ</option><option value="8">8 ГБ</option><option value="16">16 ГБ</option></select></label>
             <p class="field-help" id="cacheHint"></p>
             <button id="clearCache" type="button">Удалить скачанное</button>
           </div>

@@ -148,9 +148,15 @@ function renderStorage(state){
   }
   const channel=state.rtsp?.remote?.channel||'';
   if(document.activeElement!==$('#activeChannel')&&$('#activeChannel').value!==channel)$('#activeChannel').value=channel;
-  $('#cacheSize').textContent=`${cache.sizeMb||0} МБ`;
+  const лимит=cache.limitGb?`${cache.limitGb} ГБ`:'авто';
+  $('#cacheSize').textContent=`${cache.sizeMb||0} МБ из ${лимит}`;
+  if(document.activeElement!==$('#cacheLimit'))$('#cacheLimit').value=String(cache.limitGb||0);
   const free=state.disk?.freeMb;
-  $('#cacheHint').textContent=cache.path?`${cache.path}${free!==null&&free!==undefined?` · свободно ${Math.round(free/1024*10)/10} ГБ`:''}`:'';
+  const всего=state.disk?.totalMb;
+  const место=free!==null&&free!==undefined&&всего
+    ? ` · свободно ${(free/1024).toFixed(1)} из ${(всего/1024).toFixed(0)} ГБ`
+    : '';
+  $('#cacheHint').textContent=cache.path?`${cache.path}${место}`:'';
 }
 
 function renderServers(state) {
@@ -445,7 +451,7 @@ $('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button
 $('#stopLive').addEventListener('click',async()=>{try{render(await api('/api/stop',{method:'POST'}));}catch(error){toast(error.message,true);}});
 $('#updateButton').addEventListener('click',()=>{const update=ui.status?.update;if(!update?.available)return;ui.offeredVersion=update.version;paintUpdateDialog(update);if(!updateDialog.open)updateDialog.showModal();});
 $('#showLogs').addEventListener('click',()=>$('#logDialog').showModal());
-$('#openLogFolder').addEventListener('click',async()=>{try{await api('/api/logs/open',{method:'POST'});}catch{const folder=ui.status?.logFolder;if(folder)await copyText(folder);toast('Не удалось открыть папку, путь скопирован',true);}}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
+$('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast://open-folder';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
 async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
 async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#previewDelay').value=String(state.config.previewDelay??0);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#rtspTransport').value=state.config.rtspTransport||'tcp';paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);paintPreviewToggle();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);ui.previewTimer=setInterval(()=>refreshCapturePreview(false).catch(()=>{}),2000);
@@ -593,3 +599,11 @@ async function startWebrtcPreview(url, video, monitor){
     if(ui.status)startPreview(ui.status);
   }
 }
+
+// Лимит кеша: сколько места программе разрешено занимать под скачанное видео.
+$('#cacheLimit').addEventListener('change',async()=>{
+  try{
+    render(await api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),cacheLimitGb:Number($('#cacheLimit').value)})}));
+    toast('Лимит сохранён');
+  }catch(error){ toast(error.message,true); }
+});
