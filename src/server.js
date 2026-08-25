@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.41.0';
+const APP_VERSION = '0.41.1';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -275,7 +275,7 @@ function stopPinggyDaemon() {
   pinggyStarted = false;
   const stopper = spawn(PINGGY(), ['daemon', 'stop'], { windowsHide: true, stdio: 'ignore', env: pinggyEnvironment() });
   stopper.on('error', () => {});
-  const escaped = PINGGY.replace(/'/g, "''");
+  const escaped = PINGGY().replace(/'/g, "''");
   spawnCollect('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     `$target='${escaped}'; Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $target } | ForEach-Object { $_.ProcessId }`], 8000)
     .then(result => {
@@ -692,6 +692,8 @@ function probeServer(host, port, timeout = 5000) {
 
 let remoteReachable = null;
 let remoteChannelRejected = false;
+let outputSwitchTimer = null;
+let tunnelSwitchTimer = null;
 function watchRemoteServer() {
   const проверить = async () => {
     const target = remoteRtspTarget();
@@ -1579,6 +1581,7 @@ function startRtspPush() {
         tail = lines.pop() || '';
         for (const line of lines) {
           const text = line.trim();
+          if (/non-existing PPS|no frame!|Last message repeated/i.test(text)) continue;
           if (text && text !== lastRemotePushError) {
             lastRemotePushError = text;
             // 400 на публикацию означает, что сервер принимает только тот путь,
@@ -2974,14 +2977,20 @@ const server = http.createServer(async (req, res) => {
       }
       const previousRemote = previousRemoteTarget?.publishUrl || '';
       if (previousOutput !== config.outputMode) {
-        if (config.outputMode === 'tunnel') startPublicTunnel();
-        else stopPublicTunnel();
+        clearTimeout(tunnelSwitchTimer);
+        tunnelSwitchTimer = setTimeout(() => {
+          if (config.outputMode === 'tunnel') startPublicTunnel();
+          else { stopPublicTunnel(); tunnelError = ''; tunnelState = 'idle'; }
+        }, 600);
       }
       // Смена адреса своего сервера подхватывается на лету: пушеры
       // пересоздаются, HLS и локальный RTSP при этом не прерываются.
       if (previousOutput !== config.outputMode || previousRemote !== (remoteRtspTarget()?.publishUrl || '')) {
-        stopRtspPush();
-        if (relayProcess) startRtspPush();
+        clearTimeout(outputSwitchTimer);
+        outputSwitchTimer = setTimeout(() => {
+          stopRtspPush();
+          if (relayProcess) startRtspPush();
+        }, 600);
       }
       if (applyLive && activeKind) {
         const desired = streamProfile(activeKind);
