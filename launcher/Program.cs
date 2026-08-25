@@ -11,7 +11,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.40.2";
+    private const string AppVersion = "0.41.0";
 
     [STAThread]
     private static void Main(string[] args)
@@ -65,23 +65,15 @@ internal static class Program
             return;
         }
         CleanupOrphanHelpers();
-        // Первый запуск ставит Node и кодировщик — это минуты. Без окна выглядит
-        // так, будто программа не открылась вовсе, поэтому показываем ход дела.
-        using var boot = noWindow ? null : new BootWindow();
-        boot?.Show();
-        Application.DoEvents();
+        // Окно открывается сразу, а сервер поднимается в фоне: раньше программа
+        // молча висела на заставке, пока он готовился, и это выглядело зависанием.
         var подготовка = Task.Run(() => EnsureServer(runtimeDirectory));
-        while (!подготовка.IsCompleted)
+        if (noWindow)
         {
-            Application.DoEvents();
-            Thread.Sleep(40);
+            подготовка.GetAwaiter().GetResult();
+            return;
         }
-        var server = подготовка.GetAwaiter().GetResult();
-        boot?.Hide();
-        if (server is null && !IsReady().GetAwaiter().GetResult()) return;
-        if (noWindow) return;
-        using var processJob = server is null ? null : ChildProcessJob.Attach(server);
-        Application.Run(new MainWindow(server));
+        Application.Run(new MainWindow(подготовка));
     }
 
     private static string EnsurePayload()
@@ -538,37 +530,11 @@ internal sealed class SetupWindow : Form
     }
 }
 
-// Маленькое окно на время подготовки: видно, что программа жива.
-internal sealed class BootWindow : Form
-{
-    private readonly Label _text = new()
-    {
-        Dock = DockStyle.Fill,
-        TextAlign = ContentAlignment.MiddleCenter,
-        ForeColor = Color.FromArgb(227, 230, 239),
-        Font = new Font("Segoe UI", 10F),
-        Text = "VRCast Bridge готовится к работе…"
-    };
-
-    internal BootWindow()
-    {
-        FormBorderStyle = FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
-        MinimizeBox = false;
-        StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(420, 130);
-        BackColor = Color.FromArgb(13, 16, 23);
-        Text = "VRCast Bridge";
-        Icon = MainWindow.LoadAppIcon();
-        Controls.Add(_text);
-        Program.BootStatus = message => { try { BeginInvoke(() => { _text.Text = message; Application.DoEvents(); }); } catch { } };
-    }
-}
-
 internal sealed class MainWindow : Form
 {
     private readonly WebView2 _webView = new() { Dock = DockStyle.Fill };
     private bool _closing;
+    private bool _ready;
 
     // Без явной иконки WinForms подставляет свою стандартную заглушку — именно
     // она и висела на панели задач вместо логотипа приложения.
@@ -582,7 +548,14 @@ internal sealed class MainWindow : Form
         catch { return null; }
     }
 
-    internal MainWindow(Process? server)
+    private readonly Task<Process?>? _serverTask;
+
+    internal MainWindow(Task<Process?> serverTask) : this()
+    {
+        _serverTask = serverTask;
+    }
+
+    private MainWindow()
     {
         Text = "VRCast Bridge";
         Icon = LoadAppIcon();
@@ -596,6 +569,8 @@ internal sealed class MainWindow : Form
         _webView.AllowExternalDrop = false;
         Controls.Add(_webView);
         Shown += InitializeWebView;
+        // Что происходит на подготовке — видно прямо в окне.
+        Program.BootStatus = message => { try { BeginInvoke(() => { if (_webView.CoreWebView2 is not null && !_ready) ShowSplash(message); }); } catch { } };
         // Свёрнутое окно не должно декодировать эфир: страница гасит предпросмотр.
         Resize += (_, _) =>
         {
@@ -708,6 +683,7 @@ internal sealed class MainWindow : Form
             // страницу». Теперь показываем заставку и повторяем, пока сервер не ответит.
             if (await Program.IsReady())
             {
+                _ready = true;
                 _webView.CoreWebView2.Navigate(Program.AppUrl);
             }
             else
@@ -726,18 +702,55 @@ internal sealed class MainWindow : Form
     // Ждём готовности сервера в фоне и открываем окно ровно один раз.
     private async Task WaitForServerAsync()
     {
-        for (var attempt = 0; attempt < 600 && !_closing; attempt++)
+        for (var attempt = 0; attempt < 900 && !_closing; attempt++)
         {
             if (await Program.IsReady())
             {
-                if (!_closing) BeginInvoke(() => _webView.CoreWebView2?.Navigate(Program.AppUrl));
+                if (!_closing) BeginInvoke(() => { _ready = true; _webView.CoreWebView2?.Navigate(Program.AppUrl); });
                 return;
+            }
+            // Подготовка закончилась, а сервер не отвечает — показываем причину,
+            // а не бесконечную заставку.
+            if (_serverTask is { IsCompleted: true })
+            {
+                var died = _serverTask.Result is null || _serverTask.Result!.HasExited;
+                if (died && !await Program.IsReady())
+                {
+                    if (!_closing) BeginInvoke(() => ShowFailure());
+                    return;
+                }
             }
             await Task.Delay(300);
         }
+        if (!_closing) BeginInvoke(() => ShowFailure());
     }
 
-    private void ShowSplash()
+    private void ShowFailure()
+    {
+        var tail = string.Empty;
+        try
+        {
+            var logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "launcher.log");
+            if (File.Exists(logPath)) tail = string.Join("\n", File.ReadAllLines(logPath).TakeLast(8));
+        }
+        catch { }
+        var текст = System.Net.WebUtility.HtmlEncode(tail.Length > 0 ? tail : "Журнал пуст.");
+        try
+        {
+            _webView.CoreWebView2?.NavigateToString(
+                "<!doctype html><meta charset=\"utf-8\">" +
+                "<style>html,body{height:100%;margin:0;background:#0d1017;color:#e3e6ef;" +
+                "font:14px 'Segoe UI',system-ui,sans-serif;display:grid;place-items:center}" +
+                "div{max-width:560px;display:grid;gap:12px}pre{max-height:220px;overflow:auto;padding:10px;" +
+                "background:#151926;border:1px solid #2a3145;border-radius:8px;color:#8a91a6;font-size:12px;white-space:pre-wrap}" +
+                "b{font-size:16px}</style><div><b>Сервер не запустился</b>" +
+                "<span>Проверьте интернет: при первом запуске догружаются компоненты. Ниже — что записал журнал.</span>" +
+                "<pre>" + текст + "</pre></div>");
+        }
+        catch { }
+    }
+
+    private void ShowSplash(string message = "Первый запуск: догружаются недостающие компоненты.")
     {
         try
         {
@@ -751,7 +764,7 @@ internal sealed class MainWindow : Form
                 "animation:spin 1s linear infinite}" +
                 "@keyframes spin{to{transform:rotate(360deg)}}</style>" +
                 "<div><i></i><b>VRCast Bridge готовится к работе</b>" +
-                "<span>Первый запуск: догружаются недостающие компоненты.</span></div>");
+                "<span>" + System.Net.WebUtility.HtmlEncode(message) + "</span></div>");
         }
         catch { }
     }
