@@ -65,11 +65,12 @@ function renderNowPlaying(state) {
     cover.innerHTML=item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="">`:`<span>${icon('note')}</span>`;
   } else if (state.running && state.activeKind==='screen') {
     $('#nowTitle').textContent=captureLabel(); $('#nowSource').textContent=audioLabel(); cover.innerHTML=`<span>${icon('display')}</span>`;
-  } else { $('#nowTitle').textContent='Эфир не запущен'; $('#nowSource').textContent=ui.source==='queue'?'Добавьте видео справа':'Выберите источник справа'; cover.innerHTML=`<span>${icon('note')}</span>`; }
+  } else { $('#nowTitle').textContent='Эфир не запущен'; $('#nowSource').textContent=ui.source==='queue'?'Добавьте видео справа':'Выберите экран или окно справа'; cover.innerHTML=`<span>${icon('note')}</span>`; }
   $('#togglePause').innerHTML=icon(state.playback?.paused?'play':'pause');
   if(Date.now()>ui.speedPendingUntil)paintSpeed(state.playback?.speed||1);
   if(Date.now()>ui.loopPendingUntil)paintLoop(state.playback?.loopMode||'once');
-  $('#transport').classList.toggle('disabled',state.activeKind!=='queue'||!state.running);
+  $('#playerUi').classList.toggle('disabled',state.activeKind!=='queue'||!state.running);
+  $('#monitor').classList.toggle('idle',!state.running);
 }
 
 const SPEED_STEPS=[0.5,0.75,1,1.25,1.5,2];
@@ -154,15 +155,15 @@ function renderServers(state) {
   }
   $('#removeServer').disabled=!servers.length;
   const remote=state.rtsp?.remote||{};
-  $('#serverHint').textContent=!servers.length?'Добавьте сервер — программа развернёт его сама.'
+  $('#serverHint').textContent=!servers.length?'Добавьте сервер — настрою его сам.'
     :remote.live?'Эфир идёт через ваш сервер.'
-    :state.config.outputMode==='remote'?'Подключаюсь к серверу…'
+    :state.config.outputMode==='remote'?'Подключаюсь…'
     :'Сервер сохранён.';
 }
 
 function renderTemplates(state) {
   const select=$('#templateSelect'), selected=select.value, templates=state.templates||[];
-  select.innerHTML='<option value="">Новый шаблон…</option>'+templates.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.count}</option>`).join('');
+  select.innerHTML='<option value="">Новый набор…</option>'+templates.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.count}</option>`).join('');
   if(selected&&templates.some(item=>item.id===selected))select.value=selected;
   $('#templateCount').textContent=String(templates.length);
   const has=Boolean(select.value); $('#loadTemplate').disabled=!has; $('#appendTemplate').disabled=!has; $('#deleteTemplate').disabled=!has;
@@ -173,7 +174,7 @@ function render(state) {
   if(ui.seekPending&&!state.playback?.busy&&Number(state.playback?.revision)>=ui.seekRevision&&Date.now()>=ui.seekVisualUntil)ui.seekPending=false;
   const streamReady=Boolean(state.stream?.ready), streamStalled=state.stream?.state==='stalled';
   $('#stateDot').className=`state-dot ${state.disk?.low||streamStalled?'error':state.running?'live':ready?'ready':''}`;
-  $('#systemState').textContent=state.disk?.low?`Мало места на диске · ${Math.max(0,Math.round(state.disk.freeMb/1024*10)/10)} ГБ`:state.playback?.buffering?'Загружаю трек':streamStalled?'Поток отстаёт':state.running&&streamReady?'Эфир идёт':state.running?'Эфир запускается':streamReady?'Канал готов':ready?'Готово к работе':'Нужен FFmpeg';
+  $('#systemState').textContent=state.disk?.low?`Мало места на диске · ${Math.max(0,Math.round(state.disk.freeMb/1024*10)/10)} ГБ`:state.playback?.buffering?'Загружаю видео':streamStalled?'Не успевает':state.running&&streamReady?'В эфире':state.running?'Запускаю…':streamReady?'Готово':ready?'Готов к эфиру':'Нужен FFmpeg';
   const tunnelMode=state.config.outputMode==='tunnel', tunnelReady=tunnelMode&&state.tunnel?.ready, tunnelStarting=tunnelMode&&state.tunnel?.state==='starting';
   const unityMode=$('#playerMode').value==='unity', unity=state.compatibility?.unity||{};
   if(!ui.unitySelectedId||!state.queue.some(item=>item.id===ui.unitySelectedId))ui.unitySelectedId=unity.queue?.itemId||state.currentId||state.queue[0]?.id||'';
@@ -185,19 +186,19 @@ function render(state) {
   else if(state.config.outputMode==='remote'){
     const remote=state.rtsp?.remote||{};
     shownUrl=remote.configured?remote.url:'';
-    hint='Ссылку можно давать друзьям — она не меняется. В мире нужен AVPro и Untrusted URLs.';
-    linkText=!remote.configured?'Сервер не выбран':remote.live?'Эфир через ваш сервер':'Подключаюсь к серверу…';
+    hint='Ссылка постоянная, её можно дать друзьям.';
+    linkText=!remote.configured?'Выберите сервер':remote.live?'Через ваш сервер':'Подключаюсь к серверу…';
     linkGood=Boolean(remote.live);
     linkError=Boolean(remote.configured&&!remote.live&&state.running);
   }
   else {
     const rtspLive=!tunnelMode&&Boolean(state.rtsp?.available);
     shownUrl=tunnelReady?state.tunnel.url:tunnelMode?'':state.playbackUrl;
-    hint=rtspLive?'В мире нужен AVPro и включённые Untrusted URLs.':'В мире нужен плеер AVPro.';
+    hint=rtspLive?'В мире включите AVPro и Untrusted URLs.':'В мире выберите плеер AVPro.';
     // Бесплатный туннель не тянет тяжёлый поток — это и есть причина рывков у друзей.
     if(tunnelMode){const heavy=ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30);
       if(heavy)hint+=' Через бесплатный туннель 1080p и 60 кадров рвутся — поставьте 720p и 30 кадров.';}
-    linkText=streamStalled?'Поток отстаёт':rtspLive?'Канал готов':streamReady?(tunnelMode?`Готово · ${state.tunnel.provider}`:'Канал готов'):tunnelStarting?'Получаю адрес…':'Готовлю поток…';
+    linkText=streamStalled?'Поток отстаёт':rtspLive?'Готово':streamReady?(tunnelMode?`Готово · ${state.tunnel.provider}`:'Готово'):tunnelStarting?'Получаю ссылку…':'Готовлю…';
     linkGood=(rtspLive||streamReady)&&(!tunnelMode||tunnelReady);
     linkError=streamStalled||state.tunnel?.state==='error';
   }
@@ -225,25 +226,29 @@ function render(state) {
   if(update.available)$('#updateButton').textContent=update.ready?`Обновить до ${update.version}`:`Скачиваю ${update.version}…`;
   $('#updateButton').disabled=!update.ready;
   $('#encoderLabel').textContent=state.performance?.encoder||'неизвестно';
-  const ratio=Number(state.performance?.realtimeRatio||0); $('#streamHealth').textContent=streamReady?`поток ${ratio?Math.round(ratio*100):100}% реального времени`:streamStalled?`скорость ${Math.round(ratio*100)}% · перегрузка`:'канал буферизуется';
+  const ratio=Number(state.performance?.realtimeRatio||0); $('#streamHealth').textContent=streamReady?(ratio&&ratio<0.97?`отстаёт на ${Math.round((1-ratio)*100)}%`:'идёт вовремя'):streamStalled?'не успевает — снизьте качество':'набирает буфер';
   $('#queueCount').textContent=state.queue.length; $('#logs').textContent=state.logs.join('\n')||'Журнал пуст';
-  $('#monitorBadge').textContent=state.running?(state.activeKind==='screen'?'CAPTURE':'MEDIA'):'OFFLINE';
+  $('#monitorBadge').textContent=state.running?(state.activeKind==='screen'?'Экран':'Видео'):'Нет эфира';
   const monitor=$('#monitor');
   monitor.classList.toggle('tally-live',Boolean(state.running&&streamReady));
   monitor.classList.toggle('tally-cue',Boolean(state.running&&!streamReady));
   const list=$('#queueList');
   const queueSignature=JSON.stringify([state.currentId,ui.unitySelectedId,$('#playerMode').value,state.queue.map(item=>[item.id,item.title,item.thumbnail,item.duration,item.unavailable])]);
   if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>`<div class="queue-item ${state.currentId===item.id?'playing':''} ${$('#playerMode').value==='unity'&&ui.unitySelectedId===item.id?'unity-selected':''}" data-id="${item.id}" ${item.unavailable?'data-unavailable="1"':''} role="button" tabindex="0" title="${$('#playerMode').value==='unity'?'Выбрать для подготовки Unity':'Включить этот трек'}"><span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="">`:String(index+1).padStart(2,'0')}</span><span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small>${item.unavailable?'⚠ недоступен — пропускается':`${item.local?'Локальный файл · ':''}${item.duration?formatTime(item.duration):'длительность неизвестна'}`}</small></span><button class="remove-item" aria-label="Удалить из очереди" title="Удалить">×</button></div>`).join(''):'<div class="empty-state">Очередь пуста</div>';}
+  const screenSource=ui.source==='screen';
+  $('#menuMediaQuality').hidden=screenSource; $('#menuMediaFps').hidden=screenSource;
+  $('#menuScreenQuality').hidden=!screenSource; $('#menuScreenFps').hidden=!screenSource;
   renderNowPlaying(state); renderProgress(); renderTemplates(state); renderServers(state); renderStorage(state); startPreview(state);
   $('#goLive').hidden=state.running; $('#stopLive').hidden=!state.running; $('#skipTrack').hidden=!(state.running&&state.activeKind==='queue');
   $('#applyCapture').hidden=!(state.running&&ui.source==='screen');
-  $('#applyCapture').textContent=state.activeKind==='screen'?'Применить к эфиру':'Переключить эфир на захват';
+  $('#applyCapture').textContent=state.activeKind==='screen'?'Применить':'Показать экран в эфире';
   $$('.broadcast-mode button').forEach(node=>node.disabled=state.running);
 }
 
 function chooseSource(source) {
   ui.source=source; $$('.nav-item').forEach(button=>button.classList.toggle('active',button.dataset.tab===source));
-  $('#queuePanel').hidden=source!=='queue'; $('#screenPanel').hidden=source!=='screen'; $('#panelTitle').textContent=source==='queue'?'Медиа-очередь':'Захват экрана';
+  $('#queuePanel').hidden=source!=='queue'; $('#screenPanel').hidden=source!=='screen'; $('#panelTitle').textContent=source==='queue'?'Плейлист':'Экран';
+  $('#queueCount').hidden=source!=='queue';
   if(source!=='screen'&&!ui.status?.running)$('#monitor').classList.remove('source-preview','window-paused');
   if (source==='screen'){refreshWindows().catch(()=>{});if(!ui.status?.running)refreshCapturePreview().catch(()=>{});}
   if(ui.status)render(ui.status);
@@ -443,3 +448,42 @@ for(const card of document.querySelectorAll('details.rail-card')){
   if(saved!==null)card.open=saved==='1';
   card.addEventListener('toggle',()=>localStorage.setItem(key,card.open?'1':'0'));
 }
+
+// Предпросмотр по умолчанию беззвучный: звук уже идёт в наушниках напрямую,
+// а вторая копия с задержкой сбивает. Громкость запоминается между запусками.
+const preview=$('#streamPreview');
+function paintPreviewSound(){
+  const level=Number($('#previewVolume').value)||0;
+  preview.muted=level===0; preview.volume=level/100;
+  $('#previewMute').innerHTML=icon(level===0?'mute':'sound');
+  $('#previewMute').title=level===0?'Включить звук предпросмотра':'Выключить звук предпросмотра';
+  $('#previewVolume').style.setProperty('--fill',`${level}%`);
+  localStorage.setItem('previewVolume',String(level));
+}
+$('#previewVolume').value=localStorage.getItem('previewVolume')||'0';
+$('#previewVolume').addEventListener('input',paintPreviewSound);
+$('#previewMute').addEventListener('click',()=>{
+  const level=Number($('#previewVolume').value)||0;
+  $('#previewVolume').value=level===0?(Number(localStorage.getItem('previewVolumeLast'))||60):0;
+  if(level>0)localStorage.setItem('previewVolumeLast',String(level));
+  paintPreviewSound();
+});
+paintPreviewSound();
+
+// Меню настроек — как у видеосервисов: одна шестерёнка в углу кадра.
+const playerMenu=$('#playerMenu');
+function togglePlayerMenu(open){
+  playerMenu.hidden=open===undefined?!playerMenu.hidden:!open;
+  $('#monitor').classList.toggle('menu-open',!playerMenu.hidden);
+  $('#playerSettings').classList.toggle('on',!playerMenu.hidden);
+}
+$('#playerSettings').addEventListener('click',event=>{event.stopPropagation();togglePlayerMenu();});
+playerMenu.addEventListener('click',event=>event.stopPropagation());
+document.addEventListener('click',()=>togglePlayerMenu(false));
+document.addEventListener('keydown',event=>{ if(event.key==='Escape')togglePlayerMenu(false); });
+
+$('#copyLogs').addEventListener('click',async()=>{
+  const text=$('#logs').textContent||'';
+  const ok=await copyText(text);
+  toast(ok?'Журнал скопирован':'Не удалось скопировать');
+});
