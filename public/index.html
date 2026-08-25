@@ -72,7 +72,7 @@
 
         <details class="rail-card" id="cardOutput" open>
           <summary class="rail-card-head"><svg class="ic" aria-hidden="true"><use href="#i-broadcast"/></svg><span>Куда вещать</span><svg class="ic chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
-          <div class="broadcast-mode"><button class="active" data-output="local" title="Ссылка только для этого компьютера">Локально</button><button data-output="remote" title="Эфир через ваш сервер">Свой сервер</button><button data-output="tunnel" title="Бесплатный туннель, задержка около трёх секунд">Для друзей</button><button data-output="rtmp" title="Публикация на сторонний RTMP-сервер">RTMP</button></div>
+          <div class="broadcast-mode"><button class="active" data-output="local" title="Ссылка только для этого компьютера">Локально</button><button data-output="remote" title="Эфир через ваш сервер">Свой сервер</button><button data-output="tunnel" title="Бесплатный туннель, задержка около трёх секунд">Для друзей</button></div>
           <section class="output-panel" id="remoteOutput" hidden>
             <label>Сервер трансляции<select id="serverSelect"></select></label>
             <div class="server-actions">
@@ -87,10 +87,6 @@
               <p class="field-help">Пароль нужен только для установки и нигде не сохраняется.</p>
             </div>
             <p class="field-help" id="serverHint"></p>
-          </section>
-          <section class="output-panel" id="rtmpOutput" hidden>
-            <label>RTMP-адрес<input id="rtmpUrl" type="password" placeholder="rtmp://…"></label>
-            <label>Публичная HLS-ссылка<input id="publicUrl" type="url" placeholder="https://…/live.m3u8"></label>
           </section>
         </details>
 
@@ -146,6 +142,12 @@
           <button class="drop-button" id="pickLocal"><span><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg></span><div><b>Файлы с компьютера</b><small>Или перетащите их в окно</small></div></button>
           <label class="volume-control" for="mediaVolume"><span><b>Громкость медиа</b><output id="mediaVolumeValue">100%</output></span><input id="mediaVolume" type="range" min="0" max="200" step="5" value="100"></label>
           <div class="stream-preset"><div><b>Качество</b></div><div class="quality-row"><label>Разрешение<select id="mediaQuality"><option value="720p">720p</option><option value="1080p">1080p</option></select></label><label>Кадры<select id="mediaFps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></label></div></div>
+          <div class="storage-box">
+            <div class="storage-head"><span><b>Хранилище</b></span><span id="cacheSize">0 МБ</span></div>
+            <label>Диск для кеша<select id="cacheRoot"></select></label>
+            <p class="field-help" id="cacheHint"></p>
+            <button id="clearCache" type="button">Очистить кеш</button>
+          </div>
           <div class="template-box">
             <div class="template-head"><span><b>Шаблоны очереди</b></span><span id="templateCount">0</span></div>
             <select id="templateSelect" aria-label="Сохранённый шаблон"><option value="">Новый шаблон…</option></select>

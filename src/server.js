@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.30.3';
+const APP_VERSION = '0.31.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -26,7 +26,7 @@ const STANDBY_IMAGE = join(PUBLIC_DIR, 'standby.png');
 const DATA_DIR = join(process.env.LOCALAPPDATA || process.cwd(), 'VRCastBridge');
 const HLS_DIR = join(DATA_DIR, 'hls');
 const THUMB_DIR = join(DATA_DIR, 'thumbs');
-const MEDIA_CACHE_DIR = join(DATA_DIR, 'media-cache');
+const DEFAULT_CACHE_DIR = join(DATA_DIR, 'media-cache');
 const UNITY_DIR = join(DATA_DIR, 'unity');
 const UNITY_ITEMS_DIR = join(UNITY_DIR, 'items');
 const UNITY_QUEUE_FILE = join(UNITY_DIR, 'queue.mp4');
@@ -48,7 +48,7 @@ const MEDIA_EXTENSIONS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v
 
 mkdirSync(HLS_DIR, { recursive: true });
 mkdirSync(THUMB_DIR, { recursive: true });
-mkdirSync(MEDIA_CACHE_DIR, { recursive: true });
+mkdirSync(DEFAULT_CACHE_DIR, { recursive: true });
 mkdirSync(UNITY_ITEMS_DIR, { recursive: true });
 for (const file of [DETAIL_LOG_FILE]) {
   try {
@@ -66,11 +66,12 @@ try {
 } catch {}
 
 const defaults = {
-  outputMode: 'local', rtmpUrl: '', playbackUrl: '', servers: [], activeServerId: '', quality: '720p', fps: 60,
+  outputMode: 'local', servers: [], activeServerId: '', quality: '720p', fps: 60,
   captureMode: 'monitor', captureMonitorId: '', captureWindowHandle: '', regionX: 0, regionY: 0,
   regionWidth: 1280, regionHeight: 720, audioMode: 'system', captureAudioDevice: '',
   audioOutputId: '', audioProcessId: '', loopMode: 'once', playbackSpeed: 1,
   captureVolume: 1.5, mediaVolume: 1, mediaQuality: '720p', mediaFps: 60, previewDelay: 0, localAppVolume: 1, rtspTransport: 'tcp',
+  cacheRoot: '',
 };
 
 function loadConfig() {
@@ -251,6 +252,29 @@ function stopPinggyDaemon() {
         if (/^\d+$/.test(value)) spawn('taskkill.exe', ['/PID', value, '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => {});
       }
     });
+}
+
+// Кеш можно унести на другой диск: на системном место кончается быстрее всего.
+// Пустое значение — папка по умолчанию рядом с настройками.
+function mediaCacheDir() {
+  if (!config.cacheRoot) return DEFAULT_CACHE_DIR;
+  return join(config.cacheRoot, 'VRCastBridge-cache');
+}
+
+function ensureCacheDir() {
+  const directory = mediaCacheDir();
+  mkdirSync(directory, { recursive: true });
+  return directory;
+}
+
+// Буквы дисков перебираем проверкой существования: ни одного процесса и мгновенно.
+function listDrives() {
+  const letters = [];
+  for (let code = 67; code <= 90; code++) {
+    const letter = String.fromCharCode(code);
+    try { if (existsSync(`${letter}:\\`)) letters.push(`${letter}:`); } catch {}
+  }
+  return letters;
 }
 
 function saveConfig(next) {
@@ -697,7 +721,6 @@ function remoteRtspTarget() {
 }
 
 function publicAddress() {
-  if (config.outputMode === 'rtmp' && config.playbackUrl) return config.playbackUrl;
   if (config.outputMode === 'remote') return remoteRtspTarget()?.playUrl || rtspAddress();
   if (config.outputMode === 'tunnel' && tunnelUrl) return `${tunnelUrl}/stream/live.m3u8`;
   // Локально ссылка по умолчанию — RTSP: задержка ~0.5–1с вместо 3–15с у HLS.
@@ -831,7 +854,8 @@ function status() {
     progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
-    cache: { ready: cachedReadyCount(), total: queue.length, downloading: [...mediaCacheJobs.keys()] },
+    cache: { ready: cachedReadyCount(), total: queue.length, downloading: [...mediaCacheJobs.keys()],
+      root: config.cacheRoot || '', path: mediaCacheDir(), drives: storageInfo.drives, sizeMb: storageInfo.sizeMb },
     audio: { levelDb: audioLevelDb, silent: audioLevelDb < -70 },
     performance: { encoder: encoder.label, hardware: encoder.hardware, continuousQueue: true, outputProfile: relayProfile,
       streamClock: Number(streamTimestamp().toFixed(3)),
@@ -846,7 +870,7 @@ function status() {
             url: remoteRtspTarget()?.playUrl || '', hlsUrl: remoteRtspTarget()?.hlsUrl || '' }
         : null },
     tunnel: { state: tunnelState, ready: Boolean(tunnelUrl), provider: tunnelProvider, expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError },
-    config: { ...config, rtmpUrl: config.rtmpUrl ? maskSecret(config.rtmpUrl) : '',
+    config: { ...config,
       servers: savedServers().map(item => ({ id: item.id, name: item.name, host: item.host,
         rtspPort: item.rtspPort, addedAt: item.addedAt, publishKey: undefined })) },
     playbackUrl: publicAddress(),
@@ -860,7 +884,7 @@ function status() {
 // Точную проверку содержимого делает cachedMediaPath в момент воспроизведения.
 function cachedReadyCount() {
   let directories;
-  try { directories = new Set(readdirSync(MEDIA_CACHE_DIR)); } catch { directories = new Set(); }
+  try { directories = new Set(readdirSync(mediaCacheDir())); } catch { directories = new Set(); }
   return queue.filter(item => item.local || (directories.has(item.id) && !mediaCacheJobs.has(item.id))).length;
 }
 
@@ -963,7 +987,6 @@ function sameProfile(left, right) {
 // Осознанная смена качества: релей перезапускается, но relayStartedAt сохраняется,
 // чтобы таймстемпы продолжились и плеер пережил стык без resync.
 function restartRelaySession(profile) {
-  if (config.outputMode === 'rtmp') return;
   stopStandby();
   stopRtspPush();
   const relay = relayProcess;
@@ -1001,20 +1024,12 @@ function producerEncodeArgs(profile = streamProfile()) {
 
 function encodedOutputArgs(profile = streamProfile()) {
   const common = [...videoEncodeArgs(profile), '-c:a', 'aac', '-b:a', '160k', '-ar', '48000', '-flush_packets', '1'];
-  if (config.outputMode === 'rtmp') {
-    if (!config.rtmpUrl || config.rtmpUrl.includes('••')) throw new Error('Укажите RTMP-адрес публикации.');
-    return [...common, '-f', 'flv', config.rtmpUrl];
-  }
   return [...common, '-f', 'hls', '-hls_time', '1', '-hls_list_size', '40', '-hls_delete_threshold', '4',
     '-hls_start_number_source', 'epoch_us', '-hls_flags', 'delete_segments+omit_endlist+program_date_time+independent_segments+temp_file',
     '-hls_segment_filename', join(HLS_DIR, 'segment-%08d.ts'), join(HLS_DIR, 'live.m3u8')];
 }
 
 function relayOutputArgs(profile) {
-  if (config.outputMode === 'rtmp') {
-    if (!config.rtmpUrl || config.rtmpUrl.includes('••')) throw new Error('Укажите RTMP-адрес публикации.');
-    return [...videoEncodeArgs(profile), '-c:a', 'aac', '-b:a', '160k', '-ar', '48000', '-flush_packets', '1', '-f', 'flv', config.rtmpUrl];
-  }
   // Короткая история сегментов (~15с на диске): плеер, отставший сильнее,
   // получает 404 и сам возвращается к живому краю — задержка не может
   // накапливаться бесконечно, как раньше при минутной истории.
@@ -1129,16 +1144,13 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
   stopping = false;
   activeKind = 'screen';
   log(`Захват экрана · ${encoder.label} · ${config.quality}/${config.fps} FPS`);
-  const throughRelay = config.outputMode !== 'rtmp';
-  if (throughRelay) stopStandby();
-  const stdio = ['ignore', throughRelay ? 'pipe' : 'ignore', 'pipe', audioHelperArgs ? 'pipe' : 'ignore', windowHelperArgs ? 'pipe' : 'ignore'];
+  stopStandby();
+  const stdio = ['ignore', 'pipe', 'pipe', audioHelperArgs ? 'pipe' : 'ignore', windowHelperArgs ? 'pipe' : 'ignore'];
   const child = spawn('ffmpeg', args, { windowsHide: true, stdio });
   let aux = null;
   let windowCapture = null;
   activeProcess = child;
-  if (throughRelay) {
-    pipeToRelay(child);
-  }
+  pipeToRelay(child);
   if (audioHelperArgs) {
     const helper = join(ROOT, 'tools', 'VRCast.AudioCapture.exe');
     if (!existsSync(helper)) {
@@ -1195,13 +1207,11 @@ async function startScreen() {
 
 async function startScreenInner() {
   const wasLive = Boolean(activeKind);
-  stopActive(false, true, config.outputMode !== 'rtmp');
+  stopActive(false, true, true);
   currentId = null; currentStartedAt = null; currentDuration = null;
-  if (config.outputMode !== 'rtmp') {
-    const desired = streamProfile('screen');
-    if (relayProcess && !sameProfile(relayProfile, desired) && !wasLive) restartRelaySession(desired);
-    ensureRelay(desired);
-  }
+  const desired = streamProfile('screen');
+  if (relayProcess && !sameProfile(relayProfile, desired) && !wasLive) restartRelaySession(desired);
+  ensureRelay(desired);
   const profile = sessionProfile('screen');
   const height = profile.quality === '1080p' ? 1080 : 720;
   const width = height === 1080 ? 1920 : 1280;
@@ -1258,7 +1268,7 @@ async function startScreenInner() {
   const captureVolume = Math.max(0, Math.min(3, Number(config.captureVolume) || 0));
   args.push('-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
     '-af', `aresample=async=1:first_pts=0:min_hard_comp=0.100,volume=${captureVolume.toFixed(2)}`,
-    '-r', String(profile.fps), '-fps_mode', 'cfr', ...(config.outputMode === 'rtmp' ? encodedOutputArgs(profile) : mpegTsOutputArgs(profile)));
+    '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile));
   runScreenProcess(args, audioHelperArgs, windowHelperArgs);
   startPublicTunnel();
   if (config.captureMode === 'window') watchCapturedWindow(config.captureWindowHandle, windowCaptureState);
@@ -1485,7 +1495,7 @@ async function pauseWithFrozenFrame(generation, frameSource, preferOriginal) {
 }
 
 function startStandby(profile = sessionProfile()) {
-  if (!relayProcess || standbyProcess || activeProcess || config.outputMode === 'rtmp') return;
+  if (!relayProcess || standbyProcess || activeProcess) return;
   const height = profile.quality === '1080p' ? 1080 : 720;
   const width = height === 1080 ? 1920 : 1280;
   // «-re» обязателен на КАЖДОМ lavfi-входе: непейсируемый anullsrc генерирует
@@ -1523,7 +1533,7 @@ function ensureRelay(profile = streamProfile()) {
 function startQueue(initialIndex = 0) {
   if (!queue.length) throw new Error('Очередь пуста. Добавьте ссылку или файл.');
   const wasLive = Boolean(activeKind);
-  stopActive(false, true, config.outputMode !== 'rtmp');
+  stopActive(false, true, true);
   stopping = false;
   activeKind = 'queue';
   currentId = null;
@@ -1635,7 +1645,7 @@ function clearMediaFailure(itemId) {
 }
 
 function cachedMediaPath(itemId) {
-  const directory = join(MEDIA_CACHE_DIR, String(itemId));
+  const directory = join(mediaCacheDir(), String(itemId));
   try {
     return readdirSync(directory).map(name => join(directory, name))
       .find(file => !/\.(part|ytdl|temp)$/i.test(file) && statSync(file).isFile() && statSync(file).size > 1024) || '';
@@ -1654,10 +1664,47 @@ function mediaCacheLimit() {
   return freeDiskMb !== null && freeDiskMb < 4000 ? 1024 * 1024 * 1024 : 4 * 1024 * 1024 * 1024;
 }
 
+// Регулярная уборка: кеш по лимиту, папки удалённых треков, ненужные превью
+// и временные файлы Unity. Без неё мусор копился до конца свободного места.
+function cleanupStorage() {
+  trimMediaCache();
+  storageInfo = { sizeMb: mediaCacheSizeMb(), drives: listDrives() };
+  const alive = new Set(queue.map(item => item.id));
+  try {
+    for (const name of readdirSync(mediaCacheDir())) {
+      if (alive.has(name) || mediaCacheJobs.has(name)) continue;
+      rmSync(join(mediaCacheDir(), name), { recursive: true, force: true });
+    }
+  } catch {}
+  try {
+    for (const name of readdirSync(THUMB_DIR)) {
+      if (!alive.has(name.replace(/\.[a-z0-9]+$/i, ''))) rmSync(join(THUMB_DIR, name), { force: true });
+    }
+  } catch {}
+  try {
+    for (const name of readdirSync(UNITY_DIR)) {
+      if (name.endsWith('.tmp.mp4')) rmSync(join(UNITY_DIR, name), { force: true });
+    }
+  } catch {}
+}
+
+let storageInfo = { sizeMb: 0, drives: [] };
+
+function mediaCacheSizeMb() {
+  try {
+    let total = 0;
+    for (const name of readdirSync(mediaCacheDir())) {
+      const directory = join(mediaCacheDir(), name);
+      try { for (const file of readdirSync(directory)) total += statSync(join(directory, file)).size; } catch {}
+    }
+    return Math.round(total / 1048576);
+  } catch { return 0; }
+}
+
 function trimMediaCache(maxBytes = mediaCacheLimit()) {
   try {
-    const entries = readdirSync(MEDIA_CACHE_DIR).flatMap(name => {
-      const directory = join(MEDIA_CACHE_DIR, name);
+    const entries = readdirSync(mediaCacheDir()).flatMap(name => {
+      const directory = join(mediaCacheDir(), name);
       try {
         const files = readdirSync(directory).map(file => join(directory, file)).filter(file => statSync(file).isFile());
         return [{ directory, size: files.reduce((sum, file) => sum + statSync(file).size, 0), modified: statSync(directory).mtimeMs }];
@@ -1676,7 +1723,7 @@ function downloadRemoteMedia(item) {
   const existing = cachedMediaPath(item.id);
   if (existing) {
     return cachedMedia(item, existing).catch(() => {
-      try { rmSync(join(MEDIA_CACHE_DIR, item.id), { recursive: true, force: true }); } catch {}
+      try { rmSync(join(mediaCacheDir(), item.id), { recursive: true, force: true }); } catch {}
       return startCacheDownload(item);
     });
   }
@@ -1685,7 +1732,7 @@ function downloadRemoteMedia(item) {
 
 function startCacheDownload(item) {
   if (mediaCacheJobs.has(item.id)) return mediaCacheJobs.get(item.id);
-  const directory = join(MEDIA_CACHE_DIR, item.id);
+  const directory = join(mediaCacheDir(), item.id);
   mkdirSync(directory, { recursive: true });
   let promise;
   promise = new Promise((resolvePromise, reject) => {
@@ -2493,6 +2540,17 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/unity/capture/stop') {
       stopUnityCaptureRecording(); return json(res, 202, status());
     }
+    if (req.method === 'POST' && url.pathname === '/api/cache/clear') {
+      // Играющий и качающийся треки не трогаем: файл занят, и эфир оборвётся.
+      try {
+        for (const name of readdirSync(mediaCacheDir())) {
+          if (mediaCacheJobs.has(name) || name === currentId) continue;
+          rmSync(join(mediaCacheDir(), name), { recursive: true, force: true });
+        }
+      } catch {}
+      cleanupStorage();
+      return json(res, 200, status());
+    }
     if (req.method === 'POST' && url.pathname === '/api/update/apply') {
       applyUpdate();
       json(res, 200, { ok: true });
@@ -2562,7 +2620,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/config') {
       const body = await readBody(req);
       const next = {
-        outputMode: ['local', 'tunnel', 'rtmp', 'remote'].includes(body.outputMode) ? body.outputMode : 'local',
+        outputMode: ['local', 'tunnel', 'remote'].includes(body.outputMode) ? body.outputMode : 'local',
+        cacheRoot: typeof body.cacheRoot === 'string' ? body.cacheRoot.trim().slice(0, 300) : config.cacheRoot,
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')), quality: body.quality === '1080p' ? '1080p' : '720p', fps: body.fps === 60 ? 60 : 30,
         captureMode: ['desktop', 'monitor', 'window', 'region'].includes(body.captureMode) ? body.captureMode : 'monitor',
@@ -2582,13 +2641,28 @@ const server = http.createServer(async (req, res) => {
         mediaFps: body.mediaFps === 60 ? 60 : (body.mediaFps === 30 ? 30 : (config.mediaFps || 30)),
         previewDelay: [0, 3, 5, 7, 10].includes(Number(body.previewDelay)) ? Number(body.previewDelay) : Math.min(10, Number(config.previewDelay) || 0),
         previewDelayReset: true,
-        playbackUrl: String(body.playbackUrl || '').trim().slice(0, 1000),
       };
-      if (body.rtmpUrl && !String(body.rtmpUrl).includes('••')) next.rtmpUrl = String(body.rtmpUrl).trim().slice(0, 2000);
       const previousOutput = config.outputMode;
       const previousRemoteTarget = remoteRtspTarget();
       const applyLive = Boolean(body.applyLive);
+      // Смена диска для кеша: проверяем, что папка создаётся и туда можно писать,
+      // и только потом сохраняем — иначе загрузки молча перестанут работать.
+      const previousCacheDir = mediaCacheDir();
+      if (next.cacheRoot !== config.cacheRoot) {
+        const target = next.cacheRoot ? join(next.cacheRoot, 'VRCastBridge-cache') : DEFAULT_CACHE_DIR;
+        try {
+          mkdirSync(target, { recursive: true });
+          const probe = join(target, '.write-test');
+          writeFileSync(probe, 'ok'); rmSync(probe, { force: true });
+        } catch { return json(res, 400, { error: `Не удаётся писать в ${target}. Выберите другой диск.` }); }
+      }
       saveConfig(next);
+      if (mediaCacheDir() !== previousCacheDir) {
+        // Старую папку убираем: треки перекачаются на новое место сами.
+        try { rmSync(previousCacheDir, { recursive: true, force: true }); } catch {}
+        ensureCacheDir();
+        log(`Кеш видео теперь в ${mediaCacheDir()}`);
+      }
       const previousRemote = previousRemoteTarget?.publishUrl || '';
       if (previousOutput !== config.outputMode) {
         if (config.outputMode === 'tunnel') startPublicTunnel();
@@ -2600,7 +2674,7 @@ const server = http.createServer(async (req, res) => {
         stopRtspPush();
         if (relayProcess) startRtspPush();
       }
-      if (applyLive && activeKind && config.outputMode !== 'rtmp') {
+      if (applyLive && activeKind) {
         const desired = streamProfile(activeKind);
         if (relayProcess && !sameProfile(relayProfile, desired)) restartRelaySession(desired);
       }
@@ -2665,13 +2739,16 @@ server.listen(PORT, HOST, () => {
   logDetail(`=== запуск VRCast Bridge ${APP_VERSION} · ffmpeg: ${tools.ffmpeg ? 'есть' : 'нет'} · yt-dlp: ${ytdlpPath()} · кодировщик: ${encoder.label} ===`);
   startHlsHealthMonitor();
   watchFreeSpace();
+  ensureCacheDir();
+  cleanupStorage();
+  setInterval(cleanupStorage, 10 * 60 * 1000).unref();
   // Скачанный установщик после перезапуска уже не нужен — это 200 МБ на диске.
   try { rmSync(UPDATE_DIR, { recursive: true, force: true }); } catch {}
   refreshYtdlp();
   // Проверяем не сразу: пусть эфир поднимется первым, обновление подождёт.
   setTimeout(() => { checkForUpdate(); }, 8000);
   if (tools.mediamtx) { startMediaMtx(); log(`Мгновенный канал RTSP: rtspt://127.0.0.1:${RTSP_PORT}/live`); }
-  if (tools.ffmpeg && config.outputMode !== 'rtmp') ensureRelay(streamProfile('queue'));
+  if (tools.ffmpeg) ensureRelay(streamProfile('queue'));
   if (config.outputMode === 'tunnel') setTimeout(startPublicTunnel, 250);
 });
 server.on('error', error => {

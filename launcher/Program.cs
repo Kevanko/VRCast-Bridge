@@ -10,7 +10,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.30.3";
+    private const string AppVersion = "0.31.0";
 
     [STAThread]
     private static void Main(string[] args)
