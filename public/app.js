@@ -86,7 +86,7 @@ function monitorPlaceholder(title, text, name = 'broadcast') {
 
 function startPreview(state) {
   const video=$('#streamPreview'), monitor=$('#monitor');
-  if (!state.running || state.config.outputMode==='rtmp') {
+  if (!state.running) {
     ui.hls?.destroy(); ui.hls=null; ui.previewUrl=''; video.removeAttribute('src'); monitor.classList.remove('previewing'); return;
   }
   const delay=Math.max(0,Number(state.config.previewDelay)||0);
@@ -101,6 +101,20 @@ function startPreview(state) {
     hls.on(window.Hls.Events.MANIFEST_PARSED,()=>{monitor.classList.add('previewing');video.play().catch(()=>{});});
     hls.on(window.Hls.Events.ERROR,(_,data)=>{if(!data.fatal||!ui.status?.running)return;hls.destroy();ui.hls=null;ui.previewUrl='';if(ui.status?.stream?.state!=='offline')setTimeout(()=>startPreview(ui.status),2000);});
   }
+}
+
+function renderStorage(state){
+  const cache=state.cache||{}, select=$('#cacheRoot');
+  const drives=cache.drives||[];
+  const signature=`${drives.join(',')}|${cache.root||''}`;
+  if(ui.driveSignature!==signature){
+    ui.driveSignature=signature;
+    select.innerHTML=`<option value="">По умолчанию (диск с Windows)</option>`+drives.map(drive=>`<option value="${drive}\\">${drive} диск</option>`).join('');
+    select.value=cache.root||'';
+  }
+  $('#cacheSize').textContent=`${cache.sizeMb||0} МБ`;
+  const free=state.disk?.freeMb;
+  $('#cacheHint').textContent=cache.path?`${cache.path}${free!==null&&free!==undefined?` · свободно ${Math.round(free/1024*10)/10} ГБ`:''}`:'';
 }
 
 function renderServers(state) {
@@ -150,7 +164,7 @@ function render(state) {
     linkError=Boolean(remote.configured&&!remote.live&&state.running);
   }
   else {
-    const rtspLive=!tunnelMode&&state.config.outputMode!=='rtmp'&&Boolean(state.rtsp?.available);
+    const rtspLive=!tunnelMode&&Boolean(state.rtsp?.available);
     shownUrl=tunnelReady?state.tunnel.url:tunnelMode?'':state.playbackUrl;
     hint=rtspLive?'В мире нужен AVPro и включённые Untrusted URLs.':'В мире нужен плеер AVPro.';
     // Бесплатный туннель не тянет тяжёлый поток — это и есть причина рывков у друзей.
@@ -193,7 +207,7 @@ function render(state) {
   const list=$('#queueList');
   const queueSignature=JSON.stringify([state.currentId,ui.unitySelectedId,$('#playerMode').value,state.queue.map(item=>[item.id,item.title,item.thumbnail,item.duration,item.unavailable])]);
   if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>`<div class="queue-item ${state.currentId===item.id?'playing':''} ${$('#playerMode').value==='unity'&&ui.unitySelectedId===item.id?'unity-selected':''}" data-id="${item.id}" ${item.unavailable?'data-unavailable="1"':''} role="button" tabindex="0" title="${$('#playerMode').value==='unity'?'Выбрать для подготовки Unity':'Включить этот трек'}"><span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="">`:String(index+1).padStart(2,'0')}</span><span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small>${item.unavailable?'⚠ недоступен — пропускается':`${item.local?'Локальный файл · ':''}${item.duration?formatTime(item.duration):'длительность неизвестна'}`}</small></span><button class="remove-item" aria-label="Удалить из очереди" title="Удалить">×</button></div>`).join(''):'<div class="empty-state">Очередь пуста</div>';}
-  renderNowPlaying(state); renderProgress(); renderTemplates(state); renderServers(state); startPreview(state);
+  renderNowPlaying(state); renderProgress(); renderTemplates(state); renderServers(state); renderStorage(state); startPreview(state);
   $('#goLive').hidden=state.running; $('#stopLive').hidden=!state.running; $('#skipTrack').hidden=!(state.running&&state.activeKind==='queue');
   $('#applyCapture').hidden=!(state.running&&ui.source==='screen');
   $('#applyCapture').textContent=state.activeKind==='screen'?'Применить к эфиру':'Переключить эфир на захват';
@@ -207,7 +221,7 @@ function chooseSource(source) {
   if (source==='screen'){refreshWindows().catch(()=>{});if(!ui.status?.running)refreshCapturePreview().catch(()=>{});}
   if(ui.status)render(ui.status);
 }
-function chooseOutput(output) { ui.output=output; $$('.broadcast-mode button').forEach(button=>button.classList.toggle('active',button.dataset.output===output)); $('#rtmpOutput').hidden=output!=='rtmp'; $('#remoteOutput').hidden=output!=='remote'; }
+function chooseOutput(output) { ui.output=output; $$('.broadcast-mode button').forEach(button=>button.classList.toggle('active',button.dataset.output===output)); $('#remoteOutput').hidden=output!=='remote'; }
 function chooseCaptureMode(mode) { $('#monitorFields').hidden=mode!=='monitor'; $('#windowFields').hidden=mode!=='window'&&$('#audioMode').value!=='process'; $('#regionFields').hidden=mode!=='region'; if(mode==='window'&&$('#audioMode').value==='system'){$('#audioMode').value='process';chooseAudioMode('process');} }
 function chooseAudioMode(mode) {
   // Звук процесса привязан к выбранному окну — селектор окна нужен даже при захвате монитора/области.
@@ -239,7 +253,7 @@ async function refreshWindows() {
 
 function configPayload() {
   const selectedWindow=ui.sources.windows.find(item=>item.handle===$('#windowSource').value);
-  return { outputMode:ui.output,rtmpUrl:$('#rtmpUrl').value,activeServerId:$('#serverSelect').value,playbackUrl:$('#publicUrl').value,quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),previewDelay:Number($('#previewDelay').value),captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),rtspTransport:$('#rtspTransport').value,loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100 };
+  return { outputMode:ui.output,activeServerId:$('#serverSelect').value,quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),previewDelay:Number($('#previewDelay').value),captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),rtspTransport:$('#rtspTransport').value,loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100 };
 }
 async function saveConfig(applyLive = false) { return api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),applyLive})}); }
 
@@ -333,6 +347,15 @@ $('#recordUnityCapture').addEventListener('click',async()=>{const recording=ui.s
 
 async function playback(action,extra={}){try{render(await api('/api/playback',{method:'POST',body:JSON.stringify({action,...extra})}));const delay=Math.max(0,Number(ui.status?.config?.previewDelay)||0);if(delay&&['pause','resume','seek'].includes(action))toast(`В VRChat это появится через ${delay} с`);return true;}catch(error){toast(error.message,true);return false;}}
 $('#togglePause').addEventListener('click',()=>ui.status?.playback?.paused?playback('resume'):playback('pause',{position:ui.seekPending?ui.seekDraft:presentedProgress(ui.status).position})); $('#previousTrack').addEventListener('click',()=>playback('previous')); $('#nextTrack').addEventListener('click',()=>playback('next')); $('#skipTrack').addEventListener('click',()=>playback('next'));
+$('#cacheRoot').addEventListener('change',async()=>{
+  try{ render(await api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),cacheRoot:$('#cacheRoot').value})}));
+    toast('Кеш переехал, треки перекачаются на новое место'); }
+  catch(error){ toast(error.message,true); }
+});
+$('#clearCache').addEventListener('click',async()=>{
+  try{ render(await api('/api/cache/clear',{method:'POST'})); toast('Кеш очищен'); }
+  catch(error){ toast(error.message,true); }
+});
 $('#seekBar').addEventListener('input',event=>{ui.seeking=true;const percent=Number(event.target.value)/10;event.target.style.setProperty('--seek',`${percent}%`);const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*percent/100;$('#elapsedTime').textContent=formatTime(ui.seekDraft);});
 $('#seekBar').addEventListener('change',async event=>{const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*Number(event.target.value)/1000;ui.seeking=false;ui.seekPending=true;ui.seekVisualUntil=Date.now()+Math.max(0,Number(ui.status?.config?.previewDelay)||0)*1000;ui.seekRevision=Number(ui.status?.playback?.revision||0)+1;if(!await playback('seek',{position:ui.seekDraft}))ui.seekPending=false;});
 function applyQualityLive(kind){clearTimeout(ui.liveApplyTimer);ui.liveApplyTimer=setTimeout(async()=>{try{const live=ui.status?.activeKind===kind;render(await saveConfig(live));toast(live?'Качество применено':'Качество сохранено');}catch(error){toast(error.message,true);}},350);}
@@ -358,7 +381,7 @@ $('#openLogFolder').addEventListener('click',async()=>{const folder=ui.status?.l
 $('#shutdownApp').addEventListener('click',async()=>{try{await api('/api/shutdown',{method:'POST'});window.location.href='vrcast://close';}catch(error){toast(error.message,true);}});
 
 async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#rtmpUrl').value=state.config.rtmpUrl;$('#publicUrl').value=state.config.playbackUrl;$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#previewDelay').value=String(state.config.previewDelay??5);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#rtspTransport').value=state.config.rtspTransport||'tcp';paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);ui.previewTimer=setInterval(()=>refreshCapturePreview(false).catch(()=>{}),2000);
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#previewDelay').value=String(state.config.previewDelay??5);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#rtspTransport').value=state.config.rtspTransport||'tcp';paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);ui.previewTimer=setInterval(()=>refreshCapturePreview(false).catch(()=>{}),2000);
 const stall={time:0,strikes:0};
 setInterval(()=>{const video=$('#streamPreview');
   if(!ui.hls||!ui.status?.running||ui.status?.stream?.state!=='ready'){stall.strikes=0;stall.time=video.currentTime;return;}

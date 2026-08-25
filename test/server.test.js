@@ -392,12 +392,12 @@ test('удаление играющего трека переключает эф
 });
 
 test('ошибка старта не оставляет зомби-состояние эфира', async () => {
-  await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outputMode: 'rtmp' }) });
+  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
   const failed = await fetch(`http://127.0.0.1:${port}/api/start/queue`, { method: 'POST' });
   assert.equal(failed.status, 400);
   const state = await fetch(`http://127.0.0.1:${port}/api/status`).then(response => response.json());
   assert.equal(state.running, false, 'после ошибки старта эфир не должен числиться запущенным');
-  await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outputMode: 'local' }) });
+  await fetch(`http://127.0.0.1:${port}/api/queue/local`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paths: [join(dataDirectory, 'seek-stress.mp4')] }) });
   const recovered = await fetch(`http://127.0.0.1:${port}/api/start/queue`, { method: 'POST' });
   assert.equal(recovered.status, 200, 'после возврата в local эфир должен запускаться');
   await new Promise(resolve => setTimeout(resolve, 2000));
