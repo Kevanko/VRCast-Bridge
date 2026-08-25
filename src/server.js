@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.38.0';
+const APP_VERSION = '0.39.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -860,7 +860,8 @@ async function downloadTool(name) {
     for await (const chunk of response.body) {
       chunks.push(chunk);
       received += chunk.length;
-      if (total) toolDownloads = { ...toolDownloads, [name]: { state: 'work', percent: Math.round(received / total * 100), label: source.label } };
+      if (total) toolDownloads = { ...toolDownloads, [name]: { state: 'work', percent: Math.round(received / total * 100),
+        label: source.label, doneMb: Math.round(received / 1048576), totalMb: Math.round(total / 1048576) } };
     }
     writeFileSync(temporary, Buffer.concat(chunks));
     if (source.unpack) {

@@ -227,7 +227,10 @@ function render(state) {
   const update=state.update||{};
   const качается=Object.values(state.toolDownloads||{}).find(item=>item.state==='work');
   $('#toolProgress').hidden=!качается;
-  if(качается)$('#toolProgress').textContent=`Догружаю: ${качается.label} ${качается.percent}%`;
+  if(качается){
+    const мегабайты=качается.totalMb?` · ${качается.doneMb} из ${качества(качается)} МБ`:'';
+    $('#toolProgress').innerHTML=`<i style="width:${качается.percent}%"></i><span>${качается.label} ${качается.percent}%${мегабайты}</span>`;
+  }
   offerUpdate(update);
   $('#updateButton').hidden=!update.available;
   if(update.available)$('#updateButton').textContent=update.ready?`Обновить до ${update.version}`:`Скачиваю ${update.version}…`;
@@ -524,6 +527,8 @@ function updateBlocked(version){
   const снова=Number(localStorage.getItem('updateSnooze')||0);
   return Date.now()<снова;
 }
+function качества(item){return item.totalMb;}
+
 function paintUpdateDialog(update){
   $('#updateVersion').textContent=update.version||'';
   $('#updateNotes').textContent=(update.notes||'').replace(/^#{1,6}\s*/gm,'').replace(/\*\*(.+?)\*\*/g,'$1').replace(/`/g,'').trim()||'Исправления и улучшения.';
