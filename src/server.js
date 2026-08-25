@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.31.0';
+const APP_VERSION = '0.32.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1219,6 +1219,7 @@ async function startScreenInner() {
   let windowHelperArgs = null;
   let captureRect = null;
   let selectedWindow = null;
+  let ddagrabOutput = null;
   if (config.captureMode === 'window') {
     if (!/^\d+$/.test(String(config.captureWindowHandle))) throw new Error('Выберите окно для захвата.');
     selectedWindow = (await listWindows()).find(item => item.handle === String(config.captureWindowHandle)) || null;
@@ -1238,6 +1239,10 @@ async function startScreenInner() {
     args.push('-fflags', 'nobuffer', '-thread_queue_size', '8', '-use_wallclock_as_timestamps', '1', '-f', 'rawvideo', '-pixel_format', 'bgra', '-video_size', `${captureWidth}x${captureHeight}`, '-framerate', String(profile.fps), '-i', 'pipe:4');
   } else if (config.captureMode === 'window') {
     args.push('-re', '-f', 'lavfi', '-i', `color=c=0x24202c:s=${width}x${height}:r=${profile.fps}`);
+  } else if (config.captureMode === 'monitor' && (ddagrabOutput = await ddagrabIndexFor(captureRect)) !== null) {
+    // Это не генератор вроде color или anullsrc, а живой источник со своим
+    // темпом, поэтому «-re» здесь не нужен — так же, как и для gdigrab.
+    args.push('-thread_queue_size', '16', '-f', 'lavfi', '-i', `ddagrab=output_idx=${ddagrabOutput}:framerate=${profile.fps}`);
   } else {
     args.push('-fflags', 'nobuffer', '-thread_queue_size', '16', '-f', 'gdigrab', '-draw_mouse', '1', '-framerate', String(profile.fps));
     if (captureRect) args.push('-offset_x', String(captureRect.x), '-offset_y', String(captureRect.y), '-video_size', `${captureRect.width}x${captureRect.height}`, '-i', 'desktop');
@@ -1266,7 +1271,9 @@ async function startScreenInner() {
   // Компенсацию приглушения делает сам хелпер, ещё во float: усиливать здесь
   // значило бы поднимать вместе с сигналом шум квантования 16 бит.
   const captureVolume = Math.max(0, Math.min(3, Number(config.captureVolume) || 0));
-  args.push('-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
+  // Кадр от Desktop Duplication лежит в памяти видеокарты — забираем его перед фильтрами.
+  const fromGpu = ddagrabOutput === null ? '' : 'hwdownload,format=bgra,';
+  args.push('-vf', `${fromGpu}scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
     '-af', `aresample=async=1:first_pts=0:min_hard_comp=0.100,volume=${captureVolume.toFixed(2)}`,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile));
   runScreenProcess(args, audioHelperArgs, windowHelperArgs);
@@ -1577,8 +1584,17 @@ function spawnJson(command, args, timeout = 60000) {
 }
 
 async function resolveRemoteMedia(entryUrl) {
+  const preferred = [
+    'bestvideo[vcodec^=avc1][height<=1080]+bestaudio[acodec^=mp4a]',
+    'bestvideo[vcodec^=avc1][height<=1080]+bestaudio',
+    'bestvideo[vcodec^=vp9][height<=1080]+bestaudio',
+    'bestvideo[height<=1080]+bestaudio',
+    'best[vcodec^=avc1][height<=1080]',
+    'best[height<=1080]',
+    'best',
+  ].join('/');
   const data = await spawnJson(ytdlpPath(), ['--no-warnings', '--no-playlist', '--dump-single-json',
-    '-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best', entryUrl], 70000);
+    '-f', preferred, entryUrl], 70000);
   const formats = Array.isArray(data.requested_formats) ? data.requested_formats : [];
   const video = formats.find(format => format.vcodec && format.vcodec !== 'none');
   const audio = formats.find(format => format.acodec && format.acodec !== 'none');
@@ -1960,6 +1976,10 @@ async function prefetchQueue(fromIndex = queueIndex) {
   } finally { prefetching = false; }
 }
 
+// Декодирование отдаём видеокарте: при неудаче ffmpeg сам возвращается к
+// программному пути, поэтому флаг безопасен для любых источников.
+const HWACCEL = ['-hwaccel', 'auto'];
+
 function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   const profile = sessionProfile('queue');
   const height = profile.quality === '1080p' ? 1080 : 720;
@@ -1977,7 +1997,7 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   }
   if (media.videoUrl && media.audioUrl && media.videoUrl !== media.audioUrl) {
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
-    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', '-re', '-i', media.videoUrl);
+    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', ...HWACCEL, '-re', '-i', media.videoUrl);
     videoIndex = inputIndex++;
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
     args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', '-re', '-i', media.audioUrl);
@@ -1992,7 +2012,7 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
     // видео просто игнорируется) и всегда держим темп реального времени:
     // без него готовый плейлист проглатывается вдвое быстрее и эфир уезжает.
     if (media.live) args.push('-live_start_index', '-1');
-    args.push('-re', '-i', source);
+    args.push(...HWACCEL, '-re', '-i', source);
     if (media.hasVideo) videoIndex = inputIndex;
     if (media.hasAudio) audioIndex = inputIndex;
     inputIndex++;
@@ -2361,6 +2381,32 @@ async function runPowerShellJson(script) {
   if (result.status !== 0 || !result.stdout.trim()) return [];
   try { const parsed = JSON.parse(result.stdout); return Array.isArray(parsed) ? parsed : [parsed]; }
   catch { return []; }
+}
+
+// Захват монитора: GDI копирует каждый кадр силами процессора (замер на
+// 2560x1440@60 — 1,38 ядра, из них 0,5 в ядре системы), Desktop Duplication
+// отдаёт кадр видеокартой — 0,98 ядра и почти без системного времени, что
+// заодно перестаёт мешать игре. Windows называет мониторы \\.\DISPLAYn, а
+// ddagrab выбирает их по номеру выхода видеокарты; совпадает не всегда, поэтому
+// номер подбираем пробным кадром и сверяем разрешение. Не сошлось — остаёмся на GDI.
+const ddagrabIndexes = new Map();
+
+async function ddagrabIndexFor(monitor) {
+  if (!monitor || !tools.ffmpeg) return null;
+  if (ddagrabIndexes.has(monitor.id)) return ddagrabIndexes.get(monitor.id);
+  const guess = Math.max(0, (Number(String(monitor.id).match(/(\d+)$/)?.[1]) || 1) - 1);
+  let found = null;
+  for (const index of [...new Set([guess, 0, 1, 2, 3])]) {
+    const probe = await spawnCollect('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-f', 'lavfi',
+      '-i', `ddagrab=output_idx=${index}:framerate=10`, '-frames:v', '1', '-f', 'null', '-'], 9000).catch(() => null);
+    const size = `${probe?.stderr || ''}`.match(/,\s(\d{3,5})x(\d{3,5})/);
+    if (size && Number(size[1]) === monitor.width && Number(size[2]) === monitor.height) { found = index; break; }
+  }
+  ddagrabIndexes.set(monitor.id, found);
+  log(found === null
+    ? `Монитор ${monitor.id}: аппаратный захват недоступен, работаю через GDI`
+    : `Монитор ${monitor.id}: аппаратный захват экрана (выход ${found})`);
+  return found;
 }
 
 async function listMonitors() {

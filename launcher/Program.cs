@@ -10,7 +10,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.31.0";
+    private const string AppVersion = "0.32.0";
 
     [STAThread]
     private static void Main(string[] args)
@@ -308,6 +308,12 @@ internal sealed class MainWindow : Form
         _webView.AllowExternalDrop = false;
         Controls.Add(_webView);
         Shown += InitializeWebView;
+        // Свёрнутое окно не должно декодировать эфир: страница гасит предпросмотр.
+        Resize += (_, _) =>
+        {
+            var name = WindowState == FormWindowState.Minimized ? "vrcast-hidden" : "vrcast-shown";
+            try { _webView.CoreWebView2?.ExecuteScriptAsync($"document.dispatchEvent(new Event('{name}'))"); } catch { }
+        };
         // Геометрию применяем после создания окна: до этого WinForms пересчитывает
         // координаты под DPI другого монитора и окно уползает при каждом запуске.
         Shown += (_, _) => RestoreGeometry();

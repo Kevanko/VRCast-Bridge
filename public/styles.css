@@ -110,3 +110,9 @@ details.rail-card[open]>summary .chevron{transform:rotate(180deg)}
 .storage-box .field-help{margin:6px 0 8px;font-size:9px;word-break:break-all}
 .storage-box button{width:100%;min-height:30px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface2);color:var(--text);font-size:10px}
 .storage-box button:hover{border-color:var(--orchid)}
+/* Переключатель предпросмотра живёт на самом мониторе */
+#previewToggle{display:grid;place-items:center;width:24px;height:20px;margin-left:auto;border:1px solid var(--line);border-radius:5px;background:rgba(20,16,32,.6);color:var(--muted)}
+#previewToggle:hover{border-color:var(--orchid);color:var(--lilac)}
+#previewToggle.off{border-color:var(--cue);color:var(--cue)}
+#previewToggle .ic{width:13px;height:13px}
+.monitor-top{gap:8px}
