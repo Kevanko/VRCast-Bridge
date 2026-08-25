@@ -131,8 +131,8 @@ function render(state) {
   ui.status=state; ui.progressAt=Date.now(); rememberProgress(state,ui.progressAt); const ready=state.tools.ffmpeg&&state.tools.ytdlp;
   if(ui.seekPending&&!state.playback?.busy&&Number(state.playback?.revision)>=ui.seekRevision&&Date.now()>=ui.seekVisualUntil)ui.seekPending=false;
   const streamReady=Boolean(state.stream?.ready), streamStalled=state.stream?.state==='stalled';
-  $('#stateDot').className=`state-dot ${streamStalled?'error':state.running?'live':ready?'ready':''}`;
-  $('#systemState').textContent=state.playback?.buffering?'Загружаю трек':streamStalled?'Поток отстаёт':state.running&&streamReady?'Эфир идёт':state.running?'Эфир запускается':streamReady?'Канал готов':ready?'Готово к работе':'Нужен FFmpeg';
+  $('#stateDot').className=`state-dot ${state.disk?.low||streamStalled?'error':state.running?'live':ready?'ready':''}`;
+  $('#systemState').textContent=state.disk?.low?`Мало места на диске · ${Math.max(0,Math.round(state.disk.freeMb/1024*10)/10)} ГБ`:state.playback?.buffering?'Загружаю трек':streamStalled?'Поток отстаёт':state.running&&streamReady?'Эфир идёт':state.running?'Эфир запускается':streamReady?'Канал готов':ready?'Готово к работе':'Нужен FFmpeg';
   const tunnelMode=state.config.outputMode==='tunnel', tunnelReady=tunnelMode&&state.tunnel?.ready, tunnelStarting=tunnelMode&&state.tunnel?.state==='starting';
   const unityMode=$('#playerMode').value==='unity', unity=state.compatibility?.unity||{};
   if(!ui.unitySelectedId||!state.queue.some(item=>item.id===ui.unitySelectedId))ui.unitySelectedId=unity.queue?.itemId||state.currentId||state.queue[0]?.id||'';

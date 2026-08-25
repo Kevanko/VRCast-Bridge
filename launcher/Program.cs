@@ -10,7 +10,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.30.2";
+    private const string AppVersion = "0.30.3";
 
     [STAThread]
     private static void Main(string[] args)
@@ -72,7 +72,26 @@ internal static class Program
             if (File.Exists(destination) && File.ReadAllBytes(destination).AsSpan().SequenceEqual(payload)) continue;
             File.WriteAllBytes(destination, payload);
         }
+        CleanOldRuntimes(runtimeDirectory);
         return runtimeDirectory;
+    }
+
+    // Каждая версия распаковывается в свою папку. Старые никто не удалял, и за
+    // месяц их набралось на 3,8 ГБ — диск забивался, а с полным диском ffmpeg
+    // не может писать сегменты, и эфир начинает подвисать на ровном месте.
+    private static void CleanOldRuntimes(string current)
+    {
+        try
+        {
+            var root = Path.GetDirectoryName(current);
+            if (root is null) return;
+            foreach (var directory in Directory.GetDirectories(root))
+            {
+                if (string.Equals(directory, current, StringComparison.OrdinalIgnoreCase)) continue;
+                try { Directory.Delete(directory, true); } catch { }
+            }
+        }
+        catch { }
     }
 
     private static async Task<Process?> EnsureServer(string runtimeDirectory)
