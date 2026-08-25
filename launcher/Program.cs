@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using System.Net;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
@@ -10,7 +11,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.35.1";
+    private const string AppVersion = "0.36.0";
 
     [STAThread]
     private static void Main(string[] args)
@@ -50,13 +51,9 @@ internal static class Program
             ["VRCast.Payload.hls.min.js"] = Path.Combine("public", "vendor", "hls.min.js"),
             ["VRCast.Payload.AudioCapture.exe"] = Path.Combine("tools", "VRCast.AudioCapture.exe"),
             ["VRCast.Payload.WindowCapture.exe"] = Path.Combine("tools", "VRCast.WindowCapture.exe"),
-            ["VRCast.Payload.Cloudflared.exe"] = Path.Combine("tools", "cloudflared.exe"),
-            ["VRCast.Payload.Pinggy.exe"] = Path.Combine("tools", "pinggy.exe"),
-            ["VRCast.Payload.MediaMtx.exe"] = Path.Combine("tools", "mediamtx.exe"),
             ["VRCast.Payload.Plink.exe"] = Path.Combine("tools", "plink.exe"),
             ["VRCast.Payload.logo.png"] = Path.Combine("public", "logo.png"),
-            ["VRCast.Payload.standby.png"] = Path.Combine("public", "standby.png"),
-            ["VRCast.Payload.ytdlp.exe"] = Path.Combine("tools", "yt-dlp.exe")
+            ["VRCast.Payload.standby.png"] = Path.Combine("public", "standby.png")
         };
 
         var assembly = typeof(Program).Assembly;
@@ -119,8 +116,12 @@ internal static class Program
         var nodePath = FindNode();
         if (nodePath is null)
         {
-            ShowError("Не найден Node.js. Установите Node.js 20 или новее и запустите приложение снова.");
-            return null;
+            nodePath = await DownloadNode();
+            if (nodePath is null)
+            {
+                ShowError("Не удалось скачать Node.js. Проверьте интернет или установите Node.js 20 вручную.");
+                return null;
+            }
         }
 
         Process? server;
@@ -169,8 +170,54 @@ internal static class Program
         }
     }
 
+    // Node нужен для работы сервера. Если его нет в системе, скачиваем
+    // официальную сборку в папку данных — ставить ничего не требуется.
+    private static async Task<string?> DownloadNode()
+    {
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "node");
+        var ready = Path.Combine(root, "node.exe");
+        if (File.Exists(ready)) return ready;
+        try
+        {
+            Directory.CreateDirectory(root);
+            using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
+            http.DefaultRequestHeaders.Add("User-Agent", "VRCast-Bridge");
+            const string url = "https://nodejs.org/dist/v22.11.0/node-v22.11.0-win-x64.zip";
+            var archive = Path.Combine(root, "node.zip");
+            await using (var source = await http.GetStreamAsync(url))
+            await using (var file = File.Create(archive))
+                await source.CopyToAsync(file);
+
+            var unpack = Path.Combine(root, "unpack");
+            if (Directory.Exists(unpack)) Directory.Delete(unpack, true);
+            Directory.CreateDirectory(unpack);
+            // Системный tar распаковывает zip без сторонних библиотек.
+            var tar = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe");
+            using (var unzip = Process.Start(new ProcessStartInfo
+            {
+                FileName = File.Exists(tar) ? tar : "tar",
+                Arguments = $"-xf \"{archive}\" -C \"{unpack}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }))
+            {
+                if (unzip is null) return null;
+                await unzip.WaitForExitAsync();
+            }
+            var found = Directory.GetFiles(unpack, "node.exe", SearchOption.AllDirectories).FirstOrDefault();
+            if (found is null) return null;
+            File.Copy(found, ready, true);
+            File.Delete(archive);
+            Directory.Delete(unpack, true);
+            return ready;
+        }
+        catch { return null; }
+    }
+
     private static string? FindNode()
     {
+        var own = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "node", "node.exe");
+        if (File.Exists(own)) return own;
         try
         {
             using var process = Process.Start(new ProcessStartInfo
