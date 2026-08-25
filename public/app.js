@@ -94,7 +94,7 @@ function previewAllowed() {
 }
 
 function stopPreview() {
-  ui.hls?.destroy(); ui.hls=null; ui.previewUrl='';
+  ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl='';
   const video=$('#streamPreview');
   video.pause(); video.removeAttribute('src'); video.load?.();
   $('#monitor').classList.remove('previewing');
@@ -116,13 +116,18 @@ function startPreview(state) {
     return;
   }
   if (!state.running) {
-    ui.hls?.destroy(); ui.hls=null; ui.previewUrl=''; video.removeAttribute('src'); monitor.classList.remove('previewing'); return;
+    ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl=''; video.removeAttribute('src'); video.srcObject=null; monitor.classList.remove('previewing'); return;
   }
   const delay=Math.max(0,Number(state.config.previewDelay)||0);
   const previewSource=(state.localPlaybackUrl||state.playbackUrl).replace(/live\.m3u8(?:\?.*)?$/,'preview.m3u8');
   const previewKey=`${previewSource}|${delay}`;
   if (ui.previewUrl===previewKey && ui.hls) return;
   ui.hls?.destroy(); ui.previewUrl=previewKey;
+  // Сначала пробуем WebRTC: он отдаёт живой кадр почти без задержки.
+  if (state.webrtcUrl && !ui.webrtcFailed) {
+    startWebrtcPreview(state.webrtcUrl, video, monitor);
+    return;
+  }
   if (window.Hls?.isSupported()) {
     const sync=delay>0?{liveSyncDuration:delay,liveMaxLatencyDuration:delay+3}:{liveSyncDurationCount:1,liveMaxLatencyDurationCount:3};
     const hls=new window.Hls({lowLatencyMode:delay===0,...sync,maxBufferLength:Math.max(12,delay+5),maxMaxBufferLength:Math.max(15,delay+10),backBufferLength:1,manifestLoadingTimeOut:5000,levelLoadingTimeOut:5000}); ui.hls=hls;
@@ -297,7 +302,7 @@ async function refreshWindows() {
 
 function configPayload() {
   const selectedWindow=ui.sources.windows.find(item=>item.handle===$('#windowSource').value);
-  return { outputMode:ui.output,activeServerId:$('#serverSelect').value,quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),previewDelay:Number($('#previewDelay').value),captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),rtspTransport:$('#rtspTransport').value,loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100 };
+  return { outputMode:ui.output,activeServerId:$('#serverSelect').value,quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),previewDelay:Number($('#previewDelay').value),videoBitrate:Number($('#videoBitrate').value),captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),rtspTransport:$('#rtspTransport').value,loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100 };
 }
 async function saveConfig(applyLive = false) { return api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),applyLive})}); }
 
@@ -443,7 +448,7 @@ $('#showLogs').addEventListener('click',()=>$('#logDialog').showModal());
 $('#openLogFolder').addEventListener('click',async()=>{try{await api('/api/logs/open',{method:'POST'});}catch{const folder=ui.status?.logFolder;if(folder)await copyText(folder);toast('Не удалось открыть папку, путь скопирован',true);}}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
 async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#previewDelay').value=String(state.config.previewDelay??5);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#rtspTransport').value=state.config.rtspTransport||'tcp';paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);paintPreviewToggle();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);ui.previewTimer=setInterval(()=>refreshCapturePreview(false).catch(()=>{}),2000);
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#previewDelay').value=String(state.config.previewDelay??0);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#rtspTransport').value=state.config.rtspTransport||'tcp';paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);paintPreviewToggle();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);ui.previewTimer=setInterval(()=>refreshCapturePreview(false).catch(()=>{}),2000);
 const stall={time:0,strikes:0};
 setInterval(()=>{const video=$('#streamPreview');
   if(!ui.hls||!ui.status?.running||ui.status?.stream?.state!=='ready'){stall.strikes=0;stall.time=video.currentTime;return;}
@@ -558,3 +563,33 @@ $('#updateNow').addEventListener('click',async()=>{
   try{ await api('/api/update/apply',{method:'POST'}); }
   catch(error){ if(!/fetch|network|Failed/i.test(String(error.message))){ toast(error.message,true); $('#updateNow').disabled=false; } }
 });
+
+// WHEP: браузер отправляет предложение, медиасервер отвечает — и картинка идёт
+// напрямую, без нарезки на куски. Не получилось — откатываемся на HLS.
+async function startWebrtcPreview(url, video, monitor){
+  try{
+    ui.rtc?.close();
+    const rtc=new RTCPeerConnection({iceServers:[]});
+    ui.rtc=rtc;
+    rtc.addTransceiver('video',{direction:'recvonly'});
+    rtc.addTransceiver('audio',{direction:'recvonly'});
+    const поток=new MediaStream();
+    rtc.ontrack=event=>{ поток.addTrack(event.track); video.srcObject=поток; monitor.classList.add('previewing'); video.play().catch(()=>{}); };
+    rtc.onconnectionstatechange=()=>{
+      if(['failed','disconnected'].includes(rtc.connectionState)&&ui.rtc===rtc){
+        ui.rtc=null; ui.previewUrl='';
+        if(ui.status?.running)setTimeout(()=>startPreview(ui.status),1500);
+      }
+    };
+    const offer=await rtc.createOffer();
+    await rtc.setLocalDescription(offer);
+    const ответ=await fetch(url,{method:'POST',headers:{'Content-Type':'application/sdp'},body:offer.sdp});
+    if(!ответ.ok)throw new Error(`медиасервер ответил ${ответ.status}`);
+    await rtc.setRemoteDescription({type:'answer',sdp:await ответ.text()});
+    ui.previewUrl=`webrtc|${url}`;
+  }catch(error){
+    ui.rtc?.close(); ui.rtc=null; ui.webrtcFailed=true; ui.previewUrl='';
+    console.warn('WebRTC-предпросмотр недоступен, перехожу на HLS:',error.message);
+    if(ui.status)startPreview(ui.status);
+  }
+}

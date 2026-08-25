@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.39.0';
+const APP_VERSION = '0.40.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -41,6 +41,8 @@ const LOG_FILE = join(DATA_DIR, 'vrcast.log');
 const DETAIL_LOG_FILE = join(DATA_DIR, 'vrcast-errors.log');
 const PORT = Number(process.env.VRCAST_PORT || 4717);
 const RTSP_PORT = Number(process.env.VRCAST_RTSP_PORT || PORT + 1);
+// Порт WebRTC для предпросмотра: рядом с RTSP, чтобы два экземпляра не спорили.
+const WEBRTC_PORT = RTSP_PORT + 100;
 const HOST = '127.0.0.1';
 // Прямая ссылка на файл или плейлист: разбирать её через yt-dlp незачем.
 const DIRECT_LIVE = /[.](m3u8|mpd)([?#]|$)/i;
@@ -73,6 +75,7 @@ const defaults = {
   audioOutputId: '', audioProcessId: '', loopMode: 'once', playbackSpeed: 1,
   captureVolume: 1.5, mediaVolume: 1, mediaQuality: '720p', mediaFps: 60, previewDelay: 0, localAppVolume: 1, rtspTransport: 'tcp',
   cacheRoot: '',
+  videoBitrate: 0,
 };
 
 function loadConfig() {
@@ -1042,6 +1045,7 @@ function status() {
       servers: savedServers().map(item => ({ id: item.id, name: item.name, host: item.host,
         rtspPort: item.rtspPort, addedAt: item.addedAt, publishKey: undefined })) },
     playbackUrl: publicAddress(),
+    webrtcUrl: mediaMtxProcess ? `http://127.0.0.1:${WEBRTC_PORT}/live/whep` : '',
     localPlaybackUrl: `http://127.0.0.1:${PORT}/stream/live.m3u8`,
     lanAddresses: getLanAddresses().map(ip => `http://${ip}:${PORT}/stream/live.m3u8`),
     logs: logLines, logFolder: DATA_DIR, update: updateState,
@@ -1164,9 +1168,24 @@ function restartRelaySession(profile) {
   startStandby(profile);
 }
 
+// Битрейт задаёт человек, а «авто» подбирается по качеству. Через интернет
+// (свой сервер или туннель) поток ужимается: домашний канал отдачи редко тянет
+// больше 6 Мбит/с, а на переполнении канала появляются те самые фризы.
+function autoBitrateKbps(profile) {
+  if (profile.quality === '1080p') return profile.fps === 60 ? 8000 : 5500;
+  return profile.fps === 60 ? 4800 : 3200;
+}
+
+function bitrateKbps(profile) {
+  const выбран = Number(config.videoBitrate) || 0;
+  let rate = выбран > 0 ? выбран : autoBitrateKbps(profile);
+  const наружу = config.outputMode === 'remote' || config.outputMode === 'tunnel';
+  if (наружу && !выбран) rate = Math.min(rate, 6000);
+  return Math.max(600, Math.min(20000, Math.round(rate)));
+}
+
 function bitrate(profile) {
-  if (profile.quality === '1080p') return profile.fps === 60 ? '8000k' : '5500k';
-  return profile.fps === 60 ? '4800k' : '3200k';
+  return `${bitrateKbps(profile)}k`;
 }
 
 function videoEncodeArgs(profile = streamProfile()) {
@@ -1182,11 +1201,17 @@ function videoEncodeArgs(profile = streamProfile()) {
     '-maxrate', rate, '-bufsize', rate];
 }
 
+// Раньше здесь стоял constqp: качество постоянное, а битрейт какой получится.
+// На игре это выстреливало до десятков мегабит, канал захлёбывался, и зритель
+// видел фризы. Теперь поток ровный: сколько задано, столько и уходит.
 function producerEncodeArgs(profile = streamProfile()) {
   const keyframes = Math.max(8, Math.round(profile.fps * 0.5));
-  if (encoder.name === 'h264_nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p3', '-tune', 'll', '-rc', 'constqp', '-qp', '23',
+  const rate = bitrate(profile);
+  if (encoder.name === 'h264_nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p3', '-tune', 'll', '-rc', 'cbr',
+    '-b:v', rate, '-maxrate', rate, '-bufsize', rate, '-rc-lookahead', '0',
     '-g', String(keyframes), '-keyint_min', String(keyframes), '-bf', '0', '-pix_fmt', 'yuv420p'];
-  return ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-crf', '25',
+  return ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency',
+    '-b:v', rate, '-maxrate', rate, '-bufsize', rate,
     '-g', String(keyframes), '-keyint_min', String(keyframes), '-sc_threshold', '0', '-bf', '0', '-pix_fmt', 'yuv420p'];
 }
 
@@ -1490,7 +1515,11 @@ function startMediaMtx() {
     'logLevel: error', `rtspAddress: :${RTSP_PORT}`,
     `rtpAddress: :${rtpPort}`, `rtcpAddress: :${rtpPort + 1}`,
     `multicastRTPPort: ${rtpPort + 2}`, `multicastRTCPPort: ${rtpPort + 3}`,
-    'rtmp: no', 'hls: no', 'webrtc: no', 'srt: no', 'moq: no', 'api: no', 'metrics: no', 'pprof: no', 'playback: no',
+    'rtmp: no', 'hls: no', 'srt: no', 'moq: no', 'api: no', 'metrics: no', 'pprof: no', 'playback: no',
+    // Предпросмотр берётся отсюда: WebRTC отдаёт кадр за доли секунды,
+    // тогда как HLS собирает секундные куски и всегда отстаёт.
+    'webrtc: yes', `webrtcAddress: :${WEBRTC_PORT}`, `webrtcLocalUDPAddress: :${WEBRTC_PORT + 1}`,
+    'webrtcIPsFromInterfaces: no', "webrtcAdditionalHosts: ['127.0.0.1']",
     'authInternalUsers:',
     '- user: any', '  permissions:', '  - action: read',
     `- user: vrcast`, `  pass: ${rtspPublishPass}`, `  ips: ['127.0.0.1']`, '  permissions:', '  - action: publish',
@@ -2891,6 +2920,7 @@ const server = http.createServer(async (req, res) => {
       const next = {
         outputMode: ['local', 'tunnel', 'remote'].includes(body.outputMode) ? body.outputMode : 'local',
         cacheRoot: typeof body.cacheRoot === 'string' ? body.cacheRoot.trim().slice(0, 300) : config.cacheRoot,
+        videoBitrate: Math.max(0, Math.min(20000, Number(body.videoBitrate ?? config.videoBitrate ?? 0) || 0)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')), quality: body.quality === '1080p' ? '1080p' : '720p', fps: body.fps === 60 ? 60 : 30,
         captureMode: ['desktop', 'monitor', 'window', 'region'].includes(body.captureMode) ? body.captureMode : 'monitor',
