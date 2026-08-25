@@ -187,9 +187,9 @@ function render(state) {
     const remote=state.rtsp?.remote||{};
     shownUrl=remote.configured?remote.url:'';
     hint='Ссылка постоянная, её можно дать друзьям.';
-    linkText=!remote.configured?'Выберите сервер':remote.live?'Через ваш сервер':'Подключаюсь к серверу…';
+    linkText=!remote.configured?'Выберите сервер':remote.reachable===false?'Сервер не отвечает':remote.live?'Через ваш сервер':'Подключаюсь…';
     linkGood=Boolean(remote.live);
-    linkError=Boolean(remote.configured&&!remote.live&&state.running);
+    linkError=Boolean(remote.configured&&(remote.reachable===false||(!remote.live&&state.running)));
   }
   else {
     const rtspLive=!tunnelMode&&Boolean(state.rtsp?.available);
@@ -341,10 +341,10 @@ $('#serverSelect').addEventListener('change',async event=>{if(!event.target.valu
 $('#deployServer').addEventListener('click',async()=>{
   const button=$('#deployServer'),host=$('#serverHost').value.trim(),password=$('#serverPassword').value;
   if(!host||!password)return toast('Нужны адрес сервера и пароль root',true);
-  button.disabled=true;button.textContent='Разворачиваю… это займёт до минуты';
+  button.disabled=true;button.textContent='Настраиваю сервер…';
   try{
-    const result=await api('/api/servers',{method:'POST',body:JSON.stringify({host,password,name:$('#serverName').value})});
-    $('#serverPassword').value='';$('#serverHost').value='';$('#serverName').value='';
+    const result=await api('/api/servers',{method:'POST',body:JSON.stringify({host,password,name:$('#serverName').value,channel:$('#serverChannel').value})});
+    $('#serverPassword').value='';$('#serverHost').value='';$('#serverName').value='';$('#serverChannel').value='';
     $('#addServerForm').hidden=true;
     render(result.status);toast(`Сервер готов: ${result.server.name}`);
   }catch(error){toast(error.message,true);}
@@ -378,7 +378,7 @@ $('#prepareUnityQueue').addEventListener('click',async()=>{const button=$('#prep
 $('#recordUnityCapture').addEventListener('click',async()=>{const recording=ui.status?.compatibility?.unity?.capture?.state==='recording';try{render(await api(recording?'/api/unity/capture/stop':'/api/unity/capture/start',{method:'POST'}));toast(recording?'Завершаю MP4…':'Запись Unity-клипа началась');}catch(error){toast(error.message,true);}});
 
 async function playback(action,extra={}){try{render(await api('/api/playback',{method:'POST',body:JSON.stringify({action,...extra})}));const delay=Math.max(0,Number(ui.status?.config?.previewDelay)||0);if(delay&&['pause','resume','seek'].includes(action))toast(`В VRChat это появится через ${delay} с`);return true;}catch(error){toast(error.message,true);return false;}}
-$('#togglePause').addEventListener('click',()=>ui.status?.playback?.paused?playback('resume'):playback('pause',{position:ui.seekPending?ui.seekDraft:presentedProgress(ui.status).position})); $('#previousTrack').addEventListener('click',()=>playback('previous')); $('#nextTrack').addEventListener('click',()=>playback('next')); $('#skipTrack').addEventListener('click',()=>playback('next'));
+$('#togglePause').addEventListener('click',()=>!ui.status?.running?startSource():ui.status?.playback?.paused?playback('resume'):playback('pause',{position:ui.seekPending?ui.seekDraft:presentedProgress(ui.status).position})); $('#previousTrack').addEventListener('click',()=>playback('previous')); $('#nextTrack').addEventListener('click',()=>playback('next')); $('#skipTrack').addEventListener('click',()=>playback('next'));
 $('#cacheRoot').addEventListener('change',async()=>{
   try{ render(await api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),cacheRoot:$('#cacheRoot').value})}));
     toast('Кеш переехал, треки перекачаются на новое место'); }
@@ -487,3 +487,13 @@ $('#copyLogs').addEventListener('click',async()=>{
   const ok=await copyText(text);
   toast(ok?'Журнал скопирован':'Не удалось скопировать');
 });
+
+// Эфир поднимается сам при запуске программы: ссылка работает сразу, в кадре
+// стоит заставка. Видео включает пользователь — кнопкой в плеере.
+async function startSource(){
+  const button=$('#togglePause');
+  button.disabled=true;
+  try{ await saveConfig(); render(await api(`/api/start/${ui.source}`,{method:'POST'})); }
+  catch(error){ toast(error.message,true); }
+  finally{ button.disabled=false; }
+}

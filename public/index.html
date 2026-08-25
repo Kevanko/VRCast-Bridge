@@ -85,11 +85,12 @@
               <button id="removeServer" type="button" disabled>Удалить</button>
             </div>
             <div id="addServerForm" hidden>
-              <label>Адрес сервера<input id="serverHost" type="text" placeholder="123.45.67.89" autocomplete="off"></label>
+              <label>Адрес сервера<input id="serverHost" type="text" placeholder="123.45.67.89 или my-server.com" autocomplete="off"></label>
               <label>Пароль root<input id="serverPassword" type="password" placeholder="пароль от сервера" autocomplete="off"></label>
               <label>Как назвать<input id="serverName" type="text" placeholder="Например: Латвия" autocomplete="off"></label>
+              <label>Имя канала<input id="serverChannel" type="text" placeholder="live" autocomplete="off"></label>
               <button class="deploy-button" id="deployServer" type="button"><svg class="ic" aria-hidden="true"><use href="#i-server"/></svg>Настроить сервер</button>
-              <p class="field-help">Пароль нужен один раз для установки и не сохраняется.</p>
+              <p class="field-help">Подойдёт IP или домен. Пароль нужен один раз для установки и не сохраняется.<br>Имя канала разделяет трансляции: у каждого друга своё, сервер один.</p>
             </div>
             <p class="field-help" id="serverHint"></p>
           </section>
@@ -141,7 +142,7 @@
           <div class="now-copy"><small>В эфире</small><h1 id="nowTitle">Эфир не запущен</h1><p id="nowSource">Добавьте видео или выберите экран</p></div>
           <div class="action-buttons">
             <button class="secondary" id="skipTrack" hidden>Следующее</button>
-            <button class="go-live" id="goLive">Начать эфир</button>
+            <button class="go-live" id="goLive" hidden>Начать эфир</button>
             <button class="stop-live" id="stopLive" hidden>Остановить</button>
           </div>
         </div>
@@ -156,7 +157,7 @@
             <button id="addButton" type="submit">Добавить</button>
           </form>
           <button class="drop-button" id="pickLocal"><span><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg></span><div><b>Файлы с компьютера</b><small>Или перетащите сюда</small></div></button>
-          <label class="volume-control" for="mediaVolume"><span><b>Громкость в эфире</b><output id="mediaVolumeValue">100%</output></span><input id="mediaVolume" type="range" min="0" max="200" step="5" value="100"></label>
+          <label class="volume-control" for="mediaVolume"><span><b>Громкость в эфире</b><output id="mediaVolumeValue">100%</output></span><input id="mediaVolume" type="range" min="0" max="400" step="5" value="100"></label>
           <div class="storage-box">
             <div class="storage-head"><span><b>Место на диске</b></span><span id="cacheSize">0 МБ</span></div>
             <label>Где хранить видео<select id="cacheRoot"></select></label>
@@ -212,7 +213,7 @@
           </div>
           <div id="audioOutputFields" hidden><label>Какой выход<select id="audioOutput"></select></label></div>
           <div id="audioDeviceFields" hidden><label>Какой микрофон<select id="audioDevice"></select></label></div>
-          <label class="volume-control" for="captureVolume"><span><b>Громкость в эфире</b><output id="captureVolumeValue">150%</output></span><input id="captureVolume" type="range" min="0" max="300" step="5" value="150"></label>
+          <label class="volume-control" for="captureVolume"><span><b>Громкость в эфире</b><output id="captureVolumeValue">150%</output></span><input id="captureVolume" type="range" min="0" max="600" step="5" value="150"></label>
 
           <button class="refresh-list" id="refreshSources">Обновить список окон</button>
         </section>
