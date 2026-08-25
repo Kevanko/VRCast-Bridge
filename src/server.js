@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.36.0';
+const APP_VERSION = '0.37.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -623,7 +623,7 @@ function sshArgs(server, passwordFile) {
 // Первое подключение: узнаём отпечаток ключа хоста, ничего не выполняя.
 function sshDiscoverHostKey(server) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(PLINK(), ['-ssh', '-P', String(server.sshPort || 22), '-l', String(server.user || 'root'),
+    const child = spawn(PLINK(), ['-ssh', '-batch', '-P', String(server.sshPort || 22), '-l', String(server.user || 'root'),
       server.host, 'exit'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     const timer = setTimeout(() => { child.kill(); reject(new Error('Сервер не отвечает по SSH.')); }, 25000);
@@ -2792,6 +2792,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/unity/capture/stop') {
       stopUnityCaptureRecording(); return json(res, 202, status());
     }
+    if (req.method === 'POST' && url.pathname === '/api/logs/open') {
+      // Открыть папку через проводник: копировать путь руками неудобно.
+      spawn('explorer.exe', [DATA_DIR], { windowsHide: true, detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+      return json(res, 200, { ok: true });
+    }
     if (req.method === 'POST' && url.pathname === '/api/cache/clear') {
       // Играющий и качающийся треки не трогаем: файл занят, и эфир оборвётся.
       try {
@@ -2993,7 +2998,13 @@ const server = http.createServer(async (req, res) => {
       if (serveFile(res, PUBLIC_DIR, relative, false)) return;
     }
     json(res, 404, { error: 'Не найдено' });
-  } catch (error) { log(`Ошибка: ${error.message}`); json(res, 400, { error: error.message }); }
+  } catch (error) {
+    // Пока кодировщик качается, каждая попытка кадра давала «spawn ffmpeg ENOENT»
+    // и журнал забивался сотней одинаковых строк.
+    const скачивается = /spawn ffmpeg ENOENT/i.test(String(error.message)) && !tools.ffmpeg;
+    if (!скачивается) log(`Ошибка: ${error.message}`);
+    json(res, 400, { error: скачивается ? 'Кодировщик ещё скачивается, подождите' : error.message });
+  }
 });
 
 server.listen(PORT, HOST, () => {
