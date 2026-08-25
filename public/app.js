@@ -1,6 +1,6 @@
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
-const ui = { source: 'queue', output: 'local', status: null, sources: { windows: [], monitors: [], audioDevices: [], audioOutputs: [] }, hls: null, previewUrl: '', progressAt: 0, progressHistory: [], seeking: false, seekPending: false, seekVisualUntil: 0, seekDraft: 0, seekRevision: 0, previewBusy: false, previewTimer: null, speedPendingUntil: 0, loopPendingUntil: 0, liveApplyTimer: null, queueSignature: '', unitySelectedId: '' };
+const ui = { previewOn: localStorage.getItem('previewOn')!=='0', windowHidden: false, source: 'queue', output: 'local', status: null, sources: { windows: [], monitors: [], audioDevices: [], audioOutputs: [] }, hls: null, previewUrl: '', progressAt: 0, progressHistory: [], seeking: false, seekPending: false, seekVisualUntil: 0, seekDraft: 0, seekRevision: 0, previewBusy: false, previewTimer: null, speedPendingUntil: 0, loopPendingUntil: 0, liveApplyTimer: null, queueSignature: '', unitySelectedId: '' };
 
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
@@ -84,8 +84,35 @@ function monitorPlaceholder(title, text, name = 'broadcast') {
   $('#monitorPlaceholderTitle').textContent=title; $('#monitorPlaceholderText').textContent=text; $('#monitorPlaceholderIcon').innerHTML=icon(name);
 }
 
+// Декодирование 1080p60 в окне программы стоит около полутора ядер — больше,
+// чем всё кодирование эфира. Поэтому предпросмотр выключается, а на свёрнутом
+// окне останавливается сам: смотреть его в этот момент всё равно некому.
+function previewAllowed() {
+  return ui.previewOn && !ui.windowHidden;
+}
+
+function stopPreview() {
+  ui.hls?.destroy(); ui.hls=null; ui.previewUrl='';
+  const video=$('#streamPreview');
+  video.pause(); video.removeAttribute('src'); video.load?.();
+  $('#monitor').classList.remove('previewing');
+}
+
+function paintPreviewToggle() {
+  const button=$('#previewToggle');
+  button.classList.toggle('off',!ui.previewOn);
+  button.title=ui.previewOn?'Выключить предпросмотр — освободит процессор':'Включить предпросмотр';
+  button.innerHTML=icon(ui.previewOn?'eye':'eye-off');
+  $('#monitorPlaceholderIcon').innerHTML=icon(ui.previewOn?'broadcast':'eye-off');
+}
+
 function startPreview(state) {
   const video=$('#streamPreview'), monitor=$('#monitor');
+  if (!previewAllowed()) {
+    if (ui.hls||ui.previewUrl) stopPreview();
+    if (state.running && ui.previewOn===false) monitorPlaceholder('ПРЕДПРОСМОТР ВЫКЛЮЧЕН','Эфир идёт, окно не декодирует видео','eye-off');
+    return;
+  }
   if (!state.running) {
     ui.hls?.destroy(); ui.hls=null; ui.previewUrl=''; video.removeAttribute('src'); monitor.classList.remove('previewing'); return;
   }
@@ -352,6 +379,25 @@ $('#cacheRoot').addEventListener('change',async()=>{
     toast('Кеш переехал, треки перекачаются на новое место'); }
   catch(error){ toast(error.message,true); }
 });
+$('#previewToggle').addEventListener('click',()=>{
+  ui.previewOn=!ui.previewOn;
+  localStorage.setItem('previewOn',ui.previewOn?'1':'0');
+  paintPreviewToggle();
+  if (ui.previewOn) { if (ui.status) startPreview(ui.status); }
+  else { stopPreview(); if (ui.status?.running) monitorPlaceholder('ПРЕДПРОСМОТР ВЫКЛЮЧЕН','Эфир идёт, окно не декодирует видео','eye-off'); }
+  toast(ui.previewOn?'Предпросмотр включён':'Предпросмотр выключен — процессор свободнее');
+});
+// Свёрнутое окно программы не должно ничего декодировать.
+document.addEventListener('visibilitychange',()=>{
+  ui.windowHidden=document.hidden;
+  if (document.hidden) stopPreview(); else if (ui.status) startPreview(ui.status);
+});
+for (const [event,hidden] of [['vrcast-hidden',true],['vrcast-shown',false]]) {
+  document.addEventListener(event,()=>{
+    ui.windowHidden=hidden;
+    if (hidden) stopPreview(); else if (ui.status) startPreview(ui.status);
+  });
+}
 $('#clearCache').addEventListener('click',async()=>{
   try{ render(await api('/api/cache/clear',{method:'POST'})); toast('Кеш очищен'); }
   catch(error){ toast(error.message,true); }
@@ -381,7 +427,7 @@ $('#openLogFolder').addEventListener('click',async()=>{const folder=ui.status?.l
 $('#shutdownApp').addEventListener('click',async()=>{try{await api('/api/shutdown',{method:'POST'});window.location.href='vrcast://close';}catch(error){toast(error.message,true);}});
 
 async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#previewDelay').value=String(state.config.previewDelay??5);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#rtspTransport').value=state.config.rtspTransport||'tcp';paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);ui.previewTimer=setInterval(()=>refreshCapturePreview(false).catch(()=>{}),2000);
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#previewDelay').value=String(state.config.previewDelay??5);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#rtspTransport').value=state.config.rtspTransport||'tcp';paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);paintPreviewToggle();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);ui.previewTimer=setInterval(()=>refreshCapturePreview(false).catch(()=>{}),2000);
 const stall={time:0,strikes:0};
 setInterval(()=>{const video=$('#streamPreview');
   if(!ui.hls||!ui.status?.running||ui.status?.stream?.state!=='ready'){stall.strikes=0;stall.time=video.currentTime;return;}
