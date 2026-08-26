@@ -1,0 +1,14 @@
+<Configuration>
+  <Networking>Enable</Networking>
+  <MemoryInMB>8192</MemoryInMB>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Users\NM\vrcast-sandbox</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\vrcast</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>cmd.exe /c ping -n 15 127.0.0.1 &gt; nul &amp; copy /y C:\Users\WDAGUtilityAccount\Desktop\vrcast\start-test.cmd C:\Windows\Temp\start-test.cmd &gt; nul &amp; C:\Windows\Temp\start-test.cmd</Command>
+  </LogonCommand>
+</Configuration>

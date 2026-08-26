@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.41.2';
+const APP_VERSION = '0.42.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -80,6 +80,7 @@ const defaults = {
   captureVolume: 1.5, mediaVolume: 1, mediaQuality: '720p', mediaFps: 60, previewDelay: 0, localAppVolume: 1, rtspTransport: 'tcp',
   cacheRoot: '',
   videoBitrate: 0,
+  autoQuality: true,
   cacheLimitGb: 0,
 };
 
@@ -119,6 +120,7 @@ let tunnelProvider = '';
 let tunnelDeadlineTimer = null;
 let tunnelFallbackTimer = null;
 let pinggyStarted = false;
+let lhrKnownKey = '';
 let activeKind = null;
 let currentId = null;
 let currentStartedAt = null;
@@ -490,15 +492,48 @@ function startPinggyCandidate() {
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8'); child.stdout.on('data', inspect); child.stderr.on('data', inspect);
 }
 
+// Туннель по SSH через localhost.run. Ему не нужен свой бинарник — хватает
+// plink, который у нас уже есть для своих серверов. Главное: он проходит там,
+// где cloudflared глухо блокируется (замер на сети с VPN: cloudflared не
+// поднимает канал ни по http2, ни по quic, а этот отдаёт адрес за 5 секунд).
+const LHR_HOST = 'localhost.run';
+
+async function lhrHostKey() {
+  if (lhrKnownKey) return lhrKnownKey;
+  const проба = await spawnCollect(PLINK(), ['-ssh', '-batch', '-P', '22', 'nokey@' + LHR_HOST, 'exit'], 20000);
+  const ключ = `${проба.stdout || ''}${проба.stderr || ''}`.match(/SHA256:[A-Za-z0-9+/=]+/);
+  lhrKnownKey = ключ ? ключ[0] : '';
+  return lhrKnownKey;
+}
+
+async function startSshTunnelCandidate() {
+  if (!PLINK()) return;
+  const ключ = await lhrHostKey();
+  if (!ключ) { log('SSH-туннель: сервер не отдал ключ, пропускаю'); return; }
+  if (stopping || tunnelUrl) return;
+  log('SSH-туннель: подключаюсь');
+  const child = trackTunnelChild(spawn(PLINK(), ['-ssh', '-batch', '-no-antispoof', '-hostkey', ключ,
+    '-R', `80:127.0.0.1:${PORT}`, 'nokey@' + LHR_HOST], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }), 'localhost.run');
+  let буфер = '';
+  const смотреть = chunk => {
+    буфер = (буфер + chunk).slice(-8000);
+    const адрес = буфер.match(/https:\/\/[a-z0-9-]+\.lhr\.life/i);
+    if (адрес) activatePublicTunnel(child, 'localhost.run', адрес[0]);
+  };
+  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+  child.stdout.on('data', смотреть); child.stderr.on('data', смотреть);
+}
+
 function startPublicTunnel() {
   if (config.outputMode !== 'tunnel' || tunnelProcess || tunnelCandidates.size) return;
-  if (!tools.cloudflared && !tools.pinggy) throw new Error('Компоненты публичной ссылки не найдены.');
+  if (!tools.cloudflared && !tools.pinggy && !PLINK()) throw new Error('Компоненты публичной ссылки не найдены.');
   tunnelUrl = ''; tunnelProvider = ''; tunnelState = 'starting'; tunnelError = '';
   // Оба туннеля поднимаются одновременно, побеждает тот, кто первым отдал адрес.
   // Раньше Pinggy ждал Cloudflare 12 секунд, а в сетях с фильтром Cloudflare
   // не подключается никогда — ссылка появлялась через минуту и с ошибкой посередине.
   if (tools.cloudflared) startCloudflareCandidate();
   if (tools.pinggy) startPinggyCandidate();
+  startSshTunnelCandidate().catch(error => logDetail(`SSH-туннель: ${error.message}`));
   tunnelDeadlineTimer = setTimeout(() => {
     if (tunnelUrl || tunnelState !== 'starting') return;
     for (const child of tunnelCandidates) child.kill('SIGTERM');
@@ -1108,10 +1143,62 @@ function inspectHlsHealth() {
     hlsHealth.segmentAge = segmentAge;
     hlsHealth.segmentCount = uris.length;
     hlsHealth.ready = uris.length >= 3 && segmentAge < 4 && (hlsHealth.realtimeRatio === 0 || hlsHealth.realtimeRatio >= 0.72);
+    autoReduceQuality(hlsHealth);
+    watchStalledStream(hlsHealth);
   } catch {
     hlsHealth.ready = false;
     hlsHealth.segmentAge = null;
   }
+}
+
+// Когда машина не тянет заданное качество (нет аппаратного кодировщика или
+// просто слабый процессор), поток отстаёт и сегменты стареют — зритель видит
+// фризы. Вместо молчаливой деградации понижаем нагрузку сами: сначала кадры,
+// потом разрешение, и говорим об этом в журнале.
+let отставаний = 0;
+let lightMode = false;
+let последнееСнижение = 0;
+
+function autoReduceQuality(state) {
+  if (config.autoQuality === false || !activeKind) return;
+  const темп = Number(state.realtimeRatio) || 1;
+  const возраст = Number(state.segmentAge) || 0;
+  const плохо = темп < 0.9 || возраст > 5;
+  отставаний = плохо ? отставаний + 1 : 0;
+  if (отставаний < 5 || Date.now() - последнееСнижение < 60000) return;
+
+  const экран = activeKind === 'screen';
+  const кадры = Number(экран ? config.fps : config.mediaFps) || 30;
+  const качество = экран ? config.quality : config.mediaQuality;
+  let изменение = null;
+  let подпись = '';
+  if (кадры > 30) { изменение = экран ? { fps: 30 } : { mediaFps: 30 }; подпись = '30 кадров'; }
+  else if (качество === '1080p') { изменение = экран ? { quality: '720p' } : { mediaQuality: '720p' }; подпись = '720p'; }
+  else if (!lightMode && !encoder.hardware) { lightMode = true; подпись = 'лёгкое кодирование'; }
+  else if (качество === '720p') { изменение = экран ? { quality: '480p' } : { mediaQuality: '480p' }; подпись = '480p'; }
+  if (!изменение && !подпись) return;
+
+  отставаний = 0;
+  последнееСнижение = Date.now();
+  if (изменение) saveConfig(изменение);
+  log(`Поток не успевает — снижаю нагрузку: ${подпись}`);
+  try { restartRelaySession(streamProfile(activeKind)); } catch (error) { log(`Снижение качества: ${error.message}`); }
+}
+
+// Если сегменты перестали появляться совсем, никакое снижение качества уже не
+// поможет: перезапускаем то, что сейчас в эфире, вместо бесконечной паузы у зрителя.
+let последнийПерезапуск = 0;
+
+function watchStalledStream(state) {
+  if (!activeKind || queuePaused) return;
+  const возраст = Number(state.segmentAge) || 0;
+  if (возраст < 12 || Date.now() - последнийПерезапуск < 45000) return;
+  последнийПерезапуск = Date.now();
+  log(`Поток встал (${возраст.toFixed(1)} с без новых кадров) — перезапускаю`);
+  try {
+    if (activeKind === 'screen') startScreen().catch(error => log(`Перезапуск захвата: ${error.message}`));
+    else transitionQueue('seek', sourcePosition + 0.1);
+  } catch (error) { log(`Перезапуск потока: ${error.message}`); }
 }
 
 function startHlsHealthMonitor() {
@@ -1181,6 +1268,7 @@ function restartRelaySession(profile) {
 // больше 6 Мбит/с, а на переполнении канала появляются те самые фризы.
 function autoBitrateKbps(profile) {
   if (profile.quality === '1080p') return profile.fps === 60 ? 8000 : 5500;
+  if (profile.quality === '480p') return profile.fps === 60 ? 2200 : 1500;
   return profile.fps === 60 ? 4800 : 3200;
 }
 
@@ -1190,6 +1278,14 @@ function bitrateKbps(profile) {
   const наружу = config.outputMode === 'remote' || config.outputMode === 'tunnel';
   if (наружу && !выбран) rate = Math.min(rate, 6000);
   return Math.max(600, Math.min(20000, Math.round(rate)));
+}
+
+// Ступень 480p нужна слабым машинам без аппаратного кодировщика: лучше
+// показывать ровное видео поменьше, чем рваное побольше.
+function profileHeight(profile) {
+  if (profile.quality === '1080p') return 1080;
+  if (profile.quality === '480p') return 480;
+  return 720;
 }
 
 function bitrate(profile) {
@@ -1218,7 +1314,9 @@ function producerEncodeArgs(profile = streamProfile()) {
   if (encoder.name === 'h264_nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p3', '-tune', 'll', '-rc', 'cbr',
     '-b:v', rate, '-maxrate', rate, '-bufsize', rate, '-rc-lookahead', '0',
     '-g', String(keyframes), '-keyint_min', String(keyframes), '-bf', '0', '-pix_fmt', 'yuv420p'];
-  return ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency',
+  // На слабой машине даже veryfast не успевает: тогда переходим на ultrafast,
+  // это заметно дешевле по процессору ценой чуть большего размера потока.
+  return ['-c:v', 'libx264', '-preset', lightMode ? 'ultrafast' : 'veryfast', '-tune', 'zerolatency',
     '-b:v', rate, '-maxrate', rate, '-bufsize', rate,
     '-g', String(keyframes), '-keyint_min', String(keyframes), '-sc_threshold', '0', '-bf', '0', '-pix_fmt', 'yuv420p'];
 }
@@ -1449,8 +1547,8 @@ async function startScreenInner() {
   if (relayProcess && !sameProfile(relayProfile, desired) && !wasLive) restartRelaySession(desired);
   ensureRelay(desired);
   const profile = sessionProfile('screen');
-  const height = profile.quality === '1080p' ? 1080 : 720;
-  const width = height === 1080 ? 1920 : 1280;
+  const height = profileHeight(profile);
+  const width = Math.round(height * 16 / 9 / 2) * 2;
   const args = ['-hide_banner', '-loglevel', 'warning'];
   let windowHelperArgs = null;
   let captureRect = null;
@@ -1694,8 +1792,8 @@ function preparePausedFrame(media, position, preferredBroadcastFrame = null, pre
     const source = broadcastFrameSource || media?.combinedUrl || media?.videoUrl;
     if (!source || (media && !media.hasVideo)) return resolvePromise(null);
     const profile = sessionProfile('queue');
-    const height = profile.quality === '1080p' ? 1080 : 720;
-    const width = height === 1080 ? 1920 : 1280;
+    const height = profileHeight(profile);
+    const width = Math.round(height * 16 / 9 / 2) * 2;
     const frameFile = join(DATA_DIR, 'pause-frame.png');
     rmSync(frameFile, { force: true });
     const seekArgs = broadcastFrameSource ? [] : ['-ss', Math.max(0, Number(position) || 0).toFixed(3)];
@@ -1753,8 +1851,8 @@ async function pauseWithFrozenFrame(generation, frameSource, preferOriginal) {
 
 function startStandby(profile = sessionProfile()) {
   if (!relayProcess || standbyProcess || activeProcess) return;
-  const height = profile.quality === '1080p' ? 1080 : 720;
-  const width = height === 1080 ? 1920 : 1280;
+  const height = profileHeight(profile);
+  const width = Math.round(height * 16 / 9 / 2) * 2;
   // «-re» обязателен на КАЖДОМ lavfi-входе: непейсируемый anullsrc генерирует
   // тишину со скоростью CPU, обгоняет видео на max_interleave_delta, и муксер
   // сливает аудио-таймлайн на сотни секунд вперёд — плеер ломается до resync.
@@ -2083,8 +2181,8 @@ function runUnityFfmpeg(args, label, generation = unityBuildGeneration) {
 }
 
 function unityNormalizeArgs(media, output, profile) {
-  const height = profile.quality === '1080p' ? 1080 : 720;
-  const width = height === 1080 ? 1920 : 1280;
+  const height = profileHeight(profile);
+  const width = Math.round(height * 16 / 9 / 2) * 2;
   const args = ['-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts'];
   let inputIndex = 0, videoIndex = null, audioIndex = null;
   if (media.videoUrl && media.audioUrl && media.videoUrl !== media.audioUrl) {
@@ -2241,8 +2339,8 @@ const HWACCEL = ['-hwaccel', 'auto'];
 
 function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   const profile = sessionProfile('queue');
-  const height = profile.quality === '1080p' ? 1080 : 720;
-  const width = height === 1080 ? 1920 : 1280;
+  const height = profileHeight(profile);
+  const width = Math.round(height * 16 / 9 / 2) * 2;
   const args = ['-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts'];
   let inputIndex = 0, videoIndex = null, audioIndex = null;
 
@@ -2668,9 +2766,24 @@ async function ddagrabIndexFor(monitor) {
   return found;
 }
 
+// Запасной путь: если PowerShell недоступен или урезан (в песочнице Windows он
+// просто не запускается), спрашиваем размер рабочего стола у самого ffmpeg —
+// иначе захват экрана становится недоступен вовсе.
+async function desktopAsMonitor() {
+  const проба = await spawnCollect('ffmpeg', ['-hide_banner', '-f', 'gdigrab', '-i', 'desktop',
+    '-frames:v', '1', '-f', 'null', '-'], 12000);
+  const размер = `${проба.stderr || ''}`.match(/,\s(\d{3,5})x(\d{3,5})[,\s]/);
+  if (!размер) return [];
+  return [{ id: 'desktop', name: 'Весь экран', x: 0, y: 0,
+    width: Number(размер[1]), height: Number(размер[2]), primary: true }];
+}
+
 async function listMonitors() {
   const script = `[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { [pscustomobject]@{ id=$_.DeviceName; name=if($_.Primary){'Основной монитор'}else{$_.DeviceName}; x=$_.Bounds.X; y=$_.Bounds.Y; width=$_.Bounds.Width; height=$_.Bounds.Height; primary=$_.Primary } } | ConvertTo-Json -Compress`;
-  return runPowerShellJson(script);
+  const список = await runPowerShellJson(script).catch(() => []);
+  if (список.length) return список;
+  log('Список мониторов не получен, беру рабочий стол целиком');
+  return desktopAsMonitor();
 }
 
 async function listWindows() {
@@ -2944,9 +3057,10 @@ const server = http.createServer(async (req, res) => {
         outputMode: ['local', 'tunnel', 'remote'].includes(body.outputMode) ? body.outputMode : 'local',
         cacheRoot: typeof body.cacheRoot === 'string' ? body.cacheRoot.trim().slice(0, 300) : config.cacheRoot,
         videoBitrate: Math.max(0, Math.min(20000, Number(body.videoBitrate ?? config.videoBitrate ?? 0) || 0)),
+        autoQuality: body.autoQuality === undefined ? config.autoQuality !== false : Boolean(body.autoQuality),
         cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
-          ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')), quality: body.quality === '1080p' ? '1080p' : '720p', fps: body.fps === 60 ? 60 : 30,
+          ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')), quality: ['480p', '720p', '1080p'].includes(body.quality) ? body.quality : '720p', fps: body.fps === 60 ? 60 : 30,
         captureMode: ['desktop', 'monitor', 'window', 'region'].includes(body.captureMode) ? body.captureMode : 'monitor',
         captureMonitorId: String(body.captureMonitorId || '').slice(0, 180),
         captureWindowHandle: String(body.captureWindowHandle || '').replace(/\D/g, '').slice(0, 24),
@@ -2960,7 +3074,7 @@ const server = http.createServer(async (req, res) => {
         localAppVolume: Math.max(0.02, Math.min(1, Number(body.localAppVolume ?? config.localAppVolume ?? 1))),
         rtspTransport: ['tcp', 'udp'].includes(body.rtspTransport) ? body.rtspTransport : (config.rtspTransport || 'tcp'),
         mediaVolume: Math.max(0, Math.min(4, Number(body.mediaVolume ?? config.mediaVolume ?? 1))),
-        mediaQuality: body.mediaQuality === '1080p' ? '1080p' : (body.mediaQuality === '720p' ? '720p' : (config.mediaQuality || '720p')),
+        mediaQuality: ['480p', '720p', '1080p'].includes(body.mediaQuality) ? body.mediaQuality : (config.mediaQuality || '720p'),
         mediaFps: body.mediaFps === 60 ? 60 : (body.mediaFps === 30 ? 30 : (config.mediaFps || 30)),
         previewDelay: [0, 3, 5, 7, 10].includes(Number(body.previewDelay)) ? Number(body.previewDelay) : Math.min(10, Number(config.previewDelay) || 0),
         previewDelayReset: true,
