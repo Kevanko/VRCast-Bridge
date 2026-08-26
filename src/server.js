@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.42.0';
+const APP_VERSION = '0.42.1';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -3101,6 +3101,13 @@ const server = http.createServer(async (req, res) => {
         log(`Кеш видео теперь в ${mediaCacheDir()}`);
       }
       const previousRemote = previousRemoteTarget?.publishUrl || '';
+      // Состояние сервера проверяем сразу при смене, а не ждём общий цикл:
+      // иначе первые двадцать секунд в интерфейсе висит неизвестность.
+      if (previousOutput !== config.outputMode || previousRemote !== (remoteRtspTarget()?.publishUrl || '')) {
+        const цель = remoteRtspTarget();
+        remoteReachable = null;
+        if (цель) probeServer(цель.host, цель.port).then(ответил => { remoteReachable = ответил; });
+      }
       if (previousOutput !== config.outputMode) {
         clearTimeout(tunnelSwitchTimer);
         tunnelSwitchTimer = setTimeout(() => {
