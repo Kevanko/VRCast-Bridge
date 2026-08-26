@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.43.2';
+const APP_VERSION = '0.43.3';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1119,10 +1119,12 @@ function status() {
     stream: { ready: hlsHealth.ready, segmentCount: hlsHealth.segmentCount,
       state: !relayProcess ? 'offline' : hlsHealth.ready ? 'ready' : hlsHealth.segmentAge !== null && hlsHealth.segmentAge >= 4 ? 'stalled' : 'starting' },
     compatibility: { live: { player: 'AVPro', supported: true }, unity: unityCompatibility() },
-    rtsp: { available: Boolean(mediaMtxProcess && rtspPushProcesses.has('local')), url: rtspAddress(),
+    // linkReady — единственный честный признак «ссылку уже можно вставлять».
+    linkReady: config.outputMode === 'remote' ? remoteChannelLive : channelLive,
+    rtsp: { available: Boolean(mediaMtxProcess && rtspPushProcesses.has('local')), live: channelLive, url: rtspAddress(),
       lanUrls: getLanAddresses().map(ip => `rtspt://${ip}:${RTSP_PORT}/live`),
       remote: config.outputMode === 'remote'
-        ? { configured: Boolean(remoteRtspTarget()), live: rtspPushProcesses.has('remote'), reachable: remoteReachable,
+        ? { configured: Boolean(remoteRtspTarget()), live: remoteChannelLive, pushing: rtspPushProcesses.has('remote'), reachable: remoteReachable,
             channel: remoteRtspTarget()?.channel || '', channelRejected: remoteChannelRejected,
             url: remoteRtspTarget()?.playUrl || '', hlsUrl: remoteRtspTarget()?.hlsUrl || '' }
         : null },
@@ -1248,6 +1250,9 @@ function startHlsHealthMonitor() {
   if (hlsHealthTimer) clearInterval(hlsHealthTimer);
   hlsHealthTimer = setInterval(inspectHlsHealth, 500);
   hlsHealthTimer.unref?.();
+  // Пока канал не поднялся, спрашиваем часто: человек ждёт именно этого.
+  const канал = setInterval(() => { watchChannel().catch(() => {}); }, channelLive ? 5000 : 1000);
+  канал.unref?.();
 }
 
 function validWebUrl(value) {
@@ -1697,7 +1702,49 @@ function startMediaMtx() {
   });
 }
 
+// Готовность ссылки проверяем ровно так, как это делает плеер: спрашиваем у
+// RTSP-сервера описание потока. Пока публикующего нет, он отвечает 404 — и
+// VRChat на такой ответ показывает ошибку и больше сам не пробует. Раньше
+// «канал готов» считалось по числу кусков HLS, то есть по другому пути, и
+// человек вставлял ссылку в те несколько секунд, когда она ещё не играла.
+let channelLive = false;
+let channelProbeBusy = false;
+
+function probeRtsp(host, port, channel) {
+  return new Promise(resolve => {
+    let ответ = '';
+    const socket = netConnect({ host, port });
+    const конец = ок => { try { socket.destroy(); } catch {} resolve(ок); };
+    socket.setTimeout(2500);
+    socket.on('timeout', () => конец(false));
+    socket.on('error', () => конец(false));
+    const разрыв = String.fromCharCode(13, 10);
+    const запрос = ['DESCRIBE rtsp://' + host + ':' + port + '/' + channel + ' RTSP/1.0', 'CSeq: 1',
+      'Accept: application/sdp', '', ''].join(разрыв);
+    socket.on('connect', () => socket.write(запрос));
+    socket.on('data', chunk => {
+      ответ += chunk;
+      if (ответ.includes(разрыв + разрыв)) конец(ответ.startsWith('RTSP/1.0 200'));
+    });
+  });
+}
+
+let remoteChannelLive = false;
+
+async function watchChannel() {
+  if (channelProbeBusy) return;
+  channelProbeBusy = true;
+  try {
+    channelLive = mediaMtxProcess ? await probeRtsp('127.0.0.1', RTSP_PORT, 'live') : false;
+    // Свой сервер спрашиваем тем же способом: человек вставляет в VRChat
+    // именно его адрес, и «готово» должно означать «оттуда уже играет».
+    const цель = config.outputMode === 'remote' ? remoteRtspTarget() : null;
+    remoteChannelLive = цель ? await probeRtsp(цель.host, цель.port, цель.channel || 'live') : false;
+  } finally { channelProbeBusy = false; }
+}
+
 function stopMediaMtx() {
+  channelLive = false;
   stopRtspPush();
   mediaMtxProcess?.kill('SIGTERM');
   mediaMtxProcess = null;
@@ -1719,9 +1766,15 @@ function startRtspPush() {
     // а из MPEG-TS он приходит в ADTS — с «-c copy» публикация просто не стартует
     // («AAC with no global headers»), aac_adtstoasc тут не помогает, потому что
     // заголовок SDP пишется до первого пакета.
-    const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts+discardcorrupt',
-      '-probesize', '500000', '-analyzeduration', '500000', '-f', 'mpegts', '-i', 'pipe:0',
+    const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts+discardcorrupt+nobuffer',
+      // Разбирать полмегабайта перед публикацией незачем: в потоке всего две
+      // дорожки, и на заставке эти полмегабайта набираются секунду с лишним —
+      // ровно та секунда, когда ссылка ещё не играет.
+      '-probesize', '120000', '-analyzeduration', '200000', '-f', 'mpegts', '-i', 'pipe:0',
       '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
+      // Пакеты уходят сразу, без придержки в муксере: каждая такая задержка
+      // складывается с буфером плеера и в VRChat видна как отставание.
+      '-muxdelay', '0', '-muxpreload', '0', '-flush_packets', '1', '-max_delay', '0',
       '-f', 'rtsp', '-rtsp_transport', 'tcp', '-rw_timeout', '5000000', target.url], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
     rtspPushProcesses.set(target.id, child);
     child.stdin.on('error', () => {});
@@ -1902,7 +1955,7 @@ function startStandby(profile = sessionProfile()) {
   // «-re» обязателен на КАЖДОМ lavfi-входе: непейсируемый anullsrc генерирует
   // тишину со скоростью CPU, обгоняет видео на max_interleave_delta, и муксер
   // сливает аудио-таймлайн на сотни секунд вперёд — плеер ломается до resync.
-  // Заставка «ожидание медиа» вместо пустого экрана: эфир не пропадает никогда,
+  // Заставка «ожидание медиа» вместо разрывго экрана: эфир не пропадает никогда,
   // пока открыта программа, поэтому зрителю не нужно переподключаться после
   // остановки или между треками — он просто видит экран ожидания.
   const hasImage = existsSync(STANDBY_IMAGE);

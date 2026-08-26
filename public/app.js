@@ -215,14 +215,17 @@ function render(state) {
     linkError=Boolean(remote.configured&&(remote.reachable===false||(!remote.live&&state.running)));
   }
   else {
-    const rtspLive=!tunnelMode&&Boolean(state.rtsp?.available);
+    // «Готово» теперь означает, что канал реально отвечает плееру, а не что
+    // запущен процесс: раньше надпись загоралась за секунды до того, как
+    // ссылку можно было вставить, и в VRChat она молча не открывалась.
+    const rtspLive=!tunnelMode&&Boolean(state.linkReady);
     shownUrl=tunnelReady?state.tunnel.url:tunnelMode?'':state.playbackUrl;
     hint=rtspLive?'В мире включите AVPro и Untrusted URLs.':'В мире выберите плеер AVPro.';
     // Бесплатный туннель не тянет тяжёлый поток — это и есть причина рывков у друзей.
     if(tunnelMode){const heavy=ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30);
       if(heavy)hint+=' Через бесплатный туннель 1080p и 60 кадров рвутся — поставьте 720p и 30 кадров.';}
-    linkText=streamStalled?'Поток отстаёт':rtspLive?'Готово':streamReady?(tunnelMode?`Готово · ${state.tunnel.provider}`:'Готово'):tunnelStarting?'Получаю ссылку…':'Готовлю…';
-    linkGood=(rtspLive||streamReady)&&(!tunnelMode||tunnelReady);
+    linkText=streamStalled?'Поток отстаёт':rtspLive?'Готово':tunnelMode&&tunnelReady?`Готово · ${state.tunnel.provider}`:tunnelStarting?'Получаю ссылку…':'Канал поднимается…';
+    linkGood=(tunnelMode?tunnelReady:rtspLive);
     linkError=streamStalled||state.tunnel?.state==='error';
   }
   $('#playbackUrl').textContent=shownUrl||(linkError?'Ссылка пока недоступна':'Подготовка ссылки…'); $('#trustHint').textContent=hint;
