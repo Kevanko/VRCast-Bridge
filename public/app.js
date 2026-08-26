@@ -294,8 +294,43 @@ function chooseAudioMode(mode) {
   $('#audioOutputFields').hidden=mode!=='output'; $('#audioDeviceFields').hidden=mode!=='device'; $('#localVolumeFields').hidden=mode!=='process';
   const text={process:'Звук выбранного окна и его дочерних процессов.',system:'Устройство вывода Windows по умолчанию.',output:'Колонки, наушники или HDMI-звук нужного монитора.',device:'Микрофон или виртуальный вход.',none:'Эфир без звука.'}; $('#audioHelp').textContent=text[mode]||'';
 }
-function captureLabel() { const mode=$('#captureMode').value; if(mode==='window')return $('#windowSource').selectedOptions[0]?.textContent||'Окно'; if(mode==='monitor')return $('#monitorSource').selectedOptions[0]?.textContent||'Монитор'; if(mode==='region')return `Область ${$('#regionWidth').value}×${$('#regionHeight').value}`; return 'Все мониторы'; }
+function captureLabel() { const mode=$('#captureMode').value; if(mode==='window')return $('#windowPickerButton').querySelector('b').textContent||'Окно'; if(mode==='monitor')return $('#monitorSource').selectedOptions[0]?.textContent||'Монитор'; if(mode==='region')return `Область ${$('#regionWidth').value}×${$('#regionHeight').value}`; return 'Все мониторы'; }
 function audioLabel() { return $('#audioMode').selectedOptions[0]?.textContent||'Без звука'; }
+
+// Список окон рисуем сами: в обычный выпадающий список картинку не положить, а
+// без значка два десятка одинаковых заголовков глазом не разобрать.
+function windowRowHtml(item, selected) {
+  return `<button type="button" role="option" aria-selected="${item.handle===selected}" class="app-row${item.handle===selected?' on':''}" data-handle="${item.handle}" data-pid="${item.id}">`
+    + (item.icon?`<img src="${item.icon}" alt="">`:'<i class="app-row-blank"></i>')
+    + `<span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.process)}${item.minimized?' · свёрнуто':''}</small></span></button>`;
+}
+
+function fillWindowPicker(items, value) {
+  const выбран=items.find(item=>item.handle===String(value||''))||null;
+  const кнопка=$('#windowPickerButton'), значок=кнопка.querySelector('img');
+  кнопка.querySelector('b').textContent=выбран?выбран.title:'Выберите окно';
+  значок.hidden=!выбран?.icon; if(выбран?.icon)значок.src=выбран.icon;
+  $('#windowPickerList').innerHTML=items.length?items.map(item=>windowRowHtml(item,String(value||''))).join(''):'<p class="app-empty">Открытых окон не найдено</p>';
+  $('#windowSource').value=выбран?выбран.handle:'';
+}
+
+function openWindowPicker(open) {
+  $('#windowPickerList').hidden=!open;
+  $('#windowPickerButton').setAttribute('aria-expanded',String(open));
+}
+
+$('#windowPickerButton').addEventListener('click',async()=>{
+  const открыть=$('#windowPickerList').hidden;
+  openWindowPicker(открыть);
+  if(открыть)await refreshWindows().catch(()=>{});
+});
+$('#windowPickerList').addEventListener('click',event=>{
+  const строка=event.target.closest('.app-row'); if(!строка)return;
+  fillWindowPicker(ui.sources.windows,строка.dataset.handle);
+  openWindowPicker(false);
+  $('#windowSource').dispatchEvent(new Event('change'));
+});
+document.addEventListener('click',event=>{ if(!event.target.closest('#windowPicker'))openWindowPicker(false); });
 
 function fillSelect(select, items, value, placeholder, mapper) {
   select.innerHTML=`<option value="">${placeholder}</option>`+items.map(mapper).join(''); if(value&&[...select.options].some(option=>option.value===String(value)))select.value=String(value);
@@ -304,7 +339,7 @@ async function loadCaptureSources() {
   const saved={...(ui.status?.config||{})}, currentWindow=$('#windowSource').value, currentMonitor=$('#monitorSource').value, currentOutput=$('#audioOutput').value, currentDevice=$('#audioDevice').value; ui.sources=await api('/api/capture-sources');
   if(currentWindow)saved.captureWindowHandle=currentWindow;if(currentMonitor)saved.captureMonitorId=currentMonitor;if(currentOutput)saved.audioOutputId=currentOutput;if(currentDevice)saved.captureAudioDevice=currentDevice;
   fillSelect($('#monitorSource'),ui.sources.monitors,saved.captureMonitorId,'Выберите монитор',item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.width}×${item.height}</option>`);
-  fillSelect($('#windowSource'),ui.sources.windows,saved.captureWindowHandle,'Выберите окно',item=>`<option value="${item.handle}" data-pid="${item.id}">${escapeHtml(item.title)} · ${escapeHtml(item.process)}${item.minimized?' · свёрнуто':''}</option>`);
+  fillWindowPicker(ui.sources.windows,saved.captureWindowHandle);
   fillSelect($('#audioOutput'),ui.sources.audioOutputs,saved.audioOutputId,'Выберите выход',item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`);
   fillSelect($('#audioDevice'),ui.sources.audioDevices,saved.captureAudioDevice,'Выберите вход',name=>`<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`);
 }
@@ -312,7 +347,7 @@ async function loadCaptureSources() {
 async function refreshWindows() {
   const selected=$('#windowSource').value, windows=await api('/api/windows');
   ui.sources.windows=windows;
-  fillSelect($('#windowSource'),windows,selected,'Выберите окно',item=>`<option value="${item.handle}" data-pid="${item.id}">${escapeHtml(item.title)} · ${escapeHtml(item.process)}${item.minimized?' · свёрнуто':''}</option>`);
+  fillWindowPicker(windows,selected);
 }
 
 function configPayload() {
@@ -351,7 +386,7 @@ $('#audioMode').addEventListener('change',event=>chooseAudioMode(event.target.va
 $('#localAppVolume').addEventListener('change',async()=>{try{const live=ui.status?.activeKind==='screen';render(await saveConfig(live));toast(live?'Громкость изменена, в эфире прежняя':'Сохранено');}catch(error){toast(error.message,true);}});
 $('#monitorSource').addEventListener('change',()=>refreshCapturePreview().catch(error=>toast(error.message,true)));
 $('#windowSource').addEventListener('change',()=>refreshCapturePreview().catch(error=>toast(error.message,true)));
-$('#windowSource').addEventListener('mousedown',()=>refreshWindows().catch(()=>{}));
+
 $('#refreshSources').addEventListener('click',async()=>{try{await loadCaptureSources();toast('Список обновлён');}catch(error){toast(error.message,true);}});
 $('#refreshPreview').addEventListener('click',()=>refreshCapturePreview().catch(error=>toast(error.message,true))); $('#highlightSource').addEventListener('click',highlightSelected);
 $('#applyCapture').addEventListener('click',async()=>{const button=$('#applyCapture');button.disabled=true;try{await saveConfig();$('#monitor').classList.remove('source-preview','window-paused');render(await api('/api/start/screen',{method:'POST'}));toast('Источник применён');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
@@ -441,8 +476,11 @@ $('#clearCache').addEventListener('click',async()=>{
 });
 $('#seekBar').addEventListener('input',event=>{ui.seeking=true;const percent=Number(event.target.value)/10;event.target.style.setProperty('--seek',`${percent}%`);const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*percent/100;$('#elapsedTime').textContent=formatTime(ui.seekDraft);});
 $('#seekBar').addEventListener('change',async event=>{const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*Number(event.target.value)/1000;ui.seeking=false;ui.seekPending=true;ui.seekVisualUntil=Date.now()+Math.max(0,Number(ui.status?.config?.previewDelay)||0)*1000;ui.seekRevision=Number(ui.status?.playback?.revision||0)+1;if(!await playback('seek',{position:ui.seekDraft}))ui.seekPending=false;});
-function applyQualityLive(kind){clearTimeout(ui.liveApplyTimer);ui.liveApplyTimer=setTimeout(async()=>{try{const live=ui.status?.activeKind===kind;render(await saveConfig(live));toast(live?'Качество применено':'Качество сохранено');}catch(error){toast(error.message,true);}},350);}
+function applyQualityLive(kind,что='Качество'){clearTimeout(ui.liveApplyTimer);ui.liveApplyTimer=setTimeout(async()=>{try{const live=ui.status?.activeKind===kind;render(await saveConfig(live));toast(live?`${что} применён${что==='Качество'?'о':''}`:`${что} сохранён${что==='Качество'?'о':''}`);}catch(error){toast(error.message,true);}},350);}
 $('#quality').addEventListener('change',()=>applyQualityLive('screen'));$('#fps').addEventListener('change',()=>applyQualityLive('screen'));
+// Битрейт применяется к тому, что идёт прямо сейчас: раньше выбор просто лежал
+// в настройках до следующего запуска, и казалось, что регулятор ничего не делает.
+$('#videoBitrate').addEventListener('change',()=>applyQualityLive(ui.status?.activeKind||'screen','Битрейт'));
 $('#mediaQuality').addEventListener('change',()=>applyQualityLive('queue'));$('#mediaFps').addEventListener('change',()=>applyQualityLive('queue'));
 $('#previewDelay').addEventListener('change',async()=>{try{ui.hls?.destroy();ui.hls=null;ui.previewUrl='';render(await saveConfig(false));toast('Задержка предпросмотра изменена');}catch(error){toast(error.message,true);}});
 $('#speedSelect').addEventListener('click',async()=>{const current=Number($('#speedSelect').dataset.value)||1;
@@ -460,7 +498,8 @@ $('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button
 $('#stopLive').addEventListener('click',async()=>{try{render(await api('/api/stop',{method:'POST'}));}catch(error){toast(error.message,true);}});
 $('#updateButton').addEventListener('click',()=>{const update=ui.status?.update;if(!update?.available)return;ui.offeredVersion=update.version;paintUpdateDialog(update);if(!updateDialog.open)updateDialog.showModal();});
 $('#showLogs').addEventListener('click',()=>$('#logDialog').showModal());
-$('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast://open-folder';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
+$('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast://open-folder';});
+$('#appSoundSettings').addEventListener('click',()=>{window.location.href='vrcast://app-sound';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
 async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
 async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#previewDelay').value=String(state.config.previewDelay??0);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#rtspTransport').value=state.config.rtspTransport||'tcp';paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);paintPreviewToggle();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);ui.previewTimer=setInterval(()=>refreshCapturePreview(false).catch(()=>{}),2000);

@@ -23,6 +23,23 @@ if (args.Contains("--list-devices", StringComparer.OrdinalIgnoreCase))
 // Сервер закрывает stdin, когда пора остановиться. Это единственный способ
 // завершиться штатно: при принудительном убийстве Windows не даёт восстановить
 // громкость приложения, и оно осталось бы тихим после эфира.
+// Диагностика: какая сейчас громкость у сессий приложения в микшере Windows.
+// Нужна, чтобы проверять «тише у себя» не на слух, а по числу.
+if (args.Contains("--session-volume", StringComparer.OrdinalIgnoreCase))
+{
+    var target = uint.TryParse(args[Array.FindIndex(args, value => value.Equals("--session-volume", StringComparison.OrdinalIgnoreCase)) + 1], out var wanted) ? wanted : 0;
+    using var probe = new MMDeviceEnumerator();
+    using var endpoint = probe.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+    var list = endpoint.AudioSessionManager.Sessions;
+    for (var index = 0; index < list.Count; index++)
+    {
+        var session = list[index];
+        if (session.GetProcessID != target) continue;
+        Console.WriteLine($"volume={session.SimpleAudioVolume.Volume:F3} mute={session.SimpleAudioVolume.Mute}");
+    }
+    return;
+}
+
 var shutdown = new CancellationTokenSource();
 _ = Task.Run(async () =>
 {
@@ -353,21 +370,30 @@ internal sealed class SessionMuter : IDisposable
 
     private void Apply()
     {
+        // Смотрим все активные выходы, а не только тот, что стоит по умолчанию.
+        // Приложение вполне может играть в гарнитуру или в HDMI-монитор — тогда
+        // на устройстве по умолчанию его сессии просто нет, и громкость
+        // «в наушниках» не менялась вообще ничем.
         try
         {
-            using var device = _enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-            var sessions = device.AudioSessionManager.Sessions;
-            for (var index = 0; index < sessions.Count; index++)
+            foreach (var device in _enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
             {
-                var session = sessions[index];
-                if (!Matches(session)) continue;
-                var volume = session.SimpleAudioVolume;
-                // Мьют снимаем всегда: он глушит и захват тоже, а тихо у себя
-                // мы делаем именно уровнем громкости.
-                if (volume.Mute) volume.Mute = false;
-                if (Math.Abs(volume.Volume - _level) < 0.001f) continue;
-                lock (_muted) _muted.Add((volume, volume.Volume));
-                volume.Volume = _level;
+                using (device)
+                {
+                    var sessions = device.AudioSessionManager.Sessions;
+                    for (var index = 0; index < sessions.Count; index++)
+                    {
+                        var session = sessions[index];
+                        if (!Matches(session)) continue;
+                        var volume = session.SimpleAudioVolume;
+                        // Мьют снимаем всегда: он глушит и захват тоже, а тихо у себя
+                        // мы делаем именно уровнем громкости.
+                        if (volume.Mute) volume.Mute = false;
+                        if (Math.Abs(volume.Volume - _level) < 0.001f) continue;
+                        lock (_muted) _muted.Add((volume, volume.Volume));
+                        volume.Volume = _level;
+                    }
+                }
             }
         }
         catch { }

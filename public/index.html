@@ -185,7 +185,15 @@
           </select></label>
 
           <div id="monitorFields"><label>Монитор<select id="monitorSource"></select></label></div>
-          <div id="windowFields" hidden><label>Какое окно<select id="windowSource"></select></label></div>
+          <div id="windowFields" hidden><label>Какое окно
+            <div class="app-picker" id="windowPicker">
+              <button type="button" class="app-picker-value" id="windowPickerButton" aria-haspopup="listbox" aria-expanded="false">
+                <img alt="" hidden><b>Выберите окно</b><svg class="ic" aria-hidden="true"><use href="#i-chevron"/></svg>
+              </button>
+              <div class="app-picker-list" id="windowPickerList" role="listbox" hidden></div>
+            </div>
+            <input type="hidden" id="windowSource">
+          </label></div>
           <div id="regionFields" hidden>
             <button class="select-region" id="selectRegion">Выделить область мышью</button>
             <div class="coords"><label>X<input id="regionX" type="number"></label><label>Y<input id="regionY" type="number"></label><label>Ш<input id="regionWidth" type="number" min="64"></label><label>В<input id="regionHeight" type="number" min="64"></label></div>
@@ -213,6 +221,8 @@
               <option value="0.05">5%</option>
             </select></label>
             <p class="field-help">Тише только у вас. В эфире громкость прежняя.</p>
+            <button class="quiet-button" id="appSoundSettings">Не слышать приложение совсем</button>
+            <p class="field-help">Откроется страница Windows «Громкость и устройства приложений». Отправьте программу на другой выход — например на HDMI-монитор. У вас её станет не слышно, а в эфир звук уйдёт полностью: запись идёт с самой программы, а не с наушников.</p>
           </div>
           <div id="audioOutputFields" hidden><label>Какой выход<select id="audioOutput"></select></label></div>
           <div id="audioDeviceFields" hidden><label>Какой микрофон<select id="audioDevice"></select></label></div>

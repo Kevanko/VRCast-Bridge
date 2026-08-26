@@ -739,6 +739,18 @@ internal sealed class MainWindow : Form
                     });
                     return;
                 }
+                // Страница Windows «Громкость и устройства приложений»: только там
+                // можно отправить звук приложения на другой выход. Своего API для
+                // этого Windows не даёт, зато открыть нужную страницу — не вопрос.
+                if (args.Uri.StartsWith("vrcast://app-sound", StringComparison.OrdinalIgnoreCase))
+                {
+                    args.Cancel = true;
+                    BeginInvoke(() =>
+                    {
+                        try { Process.Start(new ProcessStartInfo("ms-settings:apps-volume") { UseShellExecute = true }); } catch { }
+                    });
+                    return;
+                }
                 if (args.Uri.StartsWith("vrcast://close", StringComparison.OrdinalIgnoreCase))
                 {
                     args.Cancel = true;
@@ -1038,10 +1050,12 @@ internal sealed class CaptureOutline : Form
     protected override void OnPaint(PaintEventArgs args)
     {
         base.OnPaint(args);
-        // Толще и с тёмным контуром — видно и на светлом, и на тёмном кадре.
-        using var shadow = new Pen(Color.FromArgb(190, 12, 14, 22), 8);
-        using var edge = new Pen(Color.FromArgb(235, 122, 120, 207), 4);
-        var outer = new Rectangle(4, 4, Math.Max(1, ClientSize.Width - 9), Math.Max(1, ClientSize.Height - 9));
+        // Рамка тонкая и прижата к самому краю окна: толстая перекрывала
+        // содержимое у окон во весь экран. Тёмная подложка под ней даёт
+        // контраст и на светлом кадре, и на тёмном.
+        using var shadow = new Pen(Color.FromArgb(200, 10, 12, 20), 3);
+        using var edge = new Pen(Color.FromArgb(240, 138, 136, 224), 2);
+        var outer = new Rectangle(1, 1, Math.Max(1, ClientSize.Width - 3), Math.Max(1, ClientSize.Height - 3));
         args.Graphics.DrawRectangle(shadow, outer);
         args.Graphics.DrawRectangle(edge, outer);
     }
