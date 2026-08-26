@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.43.0';
+const APP_VERSION = '0.43.1';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -153,7 +153,8 @@ const mediaCacheProcesses = new Map();
 let unityBuildProcess = null;
 let unityBuildGeneration = 0;
 let unityBuild = loadUnityBuildState();
-let updateState = { checked: false, available: false, version: '', ready: false, notes: '', error: '' };
+let updateState = { checked: false, available: false, version: '', ready: false, notes: '', error: '',
+  percent: 0, doneMb: 0, totalMb: 0 };
 let unityCaptureProcess = null;
 let unityCaptureStartedAt = 0;
 let unityCapture = { state: existsSync(UNITY_CAPTURE_FILE) ? 'ready' : 'idle', message: existsSync(UNITY_CAPTURE_FILE) ? 'Клип готов' : 'Запись ещё не создана', updatedAt: 0 };
@@ -1010,6 +1011,8 @@ async function ensureTools() {
   }
 }
 
+let updateRetryTimer = null;
+
 async function checkForUpdate() {
   if (!process.env.VRCAST_EXE) return;
   try {
@@ -1030,24 +1033,47 @@ async function checkForUpdate() {
   } catch (error) {
     updateState = { ...updateState, checked: true, error: error.message };
     logDetail(`Проверка обновления: ${error.message}`);
+    // Интернет мог просто моргнуть. Пробуем ещё раз через десять минут,
+    // иначе до перезапуска программы обновление так и останется недоступным.
+    if (!updateRetryTimer) {
+      updateRetryTimer = setTimeout(() => { updateRetryTimer = null; checkForUpdate(); }, 600000);
+      updateRetryTimer.unref();
+    }
   }
 }
 
+// Читаем ответ кусками и считаем мегабайты: раньше файл забирался целиком
+// одним вызовом, и полсотни мегабайт тянулись при полностью немом окне —
+// «скачиваю…» без единой цифры и без понятия, сколько ещё ждать.
 async function downloadUpdate(url, expectedSize) {
   try {
     mkdirSync(UPDATE_DIR, { recursive: true });
     const temporary = `${UPDATE_FILE}.part`;
     const response = await fetch(url, { headers: { 'User-Agent': 'VRCast-Bridge' }, signal: AbortSignal.timeout(600000) });
     if (!response.ok) throw new Error(`скачивание вернуло ${response.status}`);
-    const bytes = Buffer.from(await response.arrayBuffer());
+    const total = Number(response.headers.get('content-length')) || expectedSize || 0;
+    const totalMb = Math.round(total / 1048576);
+    const chunks = [];
+    let получено = 0;
+    let последний = -1;
+    for await (const chunk of response.body) {
+      chunks.push(chunk);
+      получено += chunk.length;
+      const percent = total ? Math.round(получено / total * 100) : 0;
+      if (percent !== последний) {
+        последний = percent;
+        updateState = { ...updateState, percent, doneMb: Math.round(получено / 1048576), totalMb };
+      }
+    }
+    const bytes = Buffer.concat(chunks);
     if (expectedSize && bytes.length !== expectedSize) throw new Error('файл скачался не полностью');
     writeFileSync(temporary, bytes);
     rmSync(UPDATE_FILE, { force: true });
     renameSync(temporary, UPDATE_FILE);
-    updateState = { ...updateState, ready: true };
+    updateState = { ...updateState, ready: true, percent: 100, doneMb: totalMb, totalMb };
     log(`Обновление ${updateState.version} готово к установке`);
   } catch (error) {
-    updateState = { ...updateState, error: error.message };
+    updateState = { ...updateState, error: error.message, percent: 0 };
     log(`Не удалось скачать обновление: ${error.message}`);
     logDetail(`Загрузка обновления: ${error.message}`);
   }

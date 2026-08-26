@@ -11,7 +11,14 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.42.1";
+    // Версию берём у самой сборки. Раньше она стояла здесь числом и однажды
+    // разошлась с номером сборки: программа распаковывалась в папку старой
+    // версии, а готовность сервера проверялась сравнением версий — совпадения
+    // не наступало никогда, и запуск полторы минуты висел на заставке, после
+    // чего сообщал «сервер не запустился». Теперь разойтись нечему.
+    private static readonly string AppVersion = typeof(Program).Assembly.GetName().Version is { } number
+        ? $"{number.Major}.{number.Minor}.{number.Build}"
+        : "0.0.0";
 
     [STAThread]
     private static void Main(string[] args)
@@ -180,6 +187,32 @@ internal static class Program
 
     internal const string InstalledMarker = "vrcast.installed";
 
+    // Где программа уже стоит. Без этой записи скачанный файл предлагал папку
+    // по умолчанию, человек соглашался — и на диске оказывалось две программы:
+    // новая рядом со старой, а ярлык вёл на старую.
+    internal static string InstallRecordPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "install.txt");
+
+    internal static string? KnownInstallFolder()
+    {
+        try
+        {
+            var folder = File.ReadAllText(InstallRecordPath).Trim();
+            return Directory.Exists(folder) ? folder : null;
+        }
+        catch { return null; }
+    }
+
+    internal static void RememberInstallFolder(string folder)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(InstallRecordPath)!);
+            File.WriteAllText(InstallRecordPath, folder);
+        }
+        catch { }
+    }
+
     internal static string DefaultInstallFolder => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "VRCast Bridge");
 
@@ -187,13 +220,14 @@ internal static class Program
     {
         try
         {
-            var target = DefaultInstallFolder;
+            var target = KnownInstallFolder() ?? DefaultInstallFolder;
             Directory.CreateDirectory(target);
             var source = Environment.ProcessPath ?? Application.ExecutablePath;
             var destination = Path.Combine(target, "VRCast Bridge.exe");
             if (!string.Equals(source, destination, StringComparison.OrdinalIgnoreCase))
                 File.Copy(source, destination, true);
             File.WriteAllText(Path.Combine(target, InstalledMarker), DateTime.Now.ToString("s"));
+            RememberInstallFolder(target);
             SetupWindow.MakeShortcut(destination, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "VRCast Bridge.lnk"));
             SetupWindow.MakeShortcut(destination, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "VRCast Bridge.lnk"));
             Process.Start(new ProcessStartInfo(destination) { WorkingDirectory = target, UseShellExecute = true });
@@ -282,7 +316,11 @@ internal static class Program
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
                 RedirectStandardError = true,
-                RedirectStandardOutput = true
+                RedirectStandardOutput = true,
+                // Сервер пишет по-русски в UTF-8. Без явной кодировки журнал
+                // превращался в нечитаемую кашу, и разбирать сбои было нечем.
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8
             };
             // Путь к своему EXE нужен серверу, чтобы поставить обновление.
             startInfo.EnvironmentVariables["VRCAST_EXE"] = Environment.ProcessPath ?? Application.ExecutablePath;
@@ -311,10 +349,15 @@ internal static class Program
         }
 
         BootStatus?.Invoke("Запускаю сервер…");
+        var началось = DateTime.UtcNow;
         for (var attempt = 0; attempt < 900; attempt++)
         {
             if (await IsReady()) return server;
             if (server?.HasExited == true) break;
+            // Дольше десяти секунд — значит что-то идёт не так, как обычно.
+            // Показываем счётчик, чтобы было видно: программа жива и ждёт.
+            var секунд = (int)(DateTime.UtcNow - началось).TotalSeconds;
+            if (секунд >= 10) BootStatus?.Invoke($"Запускаю сервер — {секунд} с");
             await Task.Delay(120);
         }
 
@@ -356,9 +399,33 @@ internal static class Program
             http.DefaultRequestHeaders.Add("User-Agent", "VRCast-Bridge");
             const string url = "https://nodejs.org/dist/v22.11.0/node-v22.11.0-win-x64.zip";
             var archive = Path.Combine(root, "node.zip");
-            await using (var source = await http.GetStreamAsync(url))
-            await using (var file = File.Create(archive))
-                await source.CopyToAsync(file);
+            // Показываем мегабайты: «устанавливаю» без единой цифры выглядело
+            // зависанием, а файл здесь под тридцать мегабайт.
+            using (var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
+            {
+                response.EnsureSuccessStatusCode();
+                var total = response.Content.Headers.ContentLength ?? 0;
+                await using var source = await response.Content.ReadAsStreamAsync();
+                await using var file = File.Create(archive);
+                var buffer = new byte[81920];
+                long получено = 0;
+                var последний = -1;
+                int прочитано;
+                while ((прочитано = await source.ReadAsync(buffer)) > 0)
+                {
+                    await file.WriteAsync(buffer.AsMemory(0, прочитано));
+                    получено += прочитано;
+                    var процент = total > 0 ? (int)(получено * 100 / total) : -1;
+                    if (процент != последний)
+                    {
+                        последний = процент;
+                        BootStatus?.Invoke(total > 0
+                            ? $"Устанавливаю Node.js — {получено / 1048576} МБ из {total / 1048576} МБ"
+                            : $"Устанавливаю Node.js — {получено / 1048576} МБ");
+                    }
+                }
+            }
+            BootStatus?.Invoke("Распаковываю Node.js…");
 
             var unpack = Path.Combine(root, "unpack");
             if (Directory.Exists(unpack)) Directory.Delete(unpack, true);
@@ -432,7 +499,11 @@ internal static class Program
         catch { return false; }
     }
 
-    internal static async Task<bool> IsReady() => await GetServerVersion() == AppVersion;
+    // Готовность — это «сервер отвечает», а не «версии совпали». Строгое
+    // сравнение однажды уже подвесило запуск на полторы минуты из-за расхождения
+    // в один номер; своя версия проверяется там, где это правда важно —
+    // при обнаружении чужого запущенного экземпляра.
+    internal static async Task<bool> IsReady() => await GetServerVersion() is not null;
 
     internal static void ShutdownServer()
     {
@@ -533,7 +604,14 @@ internal sealed class SetupWindow : Form
 
         Controls.Add(new Label { Left = 20, Top = 20, Width = 480, Height = 24, Font = new Font("Segoe UI", 12F, FontStyle.Bold), Text = "VRCast Bridge" });
         Controls.Add(new Label { Left = 20, Top = 50, Width = 480, Text = "Куда установить:" });
-        _folder.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "VRCast Bridge");
+        var уже = Program.KnownInstallFolder();
+        _folder.Text = уже ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "VRCast Bridge");
+        if (уже is not null)
+        {
+            Text = "Обновление VRCast Bridge";
+            _install.Text = "Обновить";
+            _status.Text = "Программа уже установлена — обновлю её на месте.";
+        }
         Controls.AddRange(new Control[] { _folder, _browse, _desktop, _menu, _status, _bar, _install });
 
         _browse.Click += (_, _) =>
@@ -548,8 +626,9 @@ internal sealed class SetupWindow : Form
     private async Task InstallAsync()
     {
         _install.Enabled = false; _browse.Enabled = false; _folder.Enabled = false;
-        _bar.Visible = true; _bar.Style = ProgressBarStyle.Marquee;
-        _status.Text = "Копирую программу…";
+        // Полоса показывает настоящие проценты. Бегущая полоска не доходила до
+        // конца никогда, окно закрывалось само — и выглядело это как обрыв.
+        _bar.Visible = true; _bar.Style = ProgressBarStyle.Continuous; _bar.Maximum = 100; _bar.Value = 0;
         try
         {
             var target = _folder.Text.Trim();
@@ -557,15 +636,35 @@ internal sealed class SetupWindow : Form
             var source = Environment.ProcessPath ?? Application.ExecutablePath;
             var destination = Path.Combine(target, "VRCast Bridge.exe");
             if (!string.Equals(source, destination, StringComparison.OrdinalIgnoreCase))
-                await Task.Run(() => File.Copy(source, destination, true));
+            {
+                var всего = new FileInfo(source).Length;
+                var всегоМб = всего / 1048576;
+                await using var чтение = File.OpenRead(source);
+                await using var запись = File.Create(destination);
+                var буфер = new byte[1 << 20];
+                long скопировано = 0;
+                int прочитано;
+                while ((прочитано = await чтение.ReadAsync(буфер)) > 0)
+                {
+                    await запись.WriteAsync(буфер.AsMemory(0, прочитано));
+                    скопировано += прочитано;
+                    var процент = всего > 0 ? (int)(скопировано * 100 / всего) : 100;
+                    _bar.Value = Math.Clamp(процент, 0, 100);
+                    _status.Text = $"Копирую программу — {скопировано / 1048576} МБ из {всегоМб} МБ";
+                    Application.DoEvents();
+                }
+            }
+            _bar.Value = 100;
             await File.WriteAllTextAsync(Path.Combine(target, Program.InstalledMarker), DateTime.Now.ToString("s"));
+            Program.RememberInstallFolder(target);
 
+            _status.Text = "Создаю ярлыки…";
             if (_desktop.Checked) MakeShortcut(destination, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "VRCast Bridge.lnk"));
             if (_menu.Checked) MakeShortcut(destination, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "VRCast Bridge.lnk"));
 
-            _status.Text = "Готово. Запускаю…";
+            _status.Text = "Готово. Запускаю программу…";
             Process.Start(new ProcessStartInfo(destination) { WorkingDirectory = target, UseShellExecute = true });
-            await Task.Delay(600);
+            await Task.Delay(1200);
             Close();
         }
         catch (Exception error)
@@ -834,7 +933,7 @@ internal sealed class MainWindow : Form
         catch { }
     }
 
-    private void ShowSplash(string message = "Первый запуск: догружаются недостающие компоненты.")
+    private void ShowSplash(string message = "Подготовка к запуску")
     {
         try
         {

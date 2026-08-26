@@ -253,7 +253,7 @@ function render(state) {
   }
   offerUpdate(update);
   $('#updateButton').hidden=!update.available;
-  if(update.available)$('#updateButton').textContent=update.ready?`Обновить до ${update.version}`:`Скачиваю ${update.version}…`;
+  if(update.available)$('#updateButton').textContent=update.ready?`Обновить до ${update.version}`:`Скачиваю ${update.version} — ${Number(update.percent)||0}%`;
   $('#updateButton').disabled=!update.ready;
   $('#encoderLabel').textContent=state.performance?.encoder||'неизвестно';
   const слабый=state.performance&&state.performance.hardware===false;
@@ -591,9 +591,18 @@ function качества(item){return item.totalMb;}
 function paintUpdateDialog(update){
   $('#updateVersion').textContent=update.version||'';
   $('#updateNotes').textContent=(update.notes||'').replace(/^#{1,6}\s*/gm,'').replace(/\*\*(.+?)\*\*/g,'$1').replace(/`/g,'').trim()||'Исправления и улучшения.';
-  $('#updateProgress').textContent=update.ready?'Загружено, можно устанавливать.':'Скачиваю…';
+  // Видно, что именно качается и сколько осталось: раньше здесь висело
+  // «Скачиваю…» без единой цифры на все пятьдесят мегабайт.
+  const процент=Number(update.percent)||0;
+  const строка=update.error?`Не удалось скачать: ${update.error}`
+    :update.ready?`Загружено, ${update.totalMb||0} МБ — можно устанавливать`
+    :update.totalMb?`Скачиваю VRCast Bridge ${update.version} — ${update.doneMb||0} МБ из ${update.totalMb} МБ`
+    :'Начинаю загрузку…';
+  $('#updateProgress').textContent=строка;
+  $('#updateBar').hidden=Boolean(update.ready||update.error);
+  $('#updateBar').firstElementChild.style.width=`${update.ready?100:процент}%`;
   $('#updateNow').disabled=!update.ready;
-  $('#updateNow').textContent=update.ready?'Обновить':'Скачиваю…';
+  $('#updateNow').textContent=update.ready?'Обновить':(процент?`Скачиваю ${процент}%`:'Скачиваю…');
 }
 function offerUpdate(update){
   if(!update?.available||!update.version)return;
