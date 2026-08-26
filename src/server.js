@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.43.1';
+const APP_VERSION = '0.43.2';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -2173,8 +2173,12 @@ function startCacheDownload(item) {
   let promise;
   promise = new Promise((resolvePromise, reject) => {
     log(`Буферизация трека: ${item.title}`);
+    // Во время эфира качаем бережно: четыре потока на полной скорости забивают
+    // канал, и картинка у зрителя начинает отставать, хотя сам поток исправен.
+    const эфирИдёт = Boolean(activeKind);
     const args = ['--no-warnings', '--no-playlist', '--newline', '--retries', '8', '--fragment-retries', '8',
-      '--concurrent-fragments', '4', '--socket-timeout', '20', '-f',
+      '--concurrent-fragments', эфирИдёт ? '1' : '4', ...(эфирИдёт ? ['--limit-rate', '4M'] : []),
+      '--socket-timeout', '20', '-f',
       'bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/best[height<=1080]',
       '--merge-output-format', 'mp4', '--remux-video', 'mp4', '-o', join(directory, 'source.%(ext)s'), item.sourceUrl];
     const child = spawn(ytdlpPath(), args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -2498,13 +2502,20 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
     // Ждать источник бесконечно нельзя: пока висит preparingNext, любое
     // переключение молча игнорируется — именно так эфир и «зависал намертво».
     // Не уложились — играем прямо из сети, а докачка идёт своим чередом.
+    // Таймер обязательно снимается: без этого он срабатывал даже после
+    // удачного старта — на каждом треке лишний разбор ссылки через yt-dlp,
+    // строка в журнале и рывок в эфире ровно через двадцать секунд.
+    let запасной = null;
     const media = await Promise.race([
-      stableQueueMedia(item),
-      new Promise(resolvePromise => setTimeout(() => resolvePromise(null), 20000)).then(() => {
-        log(`Источник «${item.title}» готовится дольше обычного — включаю напрямую`);
-        return resolveItem(item);
+      stableQueueMedia(item).then(результат => { clearTimeout(запасной); запасной = null; return результат; }),
+      new Promise((resolvePromise, rejectPromise) => {
+        запасной = setTimeout(() => {
+          запасной = null;
+          log(`Источник «${item.title}» готовится дольше обычного — включаю напрямую`);
+          resolveItem(item).then(resolvePromise, rejectPromise);
+        }, 20000);
       }),
-    ]);
+    ]).finally(() => { if (запасной) { clearTimeout(запасной); запасной = null; } });
     if (stopping || generation !== playGeneration || queuePaused) return;
     // A seek/jump issued while yt-dlp was resolving supersedes this item.
     if (manualTransition) return;
@@ -3038,7 +3049,15 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const requestHost = String(req.headers.host || '').split(':')[0].toLowerCase();
-    const publicTunnelHost = requestHost.endsWith('.trycloudflare.com') || requestHost.endsWith('.pinggy-free.link') || requestHost.endsWith('.free.pinggy.net');
+    // Раньше список адресов был записан руками и туннель localhost.run в него
+    // не попал. По такой ссылке отдавалось окно плейлиста, рассчитанное на этот
+    // же компьютер: четыре секунды истории и старт в полутора секундах от края.
+    // Через интернет игроку этого не хватало никогда — «ссылка для друзей не
+    // грузит». Заодно через неё открывался весь пульт управления, а не только
+    // поток. Теперь адрес берётся у самого туннеля.
+    const tunnelHost = (() => { try { return tunnelUrl ? new URL(tunnelUrl).hostname.toLowerCase() : ''; } catch { return ''; } })();
+    const publicTunnelHost = (tunnelHost && requestHost === tunnelHost)
+      || /\.(trycloudflare\.com|pinggy-free\.link|free\.pinggy\.net|lhr\.life|serveo\.net)$/.test(requestHost);
     if (publicTunnelHost && !url.pathname.startsWith('/stream/') && !url.pathname.startsWith('/media/')) {
       return json(res, 404, { error: 'Через публичную ссылку доступен только медиапоток.' });
     }

@@ -1,6 +1,6 @@
 {
   "name": "vrcast-bridge",
-  "version": "0.43.1",
+  "version": "0.43.2",
   "private": true,
   "description": "Локальный мост для трансляции экрана и медиаплейлистов в видеоплееры VRChat",
   "type": "module",
