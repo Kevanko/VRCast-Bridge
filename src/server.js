@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.42.1';
+const APP_VERSION = '0.43.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -126,6 +126,10 @@ let currentId = null;
 let currentStartedAt = null;
 let currentDuration = null;
 let stopping = false;
+// stopping означает «сейчас разбираем конвейер», и после остановки эфира он
+// так и остаётся поднятым. Фоновой подготовке роликов это мешать не должно —
+// её останавливает только выход из программы.
+let shuttingDown = false;
 let playGeneration = 0;
 let preparingNext = false;
 let queueIndex = -1;
@@ -349,6 +353,19 @@ function loadQueue() {
 function saveQueue() {
   mkdirSync(DATA_DIR, { recursive: true });
   writeFileSync(QUEUE_FILE, JSON.stringify(queue, null, 2), 'utf8');
+  warmQueueSoon();
+}
+
+// Ближайшие ролики готовим заранее, не дожидаясь запуска эфира: тогда переход
+// с экрана на видео и первый запуск списка идут из готового файла и происходят
+// сразу, а не через ожидание yt-dlp. Пауза нужна, чтобы добавление десятка
+// ссылок подряд не запускало прогрев на каждой.
+let warmTimer = null;
+function warmQueueSoon() {
+  clearTimeout(warmTimer);
+  warmTimer = setTimeout(() => {
+    prefetchQueue(Math.max(0, queueIndex)).catch(() => {});
+  }, 1500);
 }
 
 function loadTemplates() {
@@ -1247,8 +1264,11 @@ function sessionProfile(kind = activeKind) {
   return relayProcess && relayProfile ? { ...relayProfile } : streamProfile(kind);
 }
 
+// Кадровая частота — такая же часть формата сессии, как и разрешение: пока
+// сравнивалось одно разрешение, переключатель 30/60 в живом эфире не делал
+// ничего, потому что продюсер получал прежний профиль релея.
 function sameProfile(left, right) {
-  return Boolean(left && right) && left.quality === right.quality;
+  return Boolean(left && right) && left.quality === right.quality && left.fps === right.fps;
 }
 
 // Осознанная смена качества: релей перезапускается, но relayStartedAt сохраняется,
@@ -2003,6 +2023,28 @@ function mediaFailure(itemId) {
   return failure;
 }
 
+// Не всякий ролик получается положить в кеш: прямая ссылка на файл, который
+// yt-dlp не понимает, отдаёт 404 при каждой попытке. Раньше это значило новый
+// запуск yt-dlp на каждую смену трека — процессор дёргался каждые 13 секунд, и
+// видео в эфире шло рывками при идеальном звуке. Теперь после неудачи трек
+// откладывается: сначала на пять минут, потом на полчаса, потом до перезапуска.
+const cacheDeclined = new Map();
+const CACHE_BACKOFF = [5 * 60000, 30 * 60000, Infinity];
+
+function declineCache(itemId, reason) {
+  const было = cacheDeclined.get(itemId)?.tries || 0;
+  const tries = было + 1;
+  cacheDeclined.set(itemId, { tries, until: Date.now() + CACHE_BACKOFF[Math.min(tries - 1, CACHE_BACKOFF.length - 1)] });
+  logDetail(`Кеш недоступен для ${itemId} (попытка ${tries}): ${String(reason).slice(0, 200)}`);
+}
+
+function cacheDeclinedNow(itemId) {
+  const запись = cacheDeclined.get(itemId);
+  if (!запись) return false;
+  if (Date.now() > запись.until) { cacheDeclined.delete(itemId); return false; }
+  return true;
+}
+
 function clearMediaFailure(itemId) {
   mediaFailures.delete(itemId);
   const item = queue.find(entry => entry.id === itemId);
@@ -2136,11 +2178,18 @@ function stableQueueMedia(item) {
   if (item.local) return resolveItem(item);
   // Живой поток скачать нельзя: он бесконечный. Играем напрямую.
   if (item.live) return resolveItem(item);
-  if (!cachedMediaPath(item.id) && Number(item.duration) > CACHE_MAX_SECONDS) return resolveItem(item);
+  const готовый = cachedMediaPath(item.id);
+  // Прямая ссылка на файл — это уже готовый mp4. Гонять его через yt-dlp
+  // бессмысленно: тот разбирает страницы, а не файлы, и на таких ссылках
+  // просто падает с 404. Играем прямо из сети.
+  if (!готовый && item.direct) return resolveItem(item);
+  if (!готовый && cacheDeclinedNow(item.id)) return resolveItem(item);
+  if (!готовый && Number(item.duration) > CACHE_MAX_SECONDS) return resolveItem(item);
   return downloadRemoteMedia(item).then(media => { clearMediaFailure(item.id); return media; }).catch(error => {
     // Прямой поток YouTube живёт минуты и часто отдаёт 403 — на него
     // переключаемся молча, но причину пишем в файл для разбора.
     logDetail(`Буфер не собрался для «${item.title}»: ${error.message}`);
+    declineCache(item.id, error.message);
     if (/403|forbidden|unavailable|private/i.test(String(error.message))) rememberMediaFailure(item.id, error.message);
     return resolveItem(item);
   });
@@ -2309,24 +2358,26 @@ function preloadNext(index) {
 }
 
 // Переключение на трек, который ещё не скачан, стоит секунд: yt-dlp сначала
-// разбирает ссылку, потом качает. Поэтому фоном прогреваем всю очередь по
-// одному треку за раз — начиная с ближайших к текущему. Тогда любой переход
-// (клик по треку, «следующий», повтор) идёт из локального файла и мгновенно.
+// разбирает ссылку, потом качает. Поэтому фоном держим наготове ближайшие
+// треки — тогда «следующий», клик по списку и повтор идут из локального файла
+// и переключаются мгновенно. Всю очередь качать нельзя: на плейлисте в полсотни
+// роликов это часы работы yt-dlp фоном, и эфир от такой нагрузки дёргается.
+const PREFETCH_AHEAD = 2;
 let prefetching = false;
 async function prefetchQueue(fromIndex = queueIndex) {
   if (prefetching || !queue.length) return;
   prefetching = true;
   try {
-    const order = queue.map((item, index) => ({ item, index }))
-      .sort((left, right) => Math.abs(left.index - fromIndex) - Math.abs(right.index - fromIndex));
-    for (const { item } of order) {
-      if (stopping) return;
-      if (item.local || item.id === currentId || cachedMediaPath(item.id)) continue;
+    const ближайшие = [];
+    for (let шаг = 0; шаг <= PREFETCH_AHEAD; шаг++) ближайшие.push(queue[(Math.max(0, fromIndex) + шаг) % queue.length]);
+    for (const item of ближайшие) {
+      if (shuttingDown) return;
+      if (!item || item.local || item.direct || item.live || item.id === currentId) continue;
+      if (cachedMediaPath(item.id) || cacheDeclinedNow(item.id) || mediaFailure(item.id)) continue;
       if (!queue.some(entry => entry.id === item.id)) continue;
-      if (mediaFailure(item.id)) continue;
       try { await stableQueueMedia(item); }
       catch (error) {
-        rememberMediaFailure(item.id, error.message);
+        declineCache(item.id, error.message);
         log(`Прогрев «${item.title}»: ${error.message}`);
       }
     }
@@ -2418,7 +2469,16 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
   queuePaused = false;
   log(`Подготовка: ${item.title}`);
   try {
-    const media = await stableQueueMedia(item);
+    // Ждать источник бесконечно нельзя: пока висит preparingNext, любое
+    // переключение молча игнорируется — именно так эфир и «зависал намертво».
+    // Не уложились — играем прямо из сети, а докачка идёт своим чередом.
+    const media = await Promise.race([
+      stableQueueMedia(item),
+      new Promise(resolvePromise => setTimeout(() => resolvePromise(null), 20000)).then(() => {
+        log(`Источник «${item.title}» готовится дольше обычного — включаю напрямую`);
+        return resolveItem(item);
+      }),
+    ]);
     if (stopping || generation !== playGeneration || queuePaused) return;
     // A seek/jump issued while yt-dlp was resolving supersedes this item.
     if (manualTransition) return;
@@ -2790,7 +2850,7 @@ async function listWindows() {
   const script = `[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -TypeDefinition @'
 using System; using System.Text; using System.Diagnostics; using System.Collections.Generic; using System.Runtime.InteropServices;
 public static class VRCastWindows {
-  public sealed class Entry { public int id; public string process; public string title; public string handle; public int x,y,width,height; public bool minimized; }
+  public sealed class Entry { public int id; public string process; public string title; public string handle; public string path; public int x,y,width,height; public bool minimized; }
   [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left,Top,Right,Bottom; }
   delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
@@ -2801,11 +2861,36 @@ public static class VRCastWindows {
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int a, out int v, int s);
-  public static Entry[] List() { var result=new List<Entry>(); EnumWindows((h,l)=>{ try { int len=GetWindowTextLength(h); int cloaked=0; bool iconic=IsIconic(h); DwmGetWindowAttribute(h,14,out cloaked,4); if((!IsWindowVisible(h)&&!iconic)||(cloaked!=0&&!iconic)||len<1)return true; var text=new StringBuilder(len+1); GetWindowText(h,text,text.Capacity); uint pid; RECT r; GetWindowThreadProcessId(h,out pid); if(!GetWindowRect(h,out r))return true; int width=Math.Max(1,r.Right-r.Left),height=Math.Max(1,r.Bottom-r.Top); if(!iconic&&(width<16||height<16))return true; var p=Process.GetProcessById((int)pid); result.Add(new Entry{id=(int)pid,process=p.ProcessName,title=text.ToString(),handle=h.ToInt64().ToString(),x=r.Left,y=r.Top,width=width,height=height,minimized=iconic}); } catch {} return true; },IntPtr.Zero); return result.ToArray(); }
+  public static Entry[] List() { var result=new List<Entry>(); EnumWindows((h,l)=>{ try { int len=GetWindowTextLength(h); int cloaked=0; bool iconic=IsIconic(h); DwmGetWindowAttribute(h,14,out cloaked,4); if((!IsWindowVisible(h)&&!iconic)||(cloaked!=0&&!iconic)||len<1)return true; var text=new StringBuilder(len+1); GetWindowText(h,text,text.Capacity); uint pid; RECT r; GetWindowThreadProcessId(h,out pid); if(!GetWindowRect(h,out r))return true; int width=Math.Max(1,r.Right-r.Left),height=Math.Max(1,r.Bottom-r.Top); if(!iconic&&(width<16||height<16))return true; var p=Process.GetProcessById((int)pid); string exe=""; try{ exe=p.MainModule.FileName; }catch{} result.Add(new Entry{id=(int)pid,process=p.ProcessName,title=text.ToString(),handle=h.ToInt64().ToString(),path=exe,x=r.Left,y=r.Top,width=width,height=height,minimized=iconic}); } catch {} return true; },IntPtr.Zero); return result.ToArray(); }
 }
 '@; [VRCastWindows]::List() | Sort-Object title | ConvertTo-Json -Compress`;
   const junkProcesses = new Set(['dwm', 'csrss', 'winlogon', 'textinputhost', 'shellexperiencehost', 'searchhost']);
-  return (await runPowerShellJson(script)).filter(item => item.handle && item.title && !junkProcesses.has(String(item.process || '').toLowerCase()));
+  const окна = (await runPowerShellJson(script)).filter(item => item.handle && item.title && !junkProcesses.has(String(item.process || '').toLowerCase()));
+  await ensureAppIcons(окна.map(item => item.path));
+  for (const окно of окна) {
+    const ключ = окно.path ? iconKey(окно.path) : '';
+    окно.icon = ключ && existsSync(join(ICON_DIR, `${ключ}.png`)) ? `/api/app-icon?key=${ключ}` : '';
+    delete окно.path;
+  }
+  return окна;
+}
+
+// Значок приложения рядом с названием окна: в списке из двадцати одинаковых
+// заголовков глазом ищется именно иконка. Вытаскиваем её один раз на каждый
+// exe и кладём в файл — дальше список строится без единого запуска PowerShell.
+const ICON_DIR = join(DATA_DIR, 'app-icons');
+
+function iconKey(path) {
+  return crypto.createHash('sha1').update(String(path).toLowerCase()).digest('hex');
+}
+
+async function ensureAppIcons(paths) {
+  const нужны = [...new Set(paths.filter(Boolean))].filter(path => !existsSync(join(ICON_DIR, `${iconKey(path)}.png`)));
+  if (!нужны.length) return;
+  mkdirSync(ICON_DIR, { recursive: true });
+  const пары = нужны.map(path => `@{s='${path.replace(/'/g, "''")}';d='${join(ICON_DIR, `${iconKey(path)}.png`).replace(/'/g, "''")}'}`).join(',');
+  const script = `Add-Type -AssemblyName System.Drawing; foreach($i in @(${пары})){ try{ $icon=[System.Drawing.Icon]::ExtractAssociatedIcon($i.s); $bitmap=$icon.ToBitmap(); $bitmap.Save($i.d,[System.Drawing.Imaging.ImageFormat]::Png); $bitmap.Dispose(); $icon.Dispose() }catch{} }`;
+  await spawnCollect('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 15000).catch(() => {});
 }
 
 async function selectedCaptureRect() {
@@ -2936,6 +3021,13 @@ const server = http.createServer(async (req, res) => {
       if (existsSync(CAPTURE_PREVIEW)) { res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store' }); createReadStream(CAPTURE_PREVIEW).pipe(res); return; }
       return json(res, 404, { error: 'Предпросмотр ещё не создан.' });
     }
+    if (req.method === 'GET' && url.pathname === '/api/app-icon') {
+      const ключ = String(url.searchParams.get('key') || '');
+      const файл = join(ICON_DIR, `${ключ}.png`);
+      if (!/^[0-9a-f]{40}$/.test(ключ) || !existsSync(файл)) return json(res, 404, { error: 'Значок не найден.' });
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'max-age=3600' });
+      createReadStream(файл).pipe(res); return;
+    }
     if (req.method === 'POST' && url.pathname === '/api/capture-preview') return json(res, 200, await generateCapturePreview());
     if (req.method === 'GET' && url.pathname === '/api/capture-sources') {
       const [windows, monitors, audioDevices, audioOutputs] = await Promise.all([listWindows(), listMonitors(), listAudioDevices(), listAudioOutputs()]);
@@ -2950,6 +3042,7 @@ const server = http.createServer(async (req, res) => {
       void buildUnityQueue(String(body.id || '')).catch(error => log(`Unity: ${error.message}`)); return json(res, 202, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/unity/queue/cancel') {
+      shuttingDown = true;
       stopUnityBuild(); return json(res, 200, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/unity/capture/start') {
@@ -3203,6 +3296,9 @@ server.listen(PORT, HOST, () => {
   try { rmSync(UPDATE_DIR, { recursive: true, force: true }); } catch {}
   refreshYtdlp();
   ensureTools();
+  // Первые ролики списка держим наготове с самого запуска: переход «экран →
+  // видео» и первый запуск тогда идут из готового файла, без ожидания сети.
+  setTimeout(() => { prefetchQueue(0).catch(() => {}); }, 5000);
   // Проверяем не сразу: пусть эфир поднимется первым, обновление подождёт.
   setTimeout(() => { checkForUpdate(); }, 8000);
   if (tools.mediamtx) { startMediaMtx(); log(`Мгновенный канал RTSP: rtspt://127.0.0.1:${RTSP_PORT}/live`); }

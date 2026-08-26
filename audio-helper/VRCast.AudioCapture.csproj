@@ -9,6 +9,7 @@
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <DebugType>none</DebugType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="NAudio.Core" HintPath="C:\Users\NM\.nuget\packages\naudio.core\2.3.0\lib\netstandard2.0\NAudio.Core.dll" Private="true" />
