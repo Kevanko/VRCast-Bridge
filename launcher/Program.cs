@@ -11,7 +11,7 @@ namespace VRCastBridge.Launcher;
 internal static class Program
 {
     internal const string AppUrl = "http://127.0.0.1:4717/";
-    private const string AppVersion = "0.41.2";
+    private const string AppVersion = "0.42.0";
 
     [STAThread]
     private static void Main(string[] args)
@@ -26,6 +26,13 @@ internal static class Program
         var noWindow = args.Any(arg => arg.Equals("--no-browser", StringComparison.OrdinalIgnoreCase));
         // Пока программа не установлена, файл работает установщиком: спрашивает
         // папку и ярлык, ставит себя туда и запускает уже оттуда.
+        // Тихая установка: нужна для проверки в чистой системе и для тех, кто
+        // ставит программу скриптом.
+        if (args.Any(arg => arg.Equals("--install", StringComparison.OrdinalIgnoreCase)))
+        {
+            SilentInstall();
+            return;
+        }
         if (!noWindow && !IsInstalled() && !args.Any(arg => arg.Equals("--run", StringComparison.OrdinalIgnoreCase)))
         {
             Application.Run(new SetupWindow());
@@ -172,6 +179,27 @@ internal static class Program
     }
 
     internal const string InstalledMarker = "vrcast.installed";
+
+    internal static string DefaultInstallFolder => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "VRCast Bridge");
+
+    internal static void SilentInstall()
+    {
+        try
+        {
+            var target = DefaultInstallFolder;
+            Directory.CreateDirectory(target);
+            var source = Environment.ProcessPath ?? Application.ExecutablePath;
+            var destination = Path.Combine(target, "VRCast Bridge.exe");
+            if (!string.Equals(source, destination, StringComparison.OrdinalIgnoreCase))
+                File.Copy(source, destination, true);
+            File.WriteAllText(Path.Combine(target, InstalledMarker), DateTime.Now.ToString("s"));
+            SetupWindow.MakeShortcut(destination, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "VRCast Bridge.lnk"));
+            SetupWindow.MakeShortcut(destination, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "VRCast Bridge.lnk"));
+            Process.Start(new ProcessStartInfo(destination) { WorkingDirectory = target, UseShellExecute = true });
+        }
+        catch (Exception error) { LogCrash(error); }
+    }
 
     internal static string CrashLogPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "crash.log");
@@ -549,7 +577,7 @@ internal sealed class SetupWindow : Form
     }
 
     // Ярлык делаем через WScript.Shell: своих библиотек для этого не нужно.
-    private static void MakeShortcut(string target, string linkPath)
+    internal static void MakeShortcut(string target, string linkPath)
     {
         try
         {
