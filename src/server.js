@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.43.3';
+const APP_VERSION = '0.44.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1483,6 +1483,17 @@ function observeAudio(stream) {
 
 // Хелпер звука завершаем закрытием stdin: только так он успевает вернуть
 // приложению прежнюю громкость. Убийство — страховка, если не отреагировал.
+// Помощника захвата окна сначала просим выйти сам (закрываем ввод) и только
+// потом добиваем: убитый на месте, он не успевает закрыть сессию захвата,
+// и жёлтая рамка остаётся висеть на чужом окне.
+function stopWindowHelper(child) {
+  if (!child) return;
+  try { child.stdin?.end(); } catch {}
+  const добить = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} }, 400);
+  добить.unref?.();
+  child.once('close', () => clearTimeout(добить));
+}
+
 function stopAudioHelper(child) {
   if (!child) return;
   try { child.stdin?.end(); } catch {}
@@ -1564,7 +1575,11 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
       child.kill('SIGTERM'); aux?.kill('SIGTERM'); activeProcess = null; activeAuxProcess = null; activeKind = null;
       throw new Error('Компонент изолированного захвата окна не найден.');
     }
-    windowCapture = spawn(helper, windowHelperArgs, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Ввод открываем каналом: закрыть его — вежливый способ попросить помощника
+    // выйти. Тогда он сам закрывает сессию захвата, и Windows снимает жёлтую
+    // рамку вокруг окна сразу, а не спустя минуту после выхода из программы.
+    windowCapture = spawn(helper, windowHelperArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    windowCapture.stdin.on('error', () => {});
     activeWindowProcess = windowCapture;
     windowCapture.stdout.on('error', () => {}); child.stdio[4].on('error', () => {});
     windowCapture.stdout.pipe(child.stdio[4]);
@@ -1573,7 +1588,7 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
   attachProcessLogs(child, 'FFmpeg');
   child.on('close', code => {
     if (aux && activeAuxProcess === aux) { stopAudioHelper(aux); activeAuxProcess = null; }
-    if (windowCapture && activeWindowProcess === windowCapture) { windowCapture.kill('SIGTERM'); activeWindowProcess = null; }
+    if (windowCapture && activeWindowProcess === windowCapture) { stopWindowHelper(windowCapture); activeWindowProcess = null; }
     const wasCurrent = activeProcess === child;
     if (wasCurrent) activeProcess = null;
     if (!stopping && code) log(`Захват остановился с кодом ${code}`);
@@ -2648,7 +2663,7 @@ function stopActive(clearCurrent = true, keepTunnel = true, keepRelay = true) {
   activeAuxProcess?.stdout?.unpipe();
   activeWindowProcess?.stdout?.unpipe();
   stopAudioHelper(activeAuxProcess);
-  activeWindowProcess?.kill('SIGTERM');
+  stopWindowHelper(activeWindowProcess);
   stopProducer(activeProcess);
   if (!keepRelay) { stopStandby(); stopRtspPush(); relayProcess?.kill('SIGTERM'); relayProcess = null; relayStartedAt = 0; relayProfile = null; }
   if (!keepTunnel) stopPublicTunnel();

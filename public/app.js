@@ -274,9 +274,20 @@ function render(state) {
   $('#menuMediaQuality').hidden=screenSource; $('#menuMediaFps').hidden=screenSource;
   $('#menuScreenQuality').hidden=!screenSource; $('#menuScreenFps').hidden=!screenSource;
   renderNowPlaying(state); renderProgress(); renderTemplates(state); renderServers(state); renderStorage(state); startPreview(state);
-  $('#goLive').hidden=true; $('#stopLive').hidden=!state.running; $('#skipTrack').hidden=!(state.running&&state.activeKind==='queue');
-  $('#applyCapture').hidden=ui.source!=='screen';
-  $('#applyCapture').textContent=state.activeKind==='screen'?'Применить изменения':'Показать экран в эфире';
+  // Пуск и остановка — отдельная явная кнопка, и её название прямо говорит,
+  // что именно начнётся или прекратится. Раньше кнопка пуска была спрятана
+  // всегда, и запустить эфир экрана можно было только через «Показать экран
+  // в эфире» в настройках источника — это находили не сразу.
+  const экран=ui.source==='screen';
+  $('#goLive').hidden=state.running;
+  $('#goLive').textContent=экран?'Начать эфир экрана':'Начать эфир видео';
+  $('#stopLive').hidden=!state.running;
+  $('#stopLive').textContent=state.activeKind==='screen'?'Остановить эфир экрана':'Остановить эфир';
+  $('#skipTrack').hidden=!(state.running&&state.activeKind==='queue');
+  // Пока эфир экрана идёт, эта кнопка применяет смену источника или настроек.
+  // Когда эфира нет, её работу делает кнопка пуска — двух одинаковых не нужно.
+  $('#applyCapture').hidden=!(экран&&state.activeKind==='screen');
+  $('#applyCapture').textContent='Применить изменения';
   $$('.broadcast-mode button').forEach(node=>node.disabled=state.running);
 }
 
