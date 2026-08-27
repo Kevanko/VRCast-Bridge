@@ -80,7 +80,12 @@
           <div class="broadcast-mode"><button class="active" data-output="local" title="Ссылка работает только на этом компьютере">Только я</button><button data-output="remote" title="Через ваш сервер — ссылка не меняется">Мой сервер</button><button data-output="tunnel" title="Бесплатный туннель, задержка около трёх секунд">Друзья</button></div>
           <section class="output-panel" id="remoteOutput" hidden>
             <label>Сервер<select id="serverSelect"></select></label>
-            <label>Имя канала<input id="activeChannel" type="text" placeholder="live" autocomplete="off" maxlength="40"></label>
+            <div id="serverEdit" hidden>
+              <label>Название<input id="serverRename" type="text" autocomplete="off" maxlength="60"></label>
+              <label>Адрес<input id="serverAddress" type="text" placeholder="123.45.67.89 или my-server.com" autocomplete="off"></label>
+              <button class="quiet-button" id="saveServer" type="button">Сохранить</button>
+              <p class="field-help">Пароль здесь не нужен. Появился домен — впишите его вместо адреса, ссылка сразу станет с доменом.</p>
+            </div>
             <div class="server-actions">
               <button id="addServerToggle" type="button"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>Добавить</button>
               <button id="removeServer" type="button" disabled>Удалить</button>
@@ -88,10 +93,9 @@
             <div id="addServerForm" hidden>
               <label>Адрес сервера<input id="serverHost" type="text" placeholder="123.45.67.89 или my-server.com" autocomplete="off"></label>
               <label>Пароль root<input id="serverPassword" type="password" placeholder="пароль от сервера" autocomplete="off"></label>
-              <label>Как назвать<input id="serverName" type="text" placeholder="Например: Латвия" autocomplete="off"></label>
-              <label>Имя канала<input id="serverChannel" type="text" placeholder="live" autocomplete="off"></label>
+              <label>Как назвать<input id="serverName" type="text" placeholder="можно не заполнять" autocomplete="off"></label>
               <button class="deploy-button" id="deployServer" type="button"><svg class="ic" aria-hidden="true"><use href="#i-server"/></svg>Настроить сервер</button>
-              <p class="field-help">Подойдёт IP или домен. Пароль нужен один раз для установки и не сохраняется.<br>Имя канала разделяет трансляции: у каждого друга своё, сервер один.</p>
+              <p class="field-help">Пароль нужен один раз — чтобы поставить на сервер программу трансляции. Он не сохраняется. Дальше сервер работает без него.</p>
             </div>
             <p class="field-help" id="serverHint"></p>
           </section>

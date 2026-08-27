@@ -271,3 +271,5 @@ option{background:var(--dusk);color:var(--text)}
 .update-bar{height:5px;margin:8px 0 4px;overflow:hidden;border-radius:99px;background:var(--haze)}
 .update-bar[hidden]{display:none}
 .update-bar i{display:block;width:0;height:100%;border-radius:inherit;background:var(--iris);transition:width .3s var(--ease)}
+/* Кнопка сохранения сервера стоит в ряду обычных полей */
+#saveServer{width:100%;margin-top:2px}
