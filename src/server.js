@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.46.1';
+const APP_VERSION = '0.47.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -934,6 +934,48 @@ function versionIsNewer(candidate, current) {
 }
 
 
+// Загрузка с докачкой. Оборванная связь на середине больше не означает
+// «качать заново»: недокачанный кусок остаётся на диске, и следующая попытка
+// просит у сервера продолжение с этого места. Пишем сразу в файл, а не
+// копим в памяти — иначе на десятках мегабайт программа раздувалась.
+async function downloadWithResume(url, target, onProgress, попыток = 4) {
+  let последняя = '';
+  for (let попытка = 1; попытка <= попыток; попытка++) {
+    let уже = 0;
+    try { уже = statSync(target).size; } catch {}
+    const headers = { 'User-Agent': 'VRCast-Bridge' };
+    if (уже > 0) headers.Range = `bytes=${уже}-`;
+    try {
+      const ответ = await fetch(url, { headers, signal: AbortSignal.timeout(600000) });
+      // 206 — сервер отдаёт продолжение, 200 — не умеет и шлёт файл целиком.
+      const продолжение = ответ.status === 206 && уже > 0;
+      if (!ответ.ok) throw new Error(`сервер ответил ${ответ.status}`);
+      if (!продолжение) уже = 0;
+      const остаток = Number(ответ.headers.get('content-length')) || 0;
+      const всего = продолжение ? уже + остаток : остаток;
+      const файл = createWriteStream(target, продолжение ? { flags: 'a' } : { flags: 'w' });
+      let принято = уже;
+      let последнийПроцент = -1;
+      for await (const кусок of ответ.body) {
+        if (!файл.write(кусок)) await new Promise(r => файл.once('drain', r));
+        принято += кусок.length;
+        const процент = всего ? Math.round(принято / всего * 100) : 0;
+        if (процент !== последнийПроцент) { последнийПроцент = процент; onProgress?.(принято, всего); }
+      }
+      await new Promise((resolvePromise, reject) => файл.end(error => error ? reject(error) : resolvePromise()));
+      if (всего && принято < всего) throw new Error('связь оборвалась');
+      return;
+    } catch (ошибка) {
+      последняя = ошибка.message;
+      if (попытка < попыток) {
+        logDetail(`Загрузка ${url.slice(0, 80)}: ${последняя}, продолжу с места обрыва (попытка ${попытка + 1})`);
+        await new Promise(r => setTimeout(r, 1500 * попытка));
+      }
+    }
+  }
+  throw new Error(последняя || 'не удалось скачать');
+}
+
 // Докачка недостающих компонентов. Идёт в фоне и по одному, чтобы не забивать
 // канал: программа тем временем уже открыта и показывает, чего ждёт.
 async function downloadTool(name) {
@@ -950,19 +992,12 @@ async function downloadTool(name) {
       if (!url) throw new Error('нет подходящего файла в релизе');
     }
     log(`Догружаю компонент: ${source.label}`);
-    const response = await fetch(url, { headers: { 'User-Agent': 'VRCast-Bridge' }, signal: AbortSignal.timeout(600000) });
-    if (!response.ok) throw new Error(`сервер ответил ${response.status}`);
-    const total = Number(response.headers.get('content-length')) || 0;
     const temporary = join(TOOL_DIR, `${name}.part`);
-    const chunks = [];
-    let received = 0;
-    for await (const chunk of response.body) {
-      chunks.push(chunk);
-      received += chunk.length;
-      if (total) toolDownloads = { ...toolDownloads, [name]: { state: 'work', percent: Math.round(received / total * 100),
-        label: source.label, doneMb: Math.round(received / 1048576), totalMb: Math.round(total / 1048576) } };
-    }
-    writeFileSync(temporary, Buffer.concat(chunks));
+    await downloadWithResume(url, temporary, (received, total) => {
+      toolDownloads = { ...toolDownloads, [name]: { state: 'work',
+        percent: total ? Math.round(received / total * 100) : 0, label: source.label,
+        doneMb: Math.round(received / 1048576), totalMb: Math.round(total / 1048576) } };
+    });
     if (source.unpack) {
       // В Windows есть встроенный tar, он же распаковывает zip — свои
       // распаковщики и лишние зависимости для этого не нужны.
@@ -1085,25 +1120,15 @@ async function downloadUpdate(url, expectedSize) {
   try {
     mkdirSync(UPDATE_DIR, { recursive: true });
     const temporary = `${UPDATE_FILE}.part`;
-    const response = await fetch(url, { headers: { 'User-Agent': 'VRCast-Bridge' }, signal: AbortSignal.timeout(600000) });
-    if (!response.ok) throw new Error(`скачивание вернуло ${response.status}`);
-    const total = Number(response.headers.get('content-length')) || expectedSize || 0;
-    const totalMb = Math.round(total / 1048576);
-    const chunks = [];
-    let получено = 0;
-    let последний = -1;
-    for await (const chunk of response.body) {
-      chunks.push(chunk);
-      получено += chunk.length;
-      const percent = total ? Math.round(получено / total * 100) : 0;
-      if (percent !== последний) {
-        последний = percent;
-        updateState = { ...updateState, percent, doneMb: Math.round(получено / 1048576), totalMb };
-      }
+    const totalMb = Math.round((expectedSize || 0) / 1048576);
+    await downloadWithResume(url, temporary, (принято, всего) => {
+      updateState = { ...updateState, percent: всего ? Math.round(принято / всего * 100) : 0,
+        doneMb: Math.round(принято / 1048576), totalMb: Math.round((всего || expectedSize || 0) / 1048576) };
+    });
+    if (expectedSize && statSync(temporary).size !== expectedSize) {
+      rmSync(temporary, { force: true });
+      throw new Error('файл скачался не полностью');
     }
-    const bytes = Buffer.concat(chunks);
-    if (expectedSize && bytes.length !== expectedSize) throw new Error('файл скачался не полностью');
-    writeFileSync(temporary, bytes);
     rmSync(UPDATE_FILE, { force: true });
     renameSync(temporary, UPDATE_FILE);
     updateState = { ...updateState, ready: true, percent: 100, doneMb: totalMb, totalMb };
@@ -1273,7 +1298,10 @@ let последнийПерезапуск = 0;
 function watchStalledStream(state) {
   if (!activeKind || queuePaused) return;
   const возраст = Number(state.segmentAge) || 0;
-  if (возраст < 12 || Date.now() - последнийПерезапуск < 45000) return;
+  // Восемь секунд вместо двенадцати: столько зритель ещё готов ждать, а
+  // ложных срабатываний на этом пороге в замерах не появилось — обычный
+  // возраст куска держится около секунды даже на слабой машине.
+  if (возраст < 8 || Date.now() - последнийПерезапуск < 45000) return;
   последнийПерезапуск = Date.now();
   log(`Поток встал (${возраст.toFixed(1)} с без новых кадров) — перезапускаю`);
   try {
@@ -1410,13 +1438,16 @@ function rateControlArgs(rate) {
 function producerEncodeArgs(profile = streamProfile()) {
   const keyframes = Math.max(8, Math.round(profile.fps * 0.5));
   const rate = bitrate(profile);
+  // Профиль main и уровень 4.1: так поток понимают все плееры, включая Quest,
+  // где high-профиль берётся не всегда. Цена — несколько процентов лишнего
+  // размера при том же качестве, и это дешевле, чем «у друга не открылось».
   if (encoder.name === 'h264_nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p3', '-tune', 'll',
-    ...rateControlArgs(rate), '-rc-lookahead', '0',
+    '-profile:v', 'main', '-level:v', '4.1', ...rateControlArgs(rate), '-rc-lookahead', '0',
     '-g', String(keyframes), '-keyint_min', String(keyframes), '-bf', '0', '-pix_fmt', 'yuv420p'];
   // На слабой машине даже veryfast не успевает: тогда переходим на ultrafast,
   // это заметно дешевле по процессору ценой чуть большего размера потока.
   return ['-c:v', 'libx264', '-preset', lightMode ? 'ultrafast' : 'veryfast', '-tune', 'zerolatency',
-    '-b:v', rate, '-maxrate', rate, '-bufsize', rate,
+    '-profile:v', 'main', '-level:v', '4.1', '-b:v', rate, '-maxrate', rate, '-bufsize', rate,
     '-g', String(keyframes), '-keyint_min', String(keyframes), '-sc_threshold', '0', '-bf', '0', '-pix_fmt', 'yuv420p'];
 }
 
@@ -1608,21 +1639,29 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
       child.kill('SIGTERM'); activeProcess = null; activeKind = null;
       throw new Error('Компонент системного звука не найден.');
     }
-    aux = spawn(helper, audioHelperArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    aux.stdin.on('error', () => {});
-    activeAuxProcess = aux;
-    aux.stdout.on('error', () => {});
     child.stdio[3].on('error', () => {});
-    observeAudio(aux.stdout);
-    aux.stdout.pipe(child.stdio[3]);
-    attachProcessLogs(aux, 'System audio');
-    aux.on('close', code => {
-      // Эфир без звука хуже короткого перезапуска: если хелпер умер, а видео
-      // ещё идёт — перезапускаем захват целиком один раз.
-      if (activeAuxProcess !== aux || stopping || activeProcess !== child || !code) return;
-      log(`Компонент звука неожиданно остановился (код ${code}) — перезапускаю захват`);
-      startScreen().catch(error => log(`Перезапуск захвата: ${error.message}`));
-    });
+    if (keepAudioHelper && activeAuxProcess) {
+      // Тот же помощник, новый кодировщик: просто перецепляем вывод.
+      aux = activeAuxProcess;
+      aux.stdout.pipe(child.stdio[3]);
+    } else {
+      aux = spawn(helper, audioHelperArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      aux.stdin.on('error', () => {});
+      activeAuxProcess = aux;
+      aux.stdout.on('error', () => {});
+      observeAudio(aux.stdout);
+      aux.stdout.pipe(child.stdio[3]);
+      attachProcessLogs(aux, 'System audio');
+      aux.on('close', code => {
+        // Эфир без звука хуже короткого перезапуска: если хелпер умер, а видео
+        // ещё идёт — перезапускаем захват целиком один раз.
+        if (activeAuxProcess !== aux || stopping || !activeProcess || !code) return;
+        activeAuxProcess = null; audioHelperKey = '';
+        log(`Компонент звука неожиданно остановился (код ${code}) — перезапускаю захват`);
+        startScreen().catch(error => log(`Перезапуск захвата: ${error.message}`));
+      });
+    }
+    audioHelperKey = audioHelperSignature();
   }
   if (windowHelperArgs) {
     const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
@@ -1633,17 +1672,26 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
     // Ввод открываем каналом: закрыть его — вежливый способ попросить помощника
     // выйти. Тогда он сам закрывает сессию захвата, и Windows снимает жёлтую
     // рамку вокруг окна сразу, а не спустя минуту после выхода из программы.
-    windowCapture = spawn(helper, windowHelperArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    windowCapture.stdin.on('error', () => {});
-    activeWindowProcess = windowCapture;
-    windowCapture.stdout.on('error', () => {}); child.stdio[4].on('error', () => {});
-    windowCapture.stdout.pipe(child.stdio[4]);
-    attachProcessLogs(windowCapture, 'Window capture');
+    child.stdio[4].on('error', () => {});
+    if (keepWindowHelper && activeWindowProcess) {
+      windowCapture = activeWindowProcess;
+      windowCapture.stdout.pipe(child.stdio[4]);
+    } else {
+      windowCapture = spawn(helper, windowHelperArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      windowCapture.stdin.on('error', () => {});
+      activeWindowProcess = windowCapture;
+      windowCapture.stdout.on('error', () => {});
+      windowCapture.stdout.pipe(child.stdio[4]);
+      attachProcessLogs(windowCapture, 'Window capture');
+    }
+    windowHelperKey = [config.captureWindowHandle, windowHelperArgs[3], windowHelperArgs[5], windowHelperArgs[7]].join('|');
   }
   attachProcessLogs(child, 'FFmpeg');
   child.on('close', code => {
-    if (aux && activeAuxProcess === aux) { stopAudioHelper(aux); activeAuxProcess = null; }
-    if (windowCapture && activeWindowProcess === windowCapture) { stopWindowHelper(windowCapture); activeWindowProcess = null; }
+    // Помощников гасим только если это конец захвата, а не пересборка
+    // кодировщика: при пересборке их вывод сейчас перецепят на новый ffmpeg.
+    if (!keepAudioHelper && aux && activeAuxProcess === aux) { stopAudioHelper(aux); activeAuxProcess = null; audioHelperKey = ''; }
+    if (!keepWindowHelper && windowCapture && activeWindowProcess === windowCapture) { stopWindowHelper(windowCapture); activeWindowProcess = null; windowHelperKey = ''; }
     const wasCurrent = activeProcess === child;
     if (wasCurrent) activeProcess = null;
     if (!stopping && code) log(`Захват остановился с кодом ${code}`);
@@ -1652,16 +1700,54 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
   });
 }
 
+// Помощники звука и захвата окна переживают смену настроек кодировщика.
+// Раньше любая правка битрейта гасила весь захват целиком: помощник звука
+// перезапускался, звук пропадал на полсекунды, а громкость приложения в
+// микшере Windows выставлялась заново. Если настройки самих помощников не
+// изменились, их вывод просто перецепляется на новый ffmpeg.
+let audioHelperKey = '';
+let windowHelperKey = '';
+let keepAudioHelper = false;
+let keepWindowHelper = false;
+
+function audioHelperSignature() {
+  if (!['system', 'output', 'process'].includes(config.audioMode)) return '';
+  return [config.audioMode, config.audioOutputId, config.audioProcessId, localAppLevel().toFixed(3)].join('|');
+}
+
+function windowHelperSignature(profile) {
+  if (config.captureMode !== 'window') return '';
+  const height = profileHeight(profile);
+  return [config.captureWindowHandle, Math.round(height * 16 / 9 / 2) * 2, height, profile.fps].join('|');
+}
+
 let screenStarting = false;
 async function startScreen() {
   if (screenStarting) throw new Error('Захват уже запускается.');
   screenStarting = true;
   try { await startScreenInner(); }
-  finally { screenStarting = false; }
+  catch (ошибка) {
+    // Сорвались на полпути — оставленные помощники никому не нужны, иначе
+    // подсветка захваченного окна так и висит, а звук приложения остаётся тише.
+    if (keepAudioHelper || keepWindowHelper) {
+      keepAudioHelper = false; keepWindowHelper = false;
+      stopAudioHelper(activeAuxProcess); stopWindowHelper(activeWindowProcess);
+      activeAuxProcess = null; activeWindowProcess = null; audioHelperKey = ''; windowHelperKey = '';
+    }
+    throw ошибка;
+  }
+  finally { screenStarting = false; keepAudioHelper = false; keepWindowHelper = false; }
 }
 
 async function startScreenInner() {
   const wasLive = Boolean(activeKind);
+  // Решаем до остановки: если настройки помощников те же, оставляем их жить.
+  const текущийПрофиль = sessionProfile('screen');
+  const тотЖеЗахват = wasLive && activeKind === 'screen';
+  // Каждого помощника решаем отдельно: смена качества меняет размер кадра и
+  // требует нового захвата окна, но звук при этом трогать незачем.
+  keepAudioHelper = тотЖеЗахват && Boolean(activeAuxProcess) && audioHelperSignature() === audioHelperKey;
+  keepWindowHelper = тотЖеЗахват && Boolean(activeWindowProcess) && windowHelperSignature(текущийПрофиль) === windowHelperKey;
   stopActive(false, true, true);
   currentId = null; currentStartedAt = null; currentDuration = null;
   const desired = streamProfile('screen');
@@ -2723,12 +2809,14 @@ function stopActive(clearCurrent = true, keepTunnel = true, keepRelay = true) {
   preparingNext = false;
   activeAuxProcess?.stdout?.unpipe();
   activeWindowProcess?.stdout?.unpipe();
-  stopAudioHelper(activeAuxProcess);
-  stopWindowHelper(activeWindowProcess);
+  if (!keepAudioHelper) stopAudioHelper(activeAuxProcess);
+  if (!keepWindowHelper) stopWindowHelper(activeWindowProcess);
   stopProducer(activeProcess);
   if (!keepRelay) { stopStandby(); stopRtspPush(); relayProcess?.kill('SIGTERM'); relayProcess = null; relayStartedAt = 0; relayProfile = null; }
   if (!keepTunnel) stopPublicTunnel();
-  activeProcess = null; activeAuxProcess = null; activeWindowProcess = null; activeKind = null;
+  activeProcess = null; activeKind = null;
+  if (!keepAudioHelper) { activeAuxProcess = null; audioHelperKey = ''; }
+  if (!keepWindowHelper) { activeWindowProcess = null; windowHelperKey = ''; }
   audioLevelDb = -96; audioSamples = 0; audioSquares = 0;
   queuePaused = false; manualTransition = null; playbackBusy = false;
   if (clearCurrent) { currentId = null; currentStartedAt = null; currentDuration = null; }
@@ -2831,6 +2919,47 @@ function playbackCommand(body) {
   return status();
 }
 
+// Имя файла в прямой ссылке часто ничего не значит: у кинохостингов это
+// «720.mp4» или «index.m3u8» — по такой подписи в списке не найдёшь ничего.
+// Берём название из самого файла, а если его нет — имя сайта и качество.
+const БЕЗЛИКИЕ_ИМЕНА = /^(\d{3,4}p?|video|movie|index|master|playlist|stream|out|file|media)$/i;
+
+function directTitle(rawUrl, сведения) {
+  const адрес = new URL(rawUrl);
+  const файл = decodeURIComponent(адрес.pathname.split('/').filter(Boolean).pop() || '');
+  const основа = файл.replace(/\.[a-z0-9]{2,5}$/i, '');
+  const изФайла = String(сведения?.title || '').trim();
+  if (изФайла && !БЕЗЛИКИЕ_ИМЕНА.test(изФайла)) return изФайла.slice(0, 200);
+  if (основа && !БЕЗЛИКИЕ_ИМЕНА.test(основа)) return файл.slice(0, 200);
+  const сайт = адрес.hostname.replace(/^www\./i, '').split('.').slice(0, -1).join('.') || адрес.hostname;
+  const качество = сведения?.height ? ` ${сведения.height}p` : (основа ? ` ${основа}` : '');
+  return `Видео с ${сайт}${качество}`.slice(0, 200);
+}
+
+// Разбор прямой ссылки: ffprobe идёт по сети и читает только заголовок файла,
+// поэтому двухчасовой фильм разбирается за те же секунды, что и клип.
+async function directMediaInfo(rawUrl) {
+  const результат = await spawnCollect('ffprobe', ['-v', 'error', '-rw_timeout', '15000000',
+    '-show_entries', 'format=duration,format_name,tags=title:stream=codec_type,codec_name,height:stream_disposition=attached_pic',
+    '-of', 'json', rawUrl], 40000).catch(() => null);
+  if (!результат || результат.status !== 0) {
+    const причина = String(результат?.stderr || '').trim().split(String.fromCharCode(10)).pop().trim() || 'сервер не ответил';
+    logDetail(`Прямая ссылка не открылась: ${rawUrl.slice(0, 160)} — ${причина}`);
+    throw new Error(`Ссылка не открывается: ${причина.replace(/^.*?: /, '').slice(0, 160)}. У ссылок с кинохостингов обычно есть срок годности — возьмите свежую.`);
+  }
+  try {
+    const данные = JSON.parse(результат.stdout);
+    const видео = (данные.streams || []).find(настоящееВидео);
+    return {
+      duration: Number(данные.format?.duration) || null,
+      title: данные.format?.tags?.title || '',
+      height: Number(видео?.height) || 0,
+      hasVideo: Boolean(видео),
+      hasAudio: (данные.streams || []).some(поток => поток.codec_type === 'audio'),
+    };
+  } catch { return null; }
+}
+
 async function addUrl(rawUrl) {
   if (!validWebUrl(rawUrl)) throw new Error('Вставьте полную ссылку с http:// или https://');
   const host = new URL(rawUrl).hostname.toLowerCase();
@@ -2839,9 +2968,16 @@ async function addUrl(rawUrl) {
   const direct = DIRECT_LIVE.test(rawUrl) || DIRECT_FILE.test(rawUrl);
   if (direct) {
     const live = DIRECT_LIVE.test(rawUrl);
+    // Прямую ссылку сразу открываем и смотрим, что там: длительность, есть ли
+    // картинка, есть ли звук. Раньше она добавлялась вслепую — и мёртвая
+    // ссылка молча ложилась в список без длительности, а человек узнавал об
+    // этом только когда очередь до неё доходила и ничего не запускалось.
+    const сведения = live ? null : await directMediaInfo(rawUrl);
     const item = {
-      id: crypto.randomUUID(), title: decodeURIComponent(new URL(rawUrl).pathname.split('/').filter(Boolean).pop() || host),
-      sourceUrl: rawUrl, duration: null, thumbnail: '', local: false, hasVideo: true, hasAudio: true, direct: true, live,
+      id: crypto.randomUUID(), title: directTitle(rawUrl, сведения),
+      sourceUrl: rawUrl, duration: сведения?.duration || null, thumbnail: '', local: false,
+      hasVideo: сведения ? сведения.hasVideo : true, hasAudio: сведения ? сведения.hasAudio : true,
+      direct: true, live,
     };
     queue.push(item);
     saveQueue();
