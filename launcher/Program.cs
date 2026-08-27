@@ -693,8 +693,11 @@ internal sealed class SetupWindow : Form
     {
         try
         {
-            var script = $"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{linkPath}');" +
-                         $"$s.TargetPath='{target}';$s.WorkingDirectory='{Path.GetDirectoryName(target)}';$s.Save()";
+            // Апостроф в пути (D:\Ivan's Games) рвал строку PowerShell, и ярлык
+            // молча не создавался. В одинарных кавычках он удваивается.
+            static string Escape(string value) => value.Replace("'", "''");
+            var script = $"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{Escape(linkPath)}');" +
+                         $"$s.TargetPath='{Escape(target)}';$s.WorkingDirectory='{Escape(Path.GetDirectoryName(target) ?? string.Empty)}';$s.Save()";
             using var process = Process.Start(new ProcessStartInfo
             {
                 FileName = "powershell.exe",
@@ -874,6 +877,7 @@ internal sealed class MainWindow : Form
             // страницу». Теперь показываем заставку и повторяем, пока сервер не ответит.
             if (await Program.IsReady())
             {
+                _ = AttachServerJob();
                 _ready = true;
                 _webView.CoreWebView2.Navigate(Program.AppUrl);
             }
@@ -891,16 +895,29 @@ internal sealed class MainWindow : Form
     }
 
     // Ждём готовности сервера в фоне и открываем окно ровно один раз.
+    // Привязка сервера к группе процессов приложения. Раньше она делалась
+    // только в WaitForServerAsync, а на втором запуске сервер обычно успевает
+    // подняться раньше окна и туда не попадает: снятие «VRCast Bridge.exe»
+    // через диспетчер задач оставляло жить node, ffmpeg, mediamtx и захват
+    // окна — вместе с жёлтой рамкой на чужом окне.
+    private async Task AttachServerJob()
+    {
+        if (_job is not null || _serverTask is null) return;
+        try
+        {
+            var процесс = await _serverTask;
+            if (процесс is not null) _job = ChildProcessJob.Attach(процесс);
+        }
+        catch { }
+    }
+
     private async Task WaitForServerAsync()
     {
         for (var attempt = 0; attempt < 900 && !_closing; attempt++)
         {
             if (await Program.IsReady())
             {
-                if (_job is null && _serverTask is { IsCompletedSuccessfully: true } && _serverTask.Result is { } живой)
-                {
-                    try { _job = ChildProcessJob.Attach(живой); } catch { }
-                }
+                await AttachServerJob();
                 if (!_closing) BeginInvoke(() => { _ready = true; _webView.CoreWebView2?.Navigate(Program.AppUrl); });
                 return;
             }
@@ -1052,7 +1069,11 @@ internal sealed class MainWindow : Form
         // Спрашиваем, как спрашивает любой редактор про несохранённый файл.
         // Task.Run обязателен: прямое ожидание на потоке окна встанет намертво.
         var вЭфире = false;
-        try { вЭфире = Task.Run(Program.IsBroadcasting).Wait(TimeSpan.FromSeconds(2)) && Task.Run(Program.IsBroadcasting).Result; }
+        try
+        {
+            var запрос = Task.Run(Program.IsBroadcasting);
+            вЭфире = запрос.Wait(TimeSpan.FromSeconds(2)) && запрос.Result;
+        }
         catch { }
         if (вЭфире && MessageBox.Show(this,
                 "Сейчас идёт эфир — если закрыть программу, у зрителей он прервётся."
