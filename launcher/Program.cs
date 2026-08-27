@@ -505,6 +505,19 @@ internal static class Program
     // при обнаружении чужого запущенного экземпляра.
     internal static async Task<bool> IsReady() => await GetServerVersion() is not null;
 
+    // Ждём, пока сервер действительно закроется. Он в этот момент вежливо
+    // останавливает захват: помощник успевает закрыть сессию Windows, и жёлтая
+    // рамка вокруг захваченного окна снимается сразу, а не висит после выхода.
+    internal static async Task WaitForServerExit(TimeSpan limit)
+    {
+        var предел = DateTime.UtcNow + limit;
+        while (DateTime.UtcNow < предел)
+        {
+            if (await GetServerVersion() is null) return;
+            await Task.Delay(120);
+        }
+    }
+
     internal static void ShutdownServer()
     {
         try
@@ -1035,9 +1048,33 @@ internal sealed class MainWindow : Form
     private void OnClosing(object? sender, FormClosingEventArgs eventArgs)
     {
         if (_closing) return;
+        // Эфир идёт прямо сейчас — закрытие оборвёт его у всех, кто смотрит.
+        // Спрашиваем, как спрашивает любой редактор про несохранённый файл.
+        // Task.Run обязателен: прямое ожидание на потоке окна встанет намертво.
+        var вЭфире = false;
+        try { вЭфире = Task.Run(Program.IsBroadcasting).Wait(TimeSpan.FromSeconds(2)) && Task.Run(Program.IsBroadcasting).Result; }
+        catch { }
+        if (вЭфире && MessageBox.Show(this,
+                "Сейчас идёт эфир — если закрыть программу, у зрителей он прервётся."
+                + Environment.NewLine + Environment.NewLine + "Всё равно закрыть?",
+                "VRCast Bridge", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+        {
+            eventArgs.Cancel = true;
+            return;
+        }
         _closing = true;
         SaveGeometry();
-        Program.ShutdownServer();
+        // Окно убираем сразу, а процесс живёт ещё пару секунд: за это время
+        // сервер штатно сворачивает захват. Раньше всё убивалось разом, и
+        // подсветка захваченного окна оставалась висеть.
+        eventArgs.Cancel = true;
+        Hide();
+        Task.Run(async () =>
+        {
+            Program.ShutdownServer();
+            await Program.WaitForServerExit(TimeSpan.FromSeconds(4));
+            try { BeginInvoke(Close); } catch { Environment.Exit(0); }
+        });
     }
 }
 

@@ -1,4 +1,6 @@
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::{factory, Interface, Result};
@@ -85,12 +87,31 @@ fn run() -> Result<()> {
     let mut latest = vec![0x24u8; output_width as usize * output_height as usize * 4];
     for pixel in latest.chunks_exact_mut(4) { pixel.copy_from_slice(&[0x2c, 0x20, 0x24, 0xff]); }
 
+    // Пока мы держим сессию захвата, Windows рисует вокруг окна жёлтую рамку и
+    // сама её убирает, когда сессия закрыта. При жёстком убийстве процесса
+    // закрытия не происходит, и рамка оставалась висеть на окне ещё долго после
+    // выхода из программы. Поэтому слушаем свой ввод: как только тот, кто нас
+    // запустил, закрывает канал, выходим сами — и рамка исчезает вместе с нами.
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            let mut probe = [0u8; 1];
+            let mut input = io::stdin();
+            while let Ok(read) = input.read(&mut probe) {
+                if read == 0 { break; }
+            }
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+
     let frame_duration = Duration::from_secs_f64(1.0 / fps as f64);
     let mut next_frame = Instant::now();
     let capture_started = Instant::now();
     let mut has_frame = false;
     let mut stdout = io::BufWriter::with_capacity(latest.len() * 2, io::stdout().lock());
     loop {
+        if stop.load(Ordering::Relaxed) { break; }
         if let Ok(frame) = frame_pool.TryGetNextFrame() {
             let surface = frame.Surface()?;
             let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
@@ -131,5 +152,9 @@ fn run() -> Result<()> {
             thread::sleep(Duration::from_millis(1));
         }
     }
+    // Явно закрываем сессию и пул: так Windows снимает жёлтую рамку сразу,
+    // а не когда доберётся до окна следующая перерисовка.
+    let _ = session.Close();
+    let _ = frame_pool.Close();
     Ok(())
 }
