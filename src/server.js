@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.45.1';
+const APP_VERSION = '0.46.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -757,6 +757,42 @@ function watchRemoteServer() {
   setInterval(проверить, 20000).unref();
 }
 
+// Безымянный сервер раньше подписывался собственным адресом — и в списке
+// выходило «31.59.102.186», а строкой ниже тот же адрес в ссылке. Теперь
+// придумываем короткое имя, которого ещё нет в списке.
+const ИМЕНА_СЕРВЕРОВ = ['Сапфир', 'Оникс', 'Янтарь', 'Кварц', 'Гранат', 'Агат', 'Опал', 'Топаз',
+  'Малахит', 'Лазурит', 'Нефрит', 'Обсидиан', 'Аметист', 'Берилл', 'Циркон', 'Шпинель'];
+
+function randomServerName() {
+  const занято = new Set(savedServers().map(item => String(item.name || '').toLowerCase()));
+  const свободные = ИМЕНА_СЕРВЕРОВ.filter(имя => !занято.has(имя.toLowerCase()));
+  if (свободные.length) return свободные[Math.floor(Math.random() * свободные.length)];
+  return `Сервер ${savedServers().length + 1}`;
+}
+
+// Правка уже добавленного сервера: имя и адрес. Пароль здесь не нужен — ключ
+// публикации уже лежит у нас, и переезд с голого IP на домен ничего не ломает.
+function editServer(id, body) {
+  const server = savedServers().find(item => item.id === String(id));
+  if (!server) throw new Error('Сервер не найден.');
+  const next = { ...server };
+  if (body.name !== undefined) next.name = String(body.name).trim().slice(0, 60) || server.name;
+  if (body.host !== undefined) {
+    const адрес = String(body.host).trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0];
+    if (!адрес) throw new Error('Укажите адрес сервера.');
+    if (!/^[a-z0-9.-]+$/i.test(адрес)) throw new Error('Адрес сервера: только буквы, цифры, точки и дефис.');
+    next.host = адрес;
+  }
+  saveConfig({ servers: savedServers().map(item => item.id === next.id ? next : item) });
+  if (config.outputMode === 'remote' && config.activeServerId === next.id) {
+    remoteReachable = null;
+    stopRtspPush();
+    if (relayProcess) startRtspPush();
+  }
+  log(`Сервер «${next.name}»: адрес ${next.host}`);
+  return next;
+}
+
 async function deployServer(body) {
   if (!tools.plink) throw new Error('Компонент SSH не найден.');
   const raw = String(body.host || '').trim().replace(/^ssh:\/\//i, '');
@@ -777,7 +813,7 @@ async function deployServer(body) {
   if (!result) throw new Error('Сервер не вернул данные подключения.');
   const entry = {
     id: existing?.id || crypto.randomUUID(),
-    name: String(body.name || existing?.name || '').trim().slice(0, 60) || hostName,
+    name: String(body.name || existing?.name || '').trim().slice(0, 60) || randomServerName(),
     host: hostName, sshPort: server.sshPort, user: server.user, hostKey: server.hostKey,
     channel: String(body.channel || existing?.channel || 'live').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'live',
     publicIp: result[1], rtspPort: Number(result[2]), hlsPort: Number(result[3]), publishKey: result[4],
@@ -3209,6 +3245,12 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const server = await deployServer(body);
       return json(res, 201, { server: { id: server.id, name: server.name, host: server.host, rtspPort: server.rtspPort }, status: status() });
+    }
+    if (req.method === 'POST' && /^\/api\/servers\/[^/]+\/edit$/.test(url.pathname)) {
+      const id = decodeURIComponent(url.pathname.split('/')[3]);
+      const body = await readBody(req);
+      const server = editServer(id, body);
+      return json(res, 200, { server: { id: server.id, name: server.name, host: server.host }, status: status() });
     }
     if (req.method === 'POST' && /^\/api\/servers\/[^/]+\/channel$/.test(url.pathname)) {
       const id = decodeURIComponent(url.pathname.split('/')[3]);

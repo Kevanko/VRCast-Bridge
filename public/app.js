@@ -155,8 +155,6 @@ function renderStorage(state){
     select.innerHTML=`<option value="">По умолчанию (диск с Windows)</option>`+drives.map(drive=>`<option value="${drive}\\">${drive} диск</option>`).join('');
     select.value=cache.root||'';
   }
-  const channel=state.rtsp?.remote?.channel||'';
-  if(document.activeElement!==$('#activeChannel')&&$('#activeChannel').value!==channel)$('#activeChannel').value=channel;
   const лимит=cache.limitGb?`${cache.limitGb} ГБ`:'авто';
   $('#cacheSize').textContent=`${cache.sizeMb||0} МБ из ${лимит}`;
   if(document.activeElement!==$('#cacheLimit'))$('#cacheLimit').value=String(cache.limitGb||0);
@@ -177,6 +175,14 @@ function renderServers(state) {
     if(active&&servers.some(item=>item.id===active))select.value=active;
   }
   $('#removeServer').disabled=!servers.length;
+  // Поля правки заполняем выбранным сервером, но не перебиваем то, что человек
+  // прямо сейчас печатает.
+  const выбран=servers.find(item=>item.id===select.value)||servers.find(item=>item.id===active)||null;
+  $('#serverEdit').hidden=!выбран;
+  if(выбран){
+    if(document.activeElement!==$('#serverRename')&&$('#serverRename').value!==выбран.name)$('#serverRename').value=выбран.name;
+    if(document.activeElement!==$('#serverAddress')&&$('#serverAddress').value!==выбран.host)$('#serverAddress').value=выбран.host;
+  }
   const remote=state.rtsp?.remote||{};
   $('#serverHint').textContent=!servers.length?'Добавьте сервер — настрою его сам.'
     :remote.live?'Эфир идёт через ваш сервер.'
@@ -209,8 +215,8 @@ function render(state) {
   else if(state.config.outputMode==='remote'){
     const remote=state.rtsp?.remote||{};
     shownUrl=remote.configured?remote.url:'';
-    hint=remote.channelRejected?'Нажмите «Настроить сервер» — старая настройка разрешает только канал live.':'Ссылка постоянная, её можно дать друзьям.';
-    linkText=!remote.configured?'Выберите сервер':remote.reachable===false?'Сервер не отвечает':remote.channelRejected?'Сервер не принимает этот канал':remote.live?'Через ваш сервер':'Подключаюсь…';
+    hint=remote.channelRejected?'Нажмите «Настроить сервер» — на нём стоит старая настройка.':'Ссылка постоянная, её можно дать друзьям.';
+    linkText=!remote.configured?'Выберите сервер':remote.reachable===false?'Сервер не отвечает':remote.channelRejected?'Сервер настроен по-старому':remote.live?'Через ваш сервер':'Подключаюсь…';
     linkGood=Boolean(remote.live);
     linkError=Boolean(remote.configured&&(remote.reachable===false||(!remote.live&&state.running)));
   }
@@ -422,14 +428,14 @@ async function loadTemplate(append){const id=$('#templateSelect').value;if(!id)r
 $('#loadTemplate').addEventListener('click',()=>loadTemplate(false)); $('#appendTemplate').addEventListener('click',()=>loadTemplate(true));
 $('#deleteTemplate').addEventListener('click',async()=>{const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}`,{method:'DELETE'}));$('#templateName').value='';toast('Шаблон удалён');}catch(error){toast(error.message,true);}});
 $('#addServerToggle').addEventListener('click',()=>{const form=$('#addServerForm');form.hidden=!form.hidden;if(!form.hidden)$('#serverHost').focus();});
-$('#serverSelect').addEventListener('change',async event=>{if(!event.target.value)return;try{render(await api(`/api/servers/${encodeURIComponent(event.target.value)}/activate`,{method:'POST'}));toast('Эфир переключён на выбранный сервер');}catch(error){toast(error.message,true);}});
+$('#serverSelect').addEventListener('change',async event=>{if(!event.target.value)return;$('#serverRename').value='';$('#serverAddress').value='';try{render(await api(`/api/servers/${encodeURIComponent(event.target.value)}/activate`,{method:'POST'}));toast('Эфир переключён на выбранный сервер');}catch(error){toast(error.message,true);}});
 $('#deployServer').addEventListener('click',async()=>{
   const button=$('#deployServer'),host=$('#serverHost').value.trim(),password=$('#serverPassword').value;
   if(!host||!password)return toast('Нужны адрес сервера и пароль root',true);
   button.disabled=true;button.textContent='Настраиваю сервер…';
   try{
-    const result=await api('/api/servers',{method:'POST',body:JSON.stringify({host,password,name:$('#serverName').value,channel:$('#serverChannel').value})});
-    $('#serverPassword').value='';$('#serverHost').value='';$('#serverName').value='';$('#serverChannel').value='';
+    const result=await api('/api/servers',{method:'POST',body:JSON.stringify({host,password,name:$('#serverName').value})});
+    $('#serverPassword').value='';$('#serverHost').value='';$('#serverName').value='';
     $('#addServerForm').hidden=true;
     render(result.status);toast(`Сервер готов: ${result.server.name}`);
   }catch(error){toast(error.message,true);}
@@ -586,14 +592,18 @@ async function startSource(){
   finally{ button.disabled=false; }
 }
 
-// Канал — это просто путь на сервере: меняется на лету, переустановка не нужна.
-$('#activeChannel').addEventListener('change',async()=>{
+// Название и адрес выбранного сервера правятся без пароля: ключ публикации
+// уже сохранён, и переезд с голого IP на домен ничего не ломает.
+$('#saveServer').addEventListener('click',async()=>{
   const id=$('#serverSelect').value;
   if(!id)return toast('Сначала выберите сервер',true);
+  const button=$('#saveServer');button.disabled=true;
   try{
-    render(await api(`/api/servers/${encodeURIComponent(id)}/channel`,{method:'POST',body:JSON.stringify({channel:$('#activeChannel').value})}));
-    toast('Канал изменён — скопируйте ссылку заново');
+    const result=await api(`/api/servers/${encodeURIComponent(id)}/edit`,{method:'POST',
+      body:JSON.stringify({name:$('#serverRename').value,host:$('#serverAddress').value})});
+    render(result.status);toast('Сохранено — скопируйте ссылку заново');
   }catch(error){ toast(error.message,true); }
+  finally{ button.disabled=false; }
 });
 
 // Обновление: окно появляется само, когда на GitHub вышла версия новее.
