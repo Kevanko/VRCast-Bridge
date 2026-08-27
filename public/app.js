@@ -223,7 +223,11 @@ function render(state) {
     hint=rtspLive?'В мире включите AVPro и Untrusted URLs.':'В мире выберите плеер AVPro.';
     // Бесплатный туннель не тянет тяжёлый поток — это и есть причина рывков у друзей.
     if(tunnelMode){const heavy=ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30);
-      if(heavy)hint+=' Через бесплатный туннель 1080p и 60 кадров рвутся — поставьте 720p и 30 кадров.';}
+      if(heavy)hint+=' Через бесплатный туннель 1080p и 60 кадров рвутся — поставьте 720p и 30 кадров.';
+      // Адрес выдаётся на один сеанс. Кто вставил его раньше — смотрит, а кто
+      // зайдёт после перезапуска, получит нерабочую ссылку и будет думать,
+      // что сломалась программа. Про это надо предупреждать заранее.
+      hint+=' Ссылка живёт до закрытия программы, в следующий раз будет другой. Если в мир заходят новые люди — берите свой сервер, его адрес постоянный.';}
     linkText=streamStalled?'Поток отстаёт':rtspLive?'Готово':tunnelMode&&tunnelReady?`Готово · ${state.tunnel.provider}`:tunnelStarting?'Получаю ссылку…':'Канал поднимается…';
     linkGood=(tunnelMode?tunnelReady:rtspLive);
     linkError=streamStalled||state.tunnel?.state==='error';
