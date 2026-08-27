@@ -69,7 +69,7 @@ fn run() -> Result<()> {
     let _ = session.SetIsCursorCaptureEnabled(true);
     session.StartCapture()?;
 
-    let texture_desc = D3D11_TEXTURE2D_DESC {
+    let mut texture_desc = D3D11_TEXTURE2D_DESC {
         Width: item_size.Width.max(1) as u32,
         Height: item_size.Height.max(1) as u32,
         MipLevels: 1,
@@ -83,7 +83,9 @@ fn run() -> Result<()> {
     };
     let mut staging = None;
     unsafe { device.CreateTexture2D(&texture_desc, None, Some(&mut staging))?; }
-    let staging = staging.unwrap();
+    let mut staging = staging.unwrap();
+    let mut pool_size = item_size;
+    let mut last_size_check = Instant::now();
     let mut latest = vec![0x24u8; output_width as usize * output_height as usize * 4];
     for pixel in latest.chunks_exact_mut(4) { pixel.copy_from_slice(&[0x2c, 0x20, 0x24, 0xff]); }
 
@@ -112,6 +114,35 @@ fn run() -> Result<()> {
     let mut stdout = io::BufWriter::with_capacity(latest.len() * 2, io::stdout().lock());
     loop {
         if stop.load(Ordering::Relaxed) { break; }
+        // Окно поменяло размер — пересоздаём только пул кадров и приёмник.
+        // Раньше про это узнавала программа снаружи и перезапускала захват
+        // целиком: новый процесс, новый кодировщик, разрыв в эфире на секунду.
+        // Здесь же смена размера обходится одним кадром.
+        // Размер спрашиваем не чаще четырёх раз в секунду. Этот вопрос уходит
+        // в поток чужого окна, и пока окно тащат за угол, ответа можно ждать
+        // долго — цикл захвата вставал вместе с ним, и эфир замирал на всё
+        // время перетаскивания.
+        let пора_проверить = last_size_check.elapsed() >= Duration::from_millis(250);
+        if пора_проверить { last_size_check = Instant::now(); }
+        if let Ok(current) = (if пора_проверить { item.Size() } else { Ok(pool_size) }) {
+            if (current.Width != pool_size.Width || current.Height != pool_size.Height)
+                && current.Width > 0 && current.Height > 0
+            {
+                if frame_pool.Recreate(&winrt_device, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, current).is_ok() {
+                    let mut desc = texture_desc;
+                    desc.Width = current.Width.max(1) as u32;
+                    desc.Height = current.Height.max(1) as u32;
+                    let mut next = None;
+                    if unsafe { device.CreateTexture2D(&desc, None, Some(&mut next)) }.is_ok() {
+                        if let Some(next) = next {
+                            staging = next;
+                            texture_desc = desc;
+                            pool_size = current;
+                        }
+                    }
+                }
+            }
+        }
         if let Ok(frame) = frame_pool.TryGetNextFrame() {
             let surface = frame.Surface()?;
             let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;

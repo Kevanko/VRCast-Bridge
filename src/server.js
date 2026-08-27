@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.44.0';
+const APP_VERSION = '0.45.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1359,11 +1359,23 @@ function videoEncodeArgs(profile = streamProfile()) {
 // Раньше здесь стоял constqp: качество постоянное, а битрейт какой получится.
 // На игре это выстреливало до десятков мегабит, канал захлёбывался, и зритель
 // видел фризы. Теперь поток ровный: сколько задано, столько и уходит.
+// Через интернет поток должен быть ровным: там любой всплеск упирается в
+// канал и оборачивается фризом у зрителя. А когда смотрят с этого же
+// компьютера, полоса бесплатна — и жёсткий CBR только вредит: на статичной
+// картинке биты уходят в пустоту, а на резком движении их не хватает.
+// Поэтому локально даём кодировщику дышать, ограничивая пик полуторакратно.
+function rateControlArgs(rate) {
+  const наружу = config.outputMode === 'remote' || config.outputMode === 'tunnel';
+  if (наружу) return ['-rc', 'cbr', '-b:v', rate, '-maxrate', rate, '-bufsize', rate];
+  const число = parseInt(rate, 10) || 3200;
+  return ['-rc', 'vbr', '-b:v', rate, '-maxrate', `${Math.round(число * 1.5)}k`, '-bufsize', `${Math.round(число * 2)}k`];
+}
+
 function producerEncodeArgs(profile = streamProfile()) {
   const keyframes = Math.max(8, Math.round(profile.fps * 0.5));
   const rate = bitrate(profile);
-  if (encoder.name === 'h264_nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p3', '-tune', 'll', '-rc', 'cbr',
-    '-b:v', rate, '-maxrate', rate, '-bufsize', rate, '-rc-lookahead', '0',
+  if (encoder.name === 'h264_nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p3', '-tune', 'll',
+    ...rateControlArgs(rate), '-rc-lookahead', '0',
     '-g', String(keyframes), '-keyint_min', String(keyframes), '-bf', '0', '-pix_fmt', 'yuv420p'];
   // На слабой машине даже veryfast не успевает: тогда переходим на ultrafast,
   // это заметно дешевле по процессору ценой чуть большего размера потока.
@@ -1525,15 +1537,22 @@ function watchCapturedWindow(handle, initialState) {
     try {
       const selected = await getCapturedWindowState(handle);
       if (windowCaptureState === null || activeKind !== 'screen' || String(config.captureWindowHandle) !== String(handle)) return;
-      const nextState = !selected.exists ? 'missing' : selected.minimized ? 'minimized' : `visible:${selected.width}x${selected.height}`;
+      // Размер окна в это состояние больше не входит: перетаскивание за угол
+      // меняло его десятки раз, и каждый раз захват перезапускался целиком —
+      // именно отсюда бралось провисание эфира при изменении окна. Размер
+      // теперь отрабатывает сам захватчик, без разрыва потока.
+      const nextState = !selected.exists ? 'missing' : selected.minimized ? 'minimized' : 'visible';
       if (windowCaptureState && nextState !== windowCaptureState) {
-        log(nextState.startsWith('visible:') ? 'Окно восстановлено или изменило размер — захват продолжен' : 'Окно свернуто — показывается заглушка');
+        log(nextState === 'visible' ? 'Окно снова на экране — захват продолжен' : 'Окно свернуто — показывается заглушка');
         windowCaptureState = nextState;
         await startScreen();
       } else windowCaptureState = nextState;
     } catch (error) { log(`Наблюдение за окном: ${error.message}`); }
     finally { checking = false; }
-  }, 1400);
+    // Раз в три секунды: размер окна нас больше не волнует, а исчезновение или
+    // сворачивание — событие редкое. Каждая проверка запускает отдельный
+    // процесс, и делать это чаще незачем.
+  }, 3000);
 }
 
 function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null) {
@@ -1623,7 +1642,7 @@ async function startScreenInner() {
   if (config.captureMode === 'window') {
     if (!/^\d+$/.test(String(config.captureWindowHandle))) throw new Error('Выберите окно для захвата.');
     selectedWindow = (await listWindows()).find(item => item.handle === String(config.captureWindowHandle)) || null;
-    windowCaptureState = !selectedWindow ? 'missing' : selectedWindow.minimized ? 'minimized' : `visible:${selectedWindow.width}x${selectedWindow.height}`;
+    windowCaptureState = !selectedWindow ? 'missing' : selectedWindow.minimized ? 'minimized' : 'visible';
   } else if (config.captureMode === 'monitor') {
     const monitors = await listMonitors();
     captureRect = monitors.find(item => item.id === config.captureMonitorId) || monitors.find(item => item.primary) || monitors[0];
@@ -1632,7 +1651,7 @@ async function startScreenInner() {
     captureRect = { x: Number(config.regionX) || 0, y: Number(config.regionY) || 0,
       width: Math.max(64, Number(config.regionWidth) || 1280), height: Math.max(64, Number(config.regionHeight) || 720) };
   }
-  if (config.captureMode === 'window' && windowCaptureState.startsWith('visible:')) {
+  if (config.captureMode === 'window' && windowCaptureState === 'visible') {
     const captureWidth = width;
     const captureHeight = height;
     windowHelperArgs = ['--hwnd', String(config.captureWindowHandle), '--width', String(captureWidth), '--height', String(captureHeight), '--fps', String(profile.fps)];
