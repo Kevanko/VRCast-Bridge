@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.47.0';
+const APP_VERSION = '0.48.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -426,7 +426,23 @@ function applyQueueTemplate(id, append = false) {
 
 // Полные тексты ошибок уходят в отдельный файл: в окне журнала они не
 // помещаются, а для разбора нужны целиком.
+// Журнал подрезается не только при старте: сеанс на неделю раздувал файл
+// без всякого предела.
+let последняяПодрезка = 0;
+
+function trimDetailLog() {
+  if (Date.now() - последняяПодрезка < 600000) return;
+  последняяПодрезка = Date.now();
+  try {
+    if (statSync(DETAIL_LOG_FILE).size < 4 * 1024 * 1024) return;
+    const перенос = String.fromCharCode(10);
+    const строки = readFileSync(DETAIL_LOG_FILE, 'utf8').split(перенос);
+    writeFileSync(DETAIL_LOG_FILE, строки.slice(-4000).join(перенос), 'utf8');
+  } catch {}
+}
+
 function logDetail(message) {
+  trimDetailLog();
   try { appendFileSync(DETAIL_LOG_FILE, `${new Date().toISOString()}  ${message}\n`, 'utf8'); } catch {}
 }
 
@@ -476,10 +492,10 @@ function trackTunnelChild(child, provider) {
     const stoppedProvider = tunnelProvider;
     tunnelProcess = null; tunnelUrl = ''; tunnelProvider = '';
     if (stoppedProvider === 'Pinggy') stopPinggyDaemon();
-    if (stopping || config.outputMode !== 'tunnel') { tunnelState = 'idle'; return; }
+    if (stopping || shuttingDown || config.outputMode !== 'tunnel') { tunnelState = 'idle'; return; }
     tunnelState = 'error'; tunnelError = `Публичный туннель остановился${code === null ? '' : ` (код ${code})`}.`;
     log(tunnelError);
-    setTimeout(() => { if (!stopping && config.outputMode === 'tunnel') startPublicTunnel(); }, 1800);
+    setTimeout(() => { if (!stopping && !shuttingDown && config.outputMode === 'tunnel') startPublicTunnel(); }, 1800);
   });
   return child;
 }
@@ -948,6 +964,9 @@ async function downloadWithResume(url, target, onProgress, попыток = 4) {
     try {
       const ответ = await fetch(url, { headers, signal: AbortSignal.timeout(600000) });
       // 206 — сервер отдаёт продолжение, 200 — не умеет и шлёт файл целиком.
+      // 416: на диске уже лежит весь файл (или больше), продолжать нечего —
+      // начинаем заново, иначе все попытки упираются в один и тот же отказ.
+      if (ответ.status === 416) { rmSync(target, { force: true }); continue; }
       const продолжение = ответ.status === 206 && уже > 0;
       if (!ответ.ok) throw new Error(`сервер ответил ${ответ.status}`);
       if (!продолжение) уже = 0;
@@ -957,7 +976,9 @@ async function downloadWithResume(url, target, onProgress, попыток = 4) {
       let принято = уже;
       let последнийПроцент = -1;
       for await (const кусок of ответ.body) {
-        if (!файл.write(кусок)) await new Promise(r => файл.once('drain', r));
+        // Ждём и ошибку тоже: на переполненном диске drain не придёт никогда,
+        // и загрузка висела бы вечно.
+        if (!файл.write(кусок)) await new Promise((ok, bad) => { файл.once('drain', ok); файл.once('error', bad); });
         принято += кусок.length;
         const процент = всего ? Math.round(принято / всего * 100) : 0;
         if (процент !== последнийПроцент) { последнийПроцент = процент; onProgress?.(принято, всего); }
@@ -1020,7 +1041,7 @@ async function downloadTool(name) {
     }
     toolDownloads = { ...toolDownloads, [name]: { state: 'done', percent: 100, label: source.label } };
     log(`Компонент готов: ${source.label}`);
-    refreshTools();
+    await refreshToolsAsync();
   } catch (error) {
     toolDownloads = { ...toolDownloads, [name]: { state: 'error', percent: 0, label: source.label, error: String(error.message || error) } };
     log(`Не удалось скачать «${source.label}»: ${error.message}`);
@@ -1034,6 +1055,16 @@ function findFile(directory, name) {
     else if (entry.name.toLowerCase() === name.toLowerCase()) return full;
   }
   return null;
+}
+
+async function refreshToolsAsync() {
+  const проба = async (name, args) => (await spawnCollect(name, args, 5000).catch(() => null))?.status === 0;
+  tools.ffmpeg = await проба('ffmpeg', ['-version']);
+  tools.ytdlp = Boolean(ytdlpPath());
+  tools.cloudflared = Boolean(CLOUDFLARED());
+  tools.pinggy = Boolean(PINGGY());
+  tools.mediamtx = Boolean(MEDIAMTX());
+  tools.plink = Boolean(PLINK());
 }
 
 function refreshTools() {
@@ -1129,6 +1160,11 @@ async function downloadUpdate(url, expectedSize) {
       rmSync(temporary, { force: true });
       throw new Error('файл скачался не полностью');
     }
+    const подпись = await проверитьПодпись(temporary);
+    if (!подпись.ok) {
+      rmSync(temporary, { force: true });
+      throw new Error(`подпись не совпала (${подпись.причина})`);
+    }
     rmSync(UPDATE_FILE, { force: true });
     renameSync(temporary, UPDATE_FILE);
     updateState = { ...updateState, ready: true, percent: 100, doneMb: totalMb, totalMb };
@@ -1138,6 +1174,25 @@ async function downloadUpdate(url, expectedSize) {
     log(`Не удалось скачать обновление: ${error.message}`);
     logDetail(`Загрузка обновления: ${error.message}`);
   }
+}
+
+// Совпадения размера мало: он ничего не говорит о том, чей это файл. Смотрим,
+// что скачанное подписано тем же издателем, что и сама программа. Полного
+// доверия к цепочке сертификатов здесь нет (сертификат свой), но подменить
+// файл на чужой или неподписанный уже не выйдет.
+const ИЗДАТЕЛЬ = 'CN=VRCast Bridge, O=VRCast Bridge';
+
+async function проверитьПодпись(файл) {
+  const скрипт = `(Get-AuthenticodeSignature -LiteralPath '${файл.replace(/'/g, "''")}') | `
+    + 'ForEach-Object { $_.Status.ToString() + [char]124 + $_.SignerCertificate.Subject }';
+  const результат = await spawnCollect('powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', скрипт], 25000).catch(() => null);
+  const строка = String(результат?.stdout || '').trim();
+  if (!строка) return { ok: false, причина: 'не удалось проверить' };
+  const [состояние, издатель] = строка.split(String.fromCharCode(124));
+  if (состояние === 'NotSigned') return { ok: false, причина: 'файл не подписан' };
+  if (!String(издатель || '').includes('VRCast Bridge')) return { ok: false, причина: 'чужой издатель' };
+  return { ok: true, причина: состояние };
 }
 
 // Сценарий подмены: ждёт закрытия программы, ставит новый файл и запускает его.
@@ -1273,21 +1328,20 @@ function autoReduceQuality(state) {
   отставаний = плохо ? отставаний + 1 : 0;
   if (отставаний < 5 || Date.now() - последнееСнижение < 60000) return;
 
-  const экран = activeKind === 'screen';
-  const кадры = Number(экран ? config.fps : config.mediaFps) || 30;
-  const качество = экран ? config.quality : config.mediaQuality;
-  let изменение = null;
+  // Снижение живёт в памяти сеанса, а не в настройках. Раньше оно писалось в
+  // config.json: один провал из-за проснувшегося антивируса — и выбранные
+  // 1080p60 не возвращались никогда, пока человек сам не догадается.
+  const текущий = streamProfile(activeKind);
   let подпись = '';
-  if (кадры > 30) { изменение = экран ? { fps: 30 } : { mediaFps: 30 }; подпись = '30 кадров'; }
-  else if (качество === '1080p') { изменение = экран ? { quality: '720p' } : { mediaQuality: '720p' }; подпись = '720p'; }
+  if (текущий.fps > 30) { degrade = { ...degrade, fps: 30 }; подпись = '30 кадров'; }
+  else if (текущий.quality === '1080p') { degrade = { ...degrade, quality: '720p' }; подпись = '720p'; }
   else if (!lightMode && !encoder.hardware) { lightMode = true; подпись = 'лёгкое кодирование'; }
-  else if (качество === '720p') { изменение = экран ? { quality: '480p' } : { mediaQuality: '480p' }; подпись = '480p'; }
-  if (!изменение && !подпись) return;
+  else if (текущий.quality === '720p') { degrade = { ...degrade, quality: '480p' }; подпись = '480p'; }
+  if (!подпись) return;
 
   отставаний = 0;
   последнееСнижение = Date.now();
-  if (изменение) saveConfig(изменение);
-  log(`Поток не успевает — снижаю нагрузку: ${подпись}`);
+  log(`Поток не успевает — снижаю нагрузку: ${подпись} (до конца эфира, настройки не меняются)`);
   try { restartRelaySession(streamProfile(activeKind)); } catch (error) { log(`Снижение качества: ${error.message}`); }
 }
 
@@ -1306,7 +1360,9 @@ function watchStalledStream(state) {
   log(`Поток встал (${возраст.toFixed(1)} с без новых кадров) — перезапускаю`);
   try {
     if (activeKind === 'screen') startScreen().catch(error => log(`Перезапуск захвата: ${error.message}`));
-    else transitionQueue('seek', sourcePosition + 0.1);
+    // sourcePosition стоит на месте последней перемотки, само воспроизведение
+    // его не двигает: фильм, зависший на 47-й минуте, откатывался в начало.
+    else transitionQueue('seek', currentSourcePosition() + 0.1);
   } catch (error) { log(`Перезапуск потока: ${error.message}`); }
 }
 
@@ -1315,7 +1371,17 @@ function startHlsHealthMonitor() {
   hlsHealthTimer = setInterval(inspectHlsHealth, 500);
   hlsHealthTimer.unref?.();
   // Пока канал не поднялся, спрашиваем часто: человек ждёт именно этого.
-  const канал = setInterval(() => { watchChannel().catch(() => {}); }, channelLive ? 5000 : 1000);
+  // Пауза выбирается на каждом тике, а не один раз при запуске: раньше
+  // channelLive был ложным в момент создания таймера, и опрос навсегда
+  // оставался ежесекундным — в режиме «свой сервер» это 86 тысяч запросов
+  // в сутки на чужую машину.
+  let последняяПроверка = 0;
+  const канал = setInterval(() => {
+    const пауза = channelLive ? 5000 : 1000;
+    if (Date.now() - последняяПроверка < пауза) return;
+    последняяПроверка = Date.now();
+    watchChannel().catch(() => {});
+  }, 500);
   канал.unref?.();
 }
 
@@ -1346,9 +1412,15 @@ function localAppLevel() {
   return Number.isFinite(level) ? Math.max(0.02, Math.min(1, level)) : 1;
 }
 
+// Что программа снизила сама, чтобы вытянуть эфир. Живёт до остановки.
+let degrade = null;
+
 function streamProfile(kind = activeKind) {
-  if (kind === 'queue') return { quality: config.mediaQuality || '720p', fps: Number(config.mediaFps) === 60 ? 60 : 30 };
-  return { quality: config.quality === '1080p' ? '1080p' : '720p', fps: Number(config.fps) === 60 ? 60 : 30 };
+  const качества = ['480p', '720p', '1080p'];
+  const основа = kind === 'queue'
+    ? { quality: качества.includes(config.mediaQuality) ? config.mediaQuality : '720p', fps: Number(config.mediaFps) === 60 ? 60 : 30 }
+    : { quality: качества.includes(config.quality) ? config.quality : '720p', fps: Number(config.fps) === 60 ? 60 : 30 };
+  return degrade ? { ...основа, ...degrade } : основа;
 }
 
 // Один сеанс релея = один формат кадра. Любая смена разрешения/fps/SAR/каналов
@@ -1369,13 +1441,24 @@ function sameProfile(left, right) {
 // Осознанная смена качества: релей перезапускается, но relayStartedAt сохраняется,
 // чтобы таймстемпы продолжились и плеер пережил стык без resync.
 function restartRelaySession(profile) {
+  // Источник обязан перезапуститься вместе с сессией. Его вывод запайплен в
+  // stdin убиваемого релея: после смены сессии он писал в никуда, а его
+  // обработчик data продолжал лить пакеты в RTSP-пушеров одновременно с
+  // заставкой — два муксера в один поток, у зрителя каша. Автопонижение
+  // качества, которое должно было спасать эфир, ломало его гарантированно.
+  const вид = activeKind;
+  const позиция = вид === 'queue' ? currentSourcePosition() : 0;
   stopStandby();
   stopRtspPush();
   const relay = relayProcess;
   relayProcess = null;
+  stopProducer(activeProcess);
+  activeProcess = null;
   relay?.kill('SIGTERM');
   startRelay(profile);
   startStandby(profile);
+  if (вид === 'screen') startScreen().catch(error => log(`Перезапуск захвата: ${error.message}`));
+  else if (вид === 'queue' && currentId) transitionQueue('seek', позиция);
 }
 
 // Битрейт задаёт человек, а «авто» подбирается по качеству. Через интернет
@@ -1637,6 +1720,7 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
     const helper = join(ROOT, 'tools', 'VRCast.AudioCapture.exe');
     if (!existsSync(helper)) {
       child.kill('SIGTERM'); activeProcess = null; activeKind = null;
+      startStandby(sessionProfile('screen'));
       throw new Error('Компонент системного звука не найден.');
     }
     child.stdio[3].on('error', () => {});
@@ -1667,6 +1751,9 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
     const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
     if (!existsSync(helper)) {
       child.kill('SIGTERM'); aux?.kill('SIGTERM'); activeProcess = null; activeAuxProcess = null; activeKind = null;
+      // Без этого ссылка отдавала замороженный кадр: заставку сняли, новый
+      // источник не поднялся, и никакой сторож это уже не чинил.
+      startStandby(sessionProfile('screen'));
       throw new Error('Компонент изолированного захвата окна не найден.');
     }
     // Ввод открываем каналом: закрыть его — вежливый способ попросить помощника
@@ -1851,10 +1938,15 @@ function startMediaMtx() {
   ].join('\n'), 'utf8');
   const child = spawn(MEDIAMTX(), [configFile], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
   mediaMtxProcess = child;
+  // Поднялись после падения — публикацию надо восстановить самим. Без этого
+  // сервер работал, а канал оставался пустым: пушер умер вместе с ним, а его
+  // собственная попытка перезапуска пришлась на те секунды, когда сервера ещё
+  // не было, и больше никто не пробовал.
+  setTimeout(() => { if (relayProcess && !stopping && !shuttingDown) startRtspPush(); }, 900).unref?.();
   attachProcessLogs(child, 'RTSP server');
   child.on('close', code => {
     if (mediaMtxProcess === child) mediaMtxProcess = null;
-    if (!stopping && code) { log(`RTSP-сервер остановился (код ${code}), перезапускаю`); setTimeout(startMediaMtx, 2000); }
+    if (!stopping && !shuttingDown && code) { log(`RTSP-сервер остановился (код ${code}), перезапускаю`); setTimeout(startMediaMtx, 2000); }
   });
 }
 
@@ -1964,7 +2056,7 @@ function startRtspPush() {
       rtspPushProcesses.delete(target.id);
       // Обрыв одного получателя не трогает ни HLS, ни остальные каналы:
       // недоступный свой сервер не должен ронять локальную ссылку.
-      if (stopping || !relayProcess || rtspPushTimers.has(target.id)) return;
+      if (stopping || shuttingDown || !relayProcess || rtspPushTimers.has(target.id)) return;
       rtspPushTimers.set(target.id, setTimeout(() => { rtspPushTimers.delete(target.id); startRtspPush(); }, 700));
     });
   }
@@ -2820,7 +2912,14 @@ function stopActive(clearCurrent = true, keepTunnel = true, keepRelay = true) {
   audioLevelDb = -96; audioSamples = 0; audioSquares = 0;
   queuePaused = false; manualTransition = null; playbackBusy = false;
   if (clearCurrent) { currentId = null; currentStartedAt = null; currentDuration = null; }
+  // Новый эфир начинается с того качества, которое выбрал человек.
+  degrade = null; lightMode = false;
   if (keepRelay) startStandby();
+  // Разбор закончен. Дальше флаг обязан быть снят: на него завязаны все
+  // самовосстановления — упавший пушер, упавший RTSP-сервер, оборванный туннель.
+  // Пока он висел до следующего запуска, после «Остановить» программа теряла
+  // способность чинить себя: окно открыто, «Готово» горит, а поток мёртв.
+  stopping = false;
 }
 
 function currentSourcePosition() {
@@ -3061,12 +3160,35 @@ function parseMediaInfo(stdout) {
   };
 }
 
+// Превью делаются по два за раз. Раньше на каждый добавленный файл сразу
+// запускался свой ffmpeg: папка из восьмидесяти роликов — восемьдесят
+// процессов одновременно, и идущий эфир от этого рвался гарантированно.
+const очередьПревью = [];
+let занятоПревью = 0;
+
 function generateThumbnail(item) {
   if (!item.hasVideo) return;
-  const destination = join(THUMB_DIR, `${item.id}.jpg`);
-  const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-ss', '1', '-i', item.sourceUrl,
-    '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination], { windowsHide: true, stdio: 'ignore' });
-  child.on('close', code => { if (code === 0) { item.thumbnail = `/thumbs/${item.id}.jpg?v=${Date.now()}`; saveQueue(); } });
+  очередьПревью.push(item);
+  качатьПревью();
+}
+
+function качатьПревью() {
+  while (занятоПревью < 2 && очередьПревью.length) {
+    const item = очередьПревью.shift();
+    занятоПревью++;
+    const destination = join(THUMB_DIR, `${item.id}.jpg`);
+    const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-ss', '1', '-i', item.sourceUrl,
+      '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination], { windowsHide: true, stdio: 'ignore' });
+    const дальше = () => { занятоПревью--; качатьПревью(); };
+    child.on('close', code => {
+      if (code === 0 && queue.some(entry => entry.id === item.id)) {
+        item.thumbnail = `/thumbs/${item.id}.jpg?v=${Date.now()}`;
+        saveQueue();
+      }
+      дальше();
+    });
+    child.on('error', дальше);
+  }
 }
 
 async function addLocalFiles(paths) {
@@ -3126,7 +3248,10 @@ async function ddagrabIndexFor(monitor) {
   let found = null;
   for (const index of [...new Set([guess, 0, 1, 2, 3])]) {
     const probe = await spawnCollect('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-f', 'lavfi',
-      '-i', `ddagrab=output_idx=${index}:framerate=10`, '-frames:v', '1', '-f', 'null', '-'], 9000).catch(() => null);
+      // Успешная проба укладывается примерно в треть секунды, девять секунд —
+      // это только ожидание отказа. На машине без Desktop Duplication перебор
+      // четырёх выходов замораживал запуск захвата на полминуты.
+      '-i', `ddagrab=output_idx=${index}:framerate=10`, '-frames:v', '1', '-f', 'null', '-'], 2500).catch(() => null);
     const size = `${probe?.stderr || ''}`.match(/,\s(\d{3,5})x(\d{3,5})/);
     if (size && Number(size[1]) === monitor.width && Number(size[2]) === monitor.height) { found = index; break; }
   }
@@ -3157,7 +3282,19 @@ async function listMonitors() {
   return desktopAsMonitor();
 }
 
+// Список окон стоит дорого: PowerShell компилирует служебный класс заново на
+// каждый вызов, а вызывают его при открытии списка, смене режима звука и на
+// каждом старте захвата. Держим ответ пару секунд.
+let окнаКеш = { время: 0, список: [] };
+
 async function listWindows() {
+  if (Date.now() - окнаКеш.время < 2000) return окнаКеш.список;
+  const свежие = await listWindowsRaw();
+  окнаКеш = { время: Date.now(), список: свежие };
+  return свежие;
+}
+
+async function listWindowsRaw() {
   const script = `[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -TypeDefinition @'
 using System; using System.Text; using System.Diagnostics; using System.Collections.Generic; using System.Runtime.InteropServices;
 public static class VRCastWindows {
@@ -3265,20 +3402,26 @@ const mime = {
   '.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
 };
 
-function serveFile(res, base, relative, cache = false) {
+// Разрешение читать из чужой вкладки даём только публичной ссылке. На своём
+// адресе оно позволяло любому сайту вычитывать плейлист эфира — то есть
+// смотреть чужой экран, пока идёт трансляция.
+function общийДоступ(public_) { return public_ ? { 'Access-Control-Allow-Origin': '*' } : {}; }
+
+function serveFile(res, base, relative, cache = false, public_ = false) {
   const safe = normalize(relative).replace(/^(\.\.(\\|\/|$))+/, '');
   const file = join(base, safe);
   if (!file.startsWith(base) || !existsSync(file)) return false;
-  res.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream', 'Cache-Control': cache ? 'public, max-age=3600' : 'no-store', 'Access-Control-Allow-Origin': '*' });
+  res.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream',
+    'Cache-Control': cache ? 'public, max-age=3600' : 'no-store', ...общийДоступ(public_) });
   createReadStream(file).pipe(res); return true;
 }
 
-function serveRangeMp4(req, res, filePath) {
+function serveRangeMp4(req, res, filePath, public_ = false) {
   if (!existsSync(filePath)) return false;
   const size = statSync(filePath).size;
   const range = String(req.headers.range || '').match(/^bytes=(\d*)-(\d*)$/);
   const common = { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache, no-store',
-    'CDN-Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' };
+    'CDN-Cache-Control': 'no-store', ...общийДоступ(public_) };
   if (!range) {
     res.writeHead(200, { ...common, 'Content-Length': size });
     if (req.method === 'HEAD') res.end(); else createReadStream(filePath).pipe(res);
@@ -3294,12 +3437,12 @@ function serveRangeMp4(req, res, filePath) {
   return true;
 }
 
-function serveUnityMedia(req, res, id) {
-  if (id === 'unity-queue') return serveRangeMp4(req, res, UNITY_QUEUE_FILE);
-  if (id === 'unity-capture') return serveRangeMp4(req, res, UNITY_CAPTURE_FILE);
+function serveUnityMedia(req, res, id, public_ = false) {
+  if (id === 'unity-queue') return serveRangeMp4(req, res, UNITY_QUEUE_FILE, public_);
+  if (id === 'unity-capture') return serveRangeMp4(req, res, UNITY_CAPTURE_FILE, public_);
   const item = queue.find(entry => entry.id === id);
   if (!item?.local || !item.unityCompatible || !existsSync(item.sourceUrl)) return false;
-  return serveRangeMp4(req, res, item.sourceUrl);
+  return serveRangeMp4(req, res, item.sourceUrl, public_);
 }
 
 function prepareLivePlaylist(raw, segmentLimit, startOffset) {
@@ -3319,6 +3462,10 @@ function prepareLivePlaylist(raw, segmentLimit, startOffset) {
   return [...header, ...lines.slice(bodyStart), ''].join('\n');
 }
 
+// Свои адреса: только они имеют право на пульт управления.
+const LOCAL_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`]);
+const OWN_ORIGIN = `http://127.0.0.1:${PORT}`;
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -3334,6 +3481,17 @@ const server = http.createServer(async (req, res) => {
       || /\.(trycloudflare\.com|pinggy-free\.link|free\.pinggy\.net|lhr\.life|serveo\.net)$/.test(requestHost);
     if (publicTunnelHost && !url.pathname.startsWith('/stream/') && !url.pathname.startsWith('/media/')) {
       return json(res, 404, { error: 'Через публичную ссылку доступен только медиапоток.' });
+    }
+    // Пульт управления открыт только со своего же адреса. Без этой проверки
+    // любая открытая вкладка в браузере могла послать сюда простой POST без
+    // предварительного запроса — включить захват экрана, поднять публичную
+    // ссылку, снести сервер по SSH — и подменой DNS выдать себя за 127.0.0.1.
+    if (!publicTunnelHost && !LOCAL_HOSTS.has(String(req.headers.host || '').toLowerCase())) {
+      return json(res, 403, { error: 'Обращение с чужого адреса.' });
+    }
+    const origin = String(req.headers.origin || '');
+    if (origin && origin !== OWN_ORIGIN && !publicTunnelHost) {
+      return json(res, 403, { error: 'Запрос со стороннего сайта.' });
     }
     if (req.method === 'GET' && url.pathname === '/api/status') return json(res, 200, status());
     if (req.method === 'GET' && url.pathname === '/api/capture-preview') {
@@ -3361,7 +3519,6 @@ const server = http.createServer(async (req, res) => {
       void buildUnityQueue(String(body.id || '')).catch(error => log(`Unity: ${error.message}`)); return json(res, 202, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/unity/queue/cancel') {
-      shuttingDown = true;
       stopUnityBuild(); return json(res, 200, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/unity/capture/start') {
@@ -3478,14 +3635,21 @@ const server = http.createServer(async (req, res) => {
         autoQuality: body.autoQuality === undefined ? config.autoQuality !== false : Boolean(body.autoQuality),
         cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
-          ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')), quality: ['480p', '720p', '1080p'].includes(body.quality) ? body.quality : '720p', fps: body.fps === 60 ? 60 : 30,
-        captureMode: ['desktop', 'monitor', 'window', 'region'].includes(body.captureMode) ? body.captureMode : 'monitor',
-        captureMonitorId: String(body.captureMonitorId || '').slice(0, 180),
-        captureWindowHandle: String(body.captureWindowHandle || '').replace(/\D/g, '').slice(0, 24),
-        regionX: Math.max(-16384, Math.min(16384, Number(body.regionX) || 0)), regionY: Math.max(-16384, Math.min(16384, Number(body.regionY) || 0)),
-        regionWidth: Math.max(64, Math.min(7680, Number(body.regionWidth) || 1280)), regionHeight: Math.max(64, Math.min(4320, Number(body.regionHeight) || 720)),
-        audioMode: ['none', 'system', 'output', 'process', 'device'].includes(body.audioMode) ? body.audioMode : 'system', captureAudioDevice: String(body.captureAudioDevice || '').slice(0, 180),
-        audioOutputId: String(body.audioOutputId || '').slice(0, 500), audioProcessId: String(body.audioProcessId || '').replace(/\D/g, '').slice(0, 16),
+          ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),
+        // Каждое поле откатывается к прежнему значению, если его не прислали.
+        // Раньше половина полей падала в значение по умолчанию, и любой
+        // частичный запрос молча сбрасывал выбранный монитор, окно и звук.
+        quality: ['480p', '720p', '1080p'].includes(body.quality) ? body.quality : (config.quality || '720p'),
+        fps: body.fps === 60 ? 60 : (body.fps === 30 ? 30 : (config.fps || 30)),
+        captureMode: ['desktop', 'monitor', 'window', 'region'].includes(body.captureMode) ? body.captureMode : (config.captureMode || 'monitor'),
+        captureMonitorId: String(body.captureMonitorId ?? config.captureMonitorId ?? '').slice(0, 180),
+        captureWindowHandle: String(body.captureWindowHandle ?? config.captureWindowHandle ?? '').replace(/\D/g, '').slice(0, 24),
+        regionX: Math.max(-16384, Math.min(16384, Number(body.regionX ?? config.regionX) || 0)), regionY: Math.max(-16384, Math.min(16384, Number(body.regionY ?? config.regionY) || 0)),
+        regionWidth: Math.max(64, Math.min(7680, Number(body.regionWidth ?? config.regionWidth) || 1280)), regionHeight: Math.max(64, Math.min(4320, Number(body.regionHeight ?? config.regionHeight) || 720)),
+        audioMode: ['none', 'system', 'output', 'process', 'device'].includes(body.audioMode) ? body.audioMode : (config.audioMode || 'system'),
+        captureAudioDevice: String(body.captureAudioDevice ?? config.captureAudioDevice ?? '').slice(0, 180),
+        audioOutputId: String(body.audioOutputId ?? config.audioOutputId ?? '').slice(0, 500),
+        audioProcessId: String(body.audioProcessId ?? config.audioProcessId ?? '').replace(/\D/g, '').slice(0, 16),
         loopMode: ['once', 'one', 'all'].includes(body.loopMode) ? body.loopMode : (config.loopMode || 'once'),
         playbackSpeed: [0.5, 0.75, 1, 1.25, 1.5, 2].includes(Number(body.playbackSpeed)) ? Number(body.playbackSpeed) : (config.playbackSpeed || 1),
         captureVolume: Math.max(0, Math.min(6, Number(body.captureVolume ?? config.captureVolume ?? 1.5))),
@@ -3514,7 +3678,13 @@ const server = http.createServer(async (req, res) => {
       saveConfig(next);
       if (mediaCacheDir() !== previousCacheDir) {
         // Старую папку убираем: треки перекачаются на новое место сами.
-        try { rmSync(previousCacheDir, { recursive: true, force: true }); } catch {}
+        // Удаляем только свою папку кеша: cacheRoot приходит извне, и рекурсивное
+        // удаление по произвольному пути — слишком дорогая ошибка.
+        try {
+          if (basename(previousCacheDir) === 'VRCastBridge-cache' || previousCacheDir === DEFAULT_CACHE_DIR) {
+            rmSync(previousCacheDir, { recursive: true, force: true });
+          }
+        } catch {}
         ensureCacheDir();
         log(`Кеш видео теперь в ${mediaCacheDir()}`);
       }
@@ -3544,10 +3714,11 @@ const server = http.createServer(async (req, res) => {
       }
       if (applyLive && activeKind) {
         const desired = streamProfile(activeKind);
+        // Пересборка сессии сама поднимает источник заново — второй раз не надо.
         if (relayProcess && !sameProfile(relayProfile, desired)) restartRelaySession(desired);
+        else if (activeKind === 'screen') await startScreen();
+        else if (activeKind === 'queue' && currentId) transitionQueue('seek', currentSourcePosition());
       }
-      if (applyLive && activeKind === 'screen') await startScreen();
-      else if (applyLive && activeKind === 'queue' && currentId) transitionQueue('seek', currentSourcePosition());
       return json(res, 200, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/start/screen') { await startScreen(); return json(res, 200, status()); }
@@ -3556,6 +3727,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/playback') { const body = await readBody(req); return json(res, 200, playbackCommand(body)); }
     if (req.method === 'POST' && url.pathname === '/api/stop') { stopActive(); return json(res, 200, status()); }
     if (req.method === 'POST' && url.pathname === '/api/shutdown') {
+      shuttingDown = true;
       if (hlsHealthTimer) clearInterval(hlsHealthTimer);
       stopUnityBuild();
       if (unityCaptureProcess) { try { unityCaptureProcess.stdin.write('q\n'); } catch {} }
@@ -3572,14 +3744,14 @@ const server = http.createServer(async (req, res) => {
         const playlist = prepareLivePlaylist(readFileSync(join(HLS_DIR, 'live.m3u8'), 'utf8'), preview ? 60 : liveWindow, preview ? Math.max(2, delay) : liveOffset);
         res.writeHead(200, { 'Content-Type': mime['.m3u8'], 'Cache-Control': 'no-cache, no-store, must-revalidate',
           'CDN-Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': 'no-store', 'Surrogate-Control': 'no-store',
-          'Pragma': 'no-cache', 'Expires': '0', 'Access-Control-Allow-Origin': '*' });
+          'Pragma': 'no-cache', 'Expires': '0', ...общийДоступ(publicTunnelHost) });
         res.end(playlist); return;
       }
-      if (serveFile(res, HLS_DIR, url.pathname.slice(8))) return; return json(res, 404, { error: 'Поток ещё запускается.' });
+      if (serveFile(res, HLS_DIR, url.pathname.slice(8), false, publicTunnelHost)) return; return json(res, 404, { error: 'Поток ещё запускается.' });
     }
     if ((req.method === 'GET' || req.method === 'HEAD') && /^\/media\/[^/]+\.mp4$/.test(url.pathname)) {
       const id = decodeURIComponent(url.pathname.slice('/media/'.length, -'.mp4'.length));
-      if (serveUnityMedia(req, res, id)) return;
+      if (serveUnityMedia(req, res, id, publicTunnelHost)) return;
       return json(res, 404, { error: 'Для Unity доступен только локальный MP4-файл с H.264/AAC.' });
     }
     if (req.method === 'GET' && url.pathname.startsWith('/thumbs/')) {
@@ -3634,5 +3806,5 @@ server.on('error', error => {
   if (error.code === 'EADDRINUSE') { console.error(`Порт ${PORT} уже занят.`); process.exit(1); }
   throw error;
 });
-process.on('SIGINT', () => { if (hlsHealthTimer) clearInterval(hlsHealthTimer); stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); });
-process.on('SIGTERM', () => { if (hlsHealthTimer) clearInterval(hlsHealthTimer); stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); });
+process.on('SIGINT', () => { shuttingDown = true; if (hlsHealthTimer) clearInterval(hlsHealthTimer); stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); });
+process.on('SIGTERM', () => { shuttingDown = true; if (hlsHealthTimer) clearInterval(hlsHealthTimer); stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); });
