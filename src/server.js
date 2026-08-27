@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.46.0';
+const APP_VERSION = '0.46.1';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1895,7 +1895,9 @@ function stopRtspPush() {
 // RTSP-пушер — вторым потребителем тех же чанков (без него поток не тормозится).
 function pipeToRelay(child) {
   child.stdout.on('error', () => {});
-  relayProcess.stdin.on('error', () => {});
+  // Обработчик ошибок релея вешается один раз при его запуске: раньше он
+  // добавлялся на каждый новый ролик, и за длинный эфир их набирались десятки
+  // на одном сокете — Node предупреждал об утечке.
   child.stdout.pipe(relayProcess.stdin, { end: false });
   child.stdout.on('data', chunk => {
     trackRelayClock(chunk);
@@ -2592,7 +2594,11 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
 
   const speed = Math.max(0.5, Math.min(2, Number(config.playbackSpeed) || 1));
   const mediaVolume = Math.max(0, Math.min(4, Number(config.mediaVolume) || 0));
-  args.push('-map', `${videoIndex}:v:0`, '-map', `${audioIndex}:a:0`, '-shortest',
+  // Заглавная V берёт только настоящее видео и пропускает обложку альбома.
+  // Субтитры и служебные дорожки VRChat не понимает вовсе — отрезаем их явно,
+  // вместе с главами и метаданными файла.
+  args.push('-map', `${videoIndex}:V:0`, '-map', `${audioIndex}:a:0`,
+    '-sn', '-dn', '-map_chapters', '-1', '-map_metadata', '-1', '-shortest',
     '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS/${speed}`,
     '-af', `atempo=${speed},volume=${mediaVolume.toFixed(2)},alimiter=limit=0.97:level=disabled,aresample=async=1000:first_pts=0`,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...producerEncodeArgs(profile), '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
@@ -2880,7 +2886,8 @@ async function addUrl(rawUrl) {
   return added;
 }
 
-const FFPROBE_ARGS = ['-v', 'error', '-show_entries', 'format=duration,format_name:stream=codec_type,codec_name', '-of', 'json'];
+const FFPROBE_ARGS = ['-v', 'error', '-show_entries',
+  'format=duration,format_name:stream=codec_type,codec_name:stream_disposition=attached_pic', '-of', 'json'];
 
 function mediaInfo(filePath) {
   const result = spawnSync('ffprobe', [...FFPROBE_ARGS, filePath], {
@@ -2896,14 +2903,22 @@ async function mediaInfoAsync(filePath) {
   return parseMediaInfo(result.stdout);
 }
 
+// Обложка альбома лежит в файле как «видео» из одного кадра. Считать её видео
+// нельзя: у музыкального файла тогда выбиралась картинка вместо звуковой
+// дорожки, эфир получал один кадр и обрывался, а у фильма с постером первым
+// потоком в эфир уходил постер вместо самого фильма.
+function настоящееВидео(stream) {
+  return stream.codec_type === 'video' && !stream.disposition?.attached_pic;
+}
+
 function parseMediaInfo(stdout) {
   const data = JSON.parse(stdout);
-  const videoCodec = data.streams?.find(stream => stream.codec_type === 'video')?.codec_name || '';
+  const videoCodec = data.streams?.find(настоящееВидео)?.codec_name || '';
   const audioCodec = data.streams?.find(stream => stream.codec_type === 'audio')?.codec_name || '';
   const mp4Container = String(data.format?.format_name || '').split(',').some(name => ['mov', 'mp4', 'm4a', '3gp', '3g2', 'mj2'].includes(name));
   return {
     duration: Number(data.format?.duration) || null,
-    hasVideo: data.streams?.some(stream => stream.codec_type === 'video') || false,
+    hasVideo: data.streams?.some(настоящееВидео) || false,
     hasAudio: data.streams?.some(stream => stream.codec_type === 'audio') || false,
     videoCodec, audioCodec,
     unityCompatible: mp4Container && videoCodec === 'h264' && (!audioCodec || audioCodec === 'aac'),
