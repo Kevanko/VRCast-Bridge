@@ -3,7 +3,20 @@ const $$ = selector => [...document.querySelectorAll(selector)];
 const ui = { previewOn: localStorage.getItem('previewOn')!=='0', windowHidden: false, source: 'queue', output: 'local', status: null, sources: { windows: [], monitors: [], audioDevices: [], audioOutputs: [] }, hls: null, previewUrl: '', progressAt: 0, seeking: false, seekPending: false, seekDraft: 0, seekRevision: 0, previewBusy: false, previewTimer: null, speedPendingUntil: 0, loopPendingUntil: 0, liveApplyTimer: null, queueSignature: '', unitySelectedId: '' };
 
 async function api(path, options = {}) {
-  const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
+  // Один короткий повтор при обрыве связи: программа может на секунду уйти в
+  // перезапуск, и сырое «Failed to fetch» пугает без причины. Если и повтор не
+  // прошёл — говорим по-человечески, что связь с ядром пропала.
+  let response;
+  try {
+    response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
+  } catch {
+    await new Promise(r => setTimeout(r, 700));
+    try {
+      response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
+    } catch {
+      throw new Error('Нет связи с программой — она перезапускается. Подождите пару секунд.');
+    }
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `Ошибка ${response.status}`);
   return data;
@@ -45,7 +58,8 @@ function renderNowPlaying(state) {
   } else if (state.running && state.activeKind==='screen') {
     $('#nowTitle').textContent=captureLabel(); $('#nowSource').textContent=audioLabel(); cover.innerHTML=`<span>${icon('display')}</span>`;
   } else { $('#nowTitle').textContent='Эфир не запущен'; $('#nowSource').textContent=ui.source==='queue'?'Добавьте видео справа':'Выберите экран или окно справа'; cover.innerHTML=`<span>${icon('note')}</span>`; }
-  $('#togglePause').innerHTML=icon(state.playback?.paused?'play':'pause');
+  // Иконка паузы: в эфире — по состоянию плеера, в локальном предпросмотре — по video.
+  $('#togglePause').innerHTML=icon((ui.localPreviewId&&!state.running)?($('#streamPreview').paused?'play':'pause'):(state.playback?.paused?'play':'pause'));
   if(Date.now()>ui.speedPendingUntil)paintSpeed(state.playback?.speed||1);
   if(Date.now()>ui.loopPendingUntil)paintLoop(state.playback?.loopMode||'once');
   $('#playerUi').classList.toggle('disabled',ui.source==='queue'&&(state.activeKind!=='queue'||!state.running));
@@ -82,6 +96,45 @@ function stopPreview() {
   $('#monitor').classList.remove('previewing','source-preview');
 }
 
+// Локальный предпросмотр: трек играет прямо в браузере, без эфира. Так видео
+// можно посмотреть и подготовить, а трансляция начнётся только по «Начать эфир».
+function показатьЛокальныйПредпросмотр(id){
+  const item=(ui.status?.queue||[]).find(x=>x.id===id);
+  if(!item)return;
+  ui.localPreviewId=id;
+  ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl='';
+  const video=$('#streamPreview'), monitor=$('#monitor');
+  video.srcObject=null;
+  video.src=`/api/local-media/${encodeURIComponent(id)}?t=${Date.now()}`;
+  video.load?.();
+  monitor.classList.add('previewing'); monitor.classList.remove('source-preview');
+  video.play().then(()=>video.pause()).catch(()=>{
+    // Формат браузер не тянет (mkv, удалённое видео) — показываем обложку и
+    // подсказку: смотреть можно только в эфире.
+    очиститьЛокальныйПредпросмотр();
+    monitorPlaceholder(item.title,'Смотреть можно в эфире — нажмите «Начать эфир видео»','broadcast');
+  });
+  if(ui.status)render(ui.status);
+}
+
+function переключитьЛокальнуюПаузу(){
+  if(!ui.localPreviewId)return;
+  const video=$('#streamPreview');
+  if(video.paused)video.play().catch(()=>{}); else video.pause();
+}
+// Иконка play/pause следует за локальным плеером сразу, не дожидаясь render.
+for(const событие of ['play','pause']) $('#streamPreview').addEventListener(событие,()=>{
+  if(ui.localPreviewId&&!ui.status?.running) $('#togglePause').innerHTML=icon($('#streamPreview').paused?'play':'pause');
+});
+
+function очиститьЛокальныйПредпросмотр(){
+  ui.localPreviewId='';
+  const video=$('#streamPreview');
+  try{ video.pause(); }catch{}
+  video.removeAttribute('src'); video.load?.();
+  $('#monitor').classList.remove('previewing');
+}
+
 function paintPreviewToggle() {
   const button=$('#previewToggle');
   button.classList.toggle('off',!ui.previewOn);
@@ -98,8 +151,12 @@ function startPreview(state) {
     return;
   }
   if (!state.running) {
+    // Локальный предпросмотр трогать нельзя — он живёт своей жизнью до эфира.
+    if (ui.localPreviewId) return;
     ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl=''; video.removeAttribute('src'); video.srcObject=null; monitor.classList.remove('previewing'); return;
   }
+  // Эфир пошёл — локальный предпросмотр больше не нужен.
+  if (ui.localPreviewId) ui.localPreviewId='';
   const previewSource=(state.localPlaybackUrl||state.playbackUrl).replace(/live\.m3u8(?:\?.*)?$/,'preview.m3u8');
   const черезWebrtc=Boolean(state.webrtcUrl)&&!ui.webrtcFailed;
   const previewKey=`${черезWebrtc?'rtc':'hls'}|${previewSource}`;
@@ -221,8 +278,9 @@ function рисоватьКлюч(){
 }
 
 function закрытьДиалогСервера(){
-  try{ serverDialog.close(); }catch{}
-  serverDialog.removeAttribute('open');
+  // Только close(): removeAttribute('open') оставляло модальное окно в
+  // половинчатом состоянии — логически закрыто, а на экране висит.
+  try{ serverDialog.close(); }catch{ serverDialog.removeAttribute('open'); }
 }
 $('#serverDialogClose').addEventListener('click',закрытьДиалогСервера);
 // Клик по затемнению и Escape закрывают тоже — как ждёшь от любого окна.
@@ -374,12 +432,14 @@ function render(state) {
   // Транспорт (перемотка, пауза, скорость) нужен только когда идёт живое
   // видео. На предпросмотре источника и при остановленном эфире управлять
   // нечем — панель тогда прячется, чтобы не всплывать пустыми кнопками.
+  // Транспорт нужен и при живом видео, и при локальном предпросмотре трека.
   monitor.classList.toggle('live-video',Boolean(state.running&&state.activeKind==='queue'));
+  monitor.classList.toggle('local-preview',Boolean(!state.running&&ui.localPreviewId));
   monitor.classList.toggle('tally-live',Boolean(state.running&&streamReady));
   monitor.classList.toggle('tally-cue',Boolean(state.running&&!streamReady));
   const list=$('#queueList');
   const queueSignature=JSON.stringify([state.currentId,ui.unitySelectedId,$('#playerMode').value,state.queue.map(item=>[item.id,item.title,item.thumbnail,item.duration,item.unavailable])]);
-  if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>`<div class="queue-item ${state.currentId===item.id?'playing':''} ${$('#playerMode').value==='unity'&&ui.unitySelectedId===item.id?'unity-selected':''}" data-id="${item.id}" ${item.unavailable?'data-unavailable="1"':''} role="button" tabindex="0" title="${$('#playerMode').value==='unity'?'Выбрать для подготовки Unity':'Включить этот трек'}"><span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="">`:String(index+1).padStart(2,'0')}</span><span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small>${item.unavailable?'⚠ недоступен — пропускается':`${item.local?'Локальный файл · ':''}${item.duration?formatTime(item.duration):'длительность неизвестна'}`}</small></span><button class="remove-item" aria-label="Удалить из очереди" title="Удалить">×</button></div>`).join(''):'<div class="empty-state">Очередь пуста</div>';}
+  if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>`<div class="queue-item ${state.currentId===item.id?'playing':''} ${item.unavailable?'unavailable':''} ${$('#playerMode').value==='unity'&&ui.unitySelectedId===item.id?'unity-selected':''}" data-id="${item.id}" ${item.unavailable?'data-unavailable="1"':''} role="button" tabindex="0" title="${$('#playerMode').value==='unity'?'Выбрать для подготовки Unity':'Включить этот трек'}"><span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="">`:String(index+1).padStart(2,'0')}</span><span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small>${item.unavailable?'⚠ недоступен — пропускается':`${item.local?'Локальный файл · ':''}${item.duration?formatTime(item.duration):'длительность неизвестна'}`}</small></span><button class="remove-item" aria-label="Удалить из очереди" title="Удалить">×</button></div>`).join(''):'<div class="empty-state">Очередь пуста</div>';}
   const screenSource=ui.source==='screen';
   $('#menuMediaQuality').hidden=screenSource; $('#menuMediaFps').hidden=screenSource;
   $('#menuScreenQuality').hidden=!screenSource; $('#menuScreenFps').hidden=!screenSource;
@@ -533,7 +593,19 @@ window.applySelectedRegion=region=>{$('#regionX').value=region.x;$('#regionY').v
 window.addLocalFiles=async paths=>{try{const result=await api('/api/queue/local',{method:'POST',body:JSON.stringify({paths})});render(result.status);toast(`Добавлено: ${result.added.length}`);}catch(error){toast(error.message,true);}};
 
 $('#addForm').addEventListener('submit',async event=>{event.preventDefault();const button=$('#addButton');button.disabled=true;button.textContent='…';try{const result=await api('/api/queue',{method:'POST',body:JSON.stringify({url:$('#mediaUrl').value})});$('#mediaUrl').value='';render(result.status);toast(`Добавлено: ${result.added.length}`);}catch(error){toast(error.message,true);}finally{button.disabled=false;button.textContent='Добавить';}});
-$('#queueList').addEventListener('click',async event=>{const row=event.target.closest('.queue-item');if(!row)return;const remove=event.target.closest('.remove-item');try{if(remove)render(await api(`/api/queue/${row.dataset.id}`,{method:'DELETE'}));else if($('#playerMode').value==='unity'){ui.unitySelectedId=row.dataset.id;if(ui.status)render(ui.status);toast('Трек выбран — нажмите «Подготовить».');}else await playback('jump',{id:row.dataset.id});}catch(error){toast(error.message,true);}});
+$('#queueList').addEventListener('click',async event=>{
+  const row=event.target.closest('.queue-item'); if(!row)return;
+  const id=row.dataset.id;
+  try{
+    if(event.target.closest('.remove-item')){ if(id===ui.localPreviewId)очиститьЛокальныйПредпросмотр(); render(await api(`/api/queue/${id}`,{method:'DELETE'})); return; }
+    if($('#playerMode').value==='unity'){ ui.unitySelectedId=id; if(ui.status)render(ui.status); toast('Трек выбран — нажмите «Подготовить».'); return; }
+    // Эфир идёт — переключаемся на этот трек прямо в эфире.
+    if(ui.status?.running){ await playback('jump',{id}); return; }
+    // Эфира нет — открываем трек в предпросмотре, ничего не вещая. Стрим
+    // начнётся только по кнопке «Начать эфир видео».
+    показатьЛокальныйПредпросмотр(id);
+  }catch(error){toast(error.message,true);}
+});
 $('#queueList').addEventListener('keydown',event=>{if((event.key==='Enter'||event.key===' ')&&event.target.matches('.queue-item')){event.preventDefault();playback('jump',{id:event.target.dataset.id});}});
 $('#clearQueue').addEventListener('click',async()=>{try{render(await api('/api/queue',{method:'DELETE'}));}catch(error){toast(error.message,true);}});
 $('#templateSelect').addEventListener('change',event=>{const item=ui.status?.templates?.find(entry=>entry.id===event.target.value);if(item)$('#templateName').value=item.name;$('#loadTemplate').disabled=!item;$('#appendTemplate').disabled=!item;$('#deleteTemplate').disabled=!item;});
@@ -623,7 +695,11 @@ $('#prepareUnityQueue').addEventListener('click',async()=>{const button=$('#prep
 $('#recordUnityCapture').addEventListener('click',async()=>{const recording=ui.status?.compatibility?.unity?.capture?.state==='recording';try{render(await api(recording?'/api/unity/capture/stop':'/api/unity/capture/start',{method:'POST'}));toast(recording?'Завершаю MP4…':'Запись Unity-клипа началась');}catch(error){toast(error.message,true);}});
 
 async function playback(action,extra={}){try{render(await api('/api/playback',{method:'POST',body:JSON.stringify({action,...extra})}));return true;}catch(error){toast(error.message,true);return false;}}
-$('#togglePause').addEventListener('click',()=>!ui.status?.running?startSource():ui.status?.playback?.paused?playback('resume'):playback('pause',{position:ui.seekPending?ui.seekDraft:progressPosition(ui.status)})); $('#previousTrack').addEventListener('click',()=>playback('previous')); $('#nextTrack').addEventListener('click',()=>playback('next')); $('#skipTrack').addEventListener('click',()=>playback('next'));
+$('#togglePause').addEventListener('click',()=>{
+  if(!ui.status?.running){ переключитьЛокальнуюПаузу(); return; }
+  return ui.status?.playback?.paused?playback('resume'):playback('pause',{position:ui.seekPending?ui.seekDraft:progressPosition(ui.status)});
+});
+$('#previousTrack').addEventListener('click',()=>playback('previous')); $('#nextTrack').addEventListener('click',()=>playback('next')); $('#skipTrack').addEventListener('click',()=>playback('next'));
 $('#cacheRoot').addEventListener('change',async()=>{
   try{ render(await api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),cacheRoot:$('#cacheRoot').value})}));
     toast('Кеш переехал, треки перекачаются на новое место'); }
@@ -705,7 +781,8 @@ $('#mediaVolume').addEventListener('input',event=>paintVolume(event.target,$('#m
 $('#mediaVolume').addEventListener('change',async event=>{if(ui.status?.activeKind==='queue')playback('volume',{volume:Number(event.target.value)/100});else try{await saveConfig();}catch(error){toast(error.message,true);}});
 $('#captureVolume').addEventListener('input',event=>paintVolume(event.target,$('#captureVolumeValue')));
 
-$('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button.disabled=true;try{await saveConfig();render(await api(`/api/start/${ui.source}`,{method:'POST'}));toast(ui.output==='tunnel'?'Запускаю эфир и получаю публичную ссылку':'Эфир запускается');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
+$('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button.disabled=true;try{await saveConfig();const тело=ui.source==='queue'&&ui.localPreviewId?JSON.stringify({id:ui.localPreviewId}):undefined;
+  render(await api(`/api/start/${ui.source}`,{method:'POST',body:тело}));ui.localPreviewId='';toast(ui.output==='tunnel'?'Запускаю эфир и получаю публичную ссылку':'Эфир запускается');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
 $('#stopLive').addEventListener('click',async()=>{try{render(await api('/api/stop',{method:'POST'}));}catch(error){toast(error.message,true);}});
 $('#updateButton').addEventListener('click',()=>{const update=ui.status?.update;if(!update?.available)return;ui.offeredVersion=update.version;paintUpdateDialog(update);if(!updateDialog.open)updateDialog.showModal();});
 $('#showLogs').addEventListener('click',()=>$('#logDialog').showModal());

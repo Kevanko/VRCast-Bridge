@@ -272,11 +272,13 @@
     <label>Название<input id="serverRename" type="text" maxlength="60" autocomplete="off"></label>
     <label>Адрес<input id="serverAddress" type="text" placeholder="123.45.67.89" autocomplete="off"></label>
     
-    <div class="key-row">
-      <span>Ключ для друзей</span>
-      <code id="serverKeyValue" data-key="">••••••••••••</code>
-      <button id="revealServerKey" type="button" title="Показать ключ"><svg class="ic" aria-hidden="true"><use href="#i-eye"/></svg></button>
-      <button id="copyServerKey" type="button" title="Скопировать ключ"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button>
+    <div class="key-field">
+      <span class="key-label">Ключ для друзей</span>
+      <div class="key-row">
+        <code id="serverKeyValue" data-key="">••••••••••••</code>
+        <button id="revealServerKey" type="button" title="Показать ключ"><svg class="ic" aria-hidden="true"><use href="#i-eye"/></svg></button>
+        <button id="copyServerKey" type="button" title="Скопировать ключ"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button>
+      </div>
     </div>
     <p class="field-help">Передайте другу — он подключит ваш сервер у себя.</p>
 
