@@ -201,25 +201,35 @@ async function openServerDialog(id){
   }catch{ $('#serverKeyValue').textContent='не удалось прочитать'; }
 }
 
-$('#serverDialogClose').addEventListener('click',()=>serverDialog.close());
+function закрытьДиалогСервера(){
+  try{ serverDialog.close(); }catch{}
+  serverDialog.removeAttribute('open');
+}
+$('#serverDialogClose').addEventListener('click',закрытьДиалогСервера);
+// Клик по затемнению и Escape закрывают тоже — как ждёшь от любого окна.
+serverDialog.addEventListener('click',event=>{ if(event.target===serverDialog)закрытьДиалогСервера(); });
+serverDialog.addEventListener('cancel',event=>{ event.preventDefault(); закрытьДиалогСервера(); });
 $('#copyServerKey').addEventListener('click',async()=>{
   const ключ=$('#serverKeyValue').textContent.trim();
   if(!ключ||ключ.length<8)return toast('Ключа нет',true);
-  toast(await copyText(ключ)?'Ключ скопирован':'Не удалось скопировать',!await copyText(ключ));
+  const получилось=await copyText(ключ);
+  toast(получилось?'Ключ скопирован':'Не удалось скопировать',!получилось);
 });
 $('#saveServer').addEventListener('click',async()=>{
   const кнопка=$('#saveServer'); кнопка.disabled=true;
   try{
     const результат=await api(`/api/servers/${encodeURIComponent(правимСервер)}/edit`,{method:'POST',
       body:JSON.stringify({name:$('#serverRename').value,host:$('#serverAddress').value})});
-    render(результат.status); serverDialog.close(); toast('Сохранено');
+    // Окно закрываем первым: если перерисовка споткнётся, это не должно
+    // оставлять человека в открытом окне с уже сохранёнными изменениями.
+    закрытьДиалогСервера(); toast('Сохранено'); render(результат.status);
   }catch(error){ показатьОшибку($('#serverDialogError'),error.message); }
   finally{ кнопка.disabled=false; }
 });
 $('#serverForget').addEventListener('click',async()=>{
   try{
     const результат=await api(`/api/servers/${encodeURIComponent(правимСервер)}/remove`,{method:'POST',body:JSON.stringify({password:''})});
-    render(результат.status); serverDialog.close(); toast('Сервер убран из списка — на машине ничего не изменилось');
+    закрытьДиалогСервера(); toast('Сервер убран из списка — на машине ничего не изменилось'); render(результат.status);
   }catch(error){ показатьОшибку($('#serverDialogError'),error.message); }
 });
 // Первое нажатие раскрывает поле пароля, второе — сносит. Раньше здесь стояло
@@ -237,8 +247,9 @@ $('#serverWipe').addEventListener('click',async()=>{
   const кнопка=$('#serverWipe'); кнопка.disabled=true; кнопка.textContent='Сношу…';
   try{
     const результат=await api(`/api/servers/${encodeURIComponent(правимСервер)}/remove`,{method:'POST',body:JSON.stringify({password:пароль})});
-    render(результат.status); serverDialog.close();
+    закрытьДиалогСервера();
     toast(результат.cleaned?'Сервер очищен и убран из списка':'Убран из списка, но на машине не очистился');
+    render(результат.status);
   }catch(error){ показатьОшибку($('#serverDialogError'),error.message); }
   finally{ кнопка.disabled=false; кнопка.textContent='Снести'; }
 });

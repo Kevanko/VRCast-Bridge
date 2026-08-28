@@ -89,16 +89,16 @@
                 <button type="button" role="radio" aria-checked="false" data-mode="deploy">Настроить с нуля</button>
               </div>
 
-              <label>Адрес<input id="serverHost" type="text" placeholder="123.45.67.89 или my-server.com" required></label>
-              <label>Как назвать<input id="serverName" type="text" placeholder="придумаем сами"></label>
+              <label>Адрес<input id="serverHost" type="text" placeholder="123.45.67.89" required></label>
+              <label>Название<input id="serverName" type="text" placeholder="придумаем сами"></label>
 
               <div id="attachFields">
-                <p class="field-help">Ключ публикации выдаёт сервер при установке. Хозяин сервера берёт его в приложении и передаёт вам — с ним вещать может каждый, root не нужен.</p>
-                <label>Ключ публикации<input id="serverKey" type="text" placeholder="строка из 24 знаков"></label>
+                <p class="field-help">Ключ выдаёт сервер при установке. Хозяин копирует его у себя и передаёт вам.</p>
+                <label>Ключ<input id="serverKey" type="text" placeholder="24 знака"></label>
               </div>
 
               <div id="deployFields" hidden>
-                <p class="field-help">Пароль root нужен один раз — поставить на машину программу трансляции. Он не сохраняется и никуда не уходит: подключение идёт с вашего компьютера напрямую.</p>
+                <p class="field-help">Нужен один раз, чтобы поставить программу на машину. Не сохраняется.</p>
                 <label>Пароль root<input id="serverPassword" type="password" placeholder="пароль от сервера"></label>
               </div>
 
@@ -272,20 +272,20 @@
   <dialog id="serverDialog">
     <div class="dialog-head"><b id="serverDialogTitle">Сервер</b><button id="serverDialogClose" type="button" aria-label="Закрыть">×</button></div>
     <label>Название<input id="serverRename" type="text" maxlength="60" autocomplete="off"></label>
-    <label>Адрес<input id="serverAddress" type="text" placeholder="123.45.67.89 или my-server.com" autocomplete="off"></label>
-    <p class="field-help">Купили домен — впишите его вместо адреса. Ссылка станет с доменом сразу, переустанавливать ничего не нужно.</p>
+    <label>Адрес<input id="serverAddress" type="text" placeholder="123.45.67.89" autocomplete="off"></label>
+    <p class="field-help">Можно вписать домен вместо адреса — ссылка сменится сразу.</p>
 
     <div class="key-row">
       <span>Ключ для друзей</span>
       <code id="serverKeyValue">—</code>
       <button id="copyServerKey" type="button" title="Скопировать ключ"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button>
     </div>
-    <p class="field-help">С этим ключом друг подключит ваш сервер у себя и будет вещать через него. Пароль root ему не нужен.</p>
+    <p class="field-help">Передайте ключ другу — он подключит ваш сервер у себя без пароля root.</p>
 
     <p class="form-error" id="serverDialogError" hidden></p>
 
     <div id="wipeConfirm" hidden>
-      <p class="field-help">Программа трансляции будет удалена с машины. Нужен пароль root.</p>
+      <p class="field-help">Программа трансляции будет удалена с машины.</p>
       <label>Пароль root<input id="wipePassword" type="password" autocomplete="off"></label>
     </div>
 

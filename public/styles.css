@@ -307,8 +307,9 @@ option{background:var(--dusk);color:var(--text)}
   color:var(--muted);font-size:10px;line-height:1.55;text-align:center}
 
 /* Форма добавления: два ясных случая вместо анкеты на все сразу */
-#addServerForm{display:grid;gap:8px;margin-bottom:8px;padding:10px;border:1px solid var(--edge);
-  border-radius:10px;background:var(--surface)}
+/* Форма живёт прямо в карточке «Кто увидит»: своя рамка внутри чужой давала
+   вид коробки в коробке. Отделяет её линия сверху, этого достаточно. */
+#addServerForm{display:grid;gap:8px;margin-bottom:8px;padding-top:10px;border-top:1px solid var(--edge)}
 #addServerForm label{display:block;margin:0;color:var(--text);font-size:11px;font-weight:600}
 #addServerForm input{width:100%;min-height:36px;margin-top:5px;padding:0 10px;border:1px solid var(--edge);
   border-radius:var(--r);background:var(--night);color:var(--text);font-size:11px;font-weight:400}
@@ -316,7 +317,8 @@ option{background:var(--dusk);color:var(--text)}
 #addServerForm .field-help{margin:0}
 .form-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .form-error{margin:0;padding:7px 9px;border:1px solid rgba(207,90,99,.4);border-radius:var(--r);
-  background:rgba(207,90,99,.09);color:#f0a9ad;font-size:10px;line-height:1.45}
+  background:rgba(207,90,99,.09);color:#f0a9ad;font-size:10px;line-height:1.45;
+  overflow-wrap:anywhere}
 .deploy-progress{margin:0;padding:7px 9px;border:1px solid var(--edge);border-radius:var(--r);
   background:var(--haze);color:var(--muted);font-size:10px;line-height:1.45}
 
@@ -324,7 +326,8 @@ option{background:var(--dusk);color:var(--text)}
 .key-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;
   margin:10px 0 4px;padding:8px 10px;border:1px solid var(--edge);border-radius:var(--r);background:var(--haze)}
 .key-row span{color:var(--muted);font:9px "JetBrains Mono",ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase}
-.key-row code{font:11px "JetBrains Mono",ui-monospace,monospace;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.key-row code{font:11px "JetBrains Mono",ui-monospace,monospace;color:var(--text);min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .key-row button{padding:4px;border:0;background:none;color:var(--muted)}
 .key-row button:hover{color:var(--text)}
 
@@ -353,7 +356,8 @@ option{background:var(--dusk);color:var(--text)}
 .btn.danger{border-color:rgba(207,90,99,.45);background:rgba(207,90,99,.10);color:#f0a9ad}
 .btn.danger:hover:not(:disabled){background:rgba(207,90,99,.18);border-color:rgba(207,90,99,.7)}
 
-#serverDialog{width:min(420px,92vw);display:grid;gap:2px;padding:16px}
+/* Окно не должно вылезать за экран: на маленьком окне прокручивается внутри. */
+#serverDialog{width:min(420px,92vw);max-height:min(88vh,640px);display:grid;gap:2px;padding:16px;overflow:auto}
 #serverDialog label{display:block;margin:0 0 10px;color:var(--text);font-size:11px;font-weight:600}
 #serverDialog input{width:100%;min-height:36px;margin-top:5px;padding:0 10px;border:1px solid var(--edge);
   border-radius:var(--r);background:var(--night);color:var(--text);font-size:11px;font-weight:400}
