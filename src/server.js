@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.50.8';
+const APP_VERSION = '0.51.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -225,7 +225,9 @@ function spawnCollect(command, args, timeout = 10000, options = {}) {
 
 function encoderWorks(name) {
   if (!toolAvailable('ffmpeg', ['-version'])) return false;
-  const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=s=640x360:d=0.1', '-frames:v', '1', '-c:v', name, '-f', 'null', '-'], {
+  // format=nv12 обязателен для Intel QuickSync и не мешает остальным: без
+  // него проба QSV падает даже там, где кодировщик есть.
+  const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=s=640x360:d=0.1', '-frames:v', '1', '-vf', 'format=nv12', '-c:v', name, '-f', 'null', '-'], {
     windowsHide: true, encoding: 'utf8', timeout: 10000,
   });
   return !result.error && result.status === 0;
@@ -268,9 +270,21 @@ let tools = {
   mediamtx: Boolean(MEDIAMTX()),
   plink: Boolean(PLINK()),
 };
-const encoder = encoderWorks('h264_nvenc')
-  ? { name: 'h264_nvenc', label: 'NVIDIA NVENC', hardware: true }
-  : { name: 'libx264', label: 'CPU x264', hardware: false };
+// Пробуем аппаратные кодировщики по очереди: NVIDIA, потом AMD, потом
+// встроенная графика Intel. Что первым отзовётся на пробном кадре — тем и
+// кодируем. Не нашлось ни одного — считаем на процессоре, это работает везде.
+function pickEncoder() {
+  const варианты = [
+    { name: 'h264_nvenc', label: 'NVIDIA NVENC', family: 'nvenc' },
+    { name: 'h264_amf', label: 'AMD AMF', family: 'amf' },
+    { name: 'h264_qsv', label: 'Intel QuickSync', family: 'qsv' },
+  ];
+  for (const вариант of варианты) {
+    if (encoderWorks(вариант.name)) return { ...вариант, hardware: true };
+  }
+  return { name: 'libx264', label: 'CPU x264', family: 'x264', hardware: false };
+}
+const encoder = pickEncoder();
 
 function pinggyEnvironment() {
   const roaming = join(PINGGY_DATA_DIR, 'roaming'), local = join(PINGGY_DATA_DIR, 'local');
@@ -1551,14 +1565,15 @@ function bitrate(profile) {
 function videoEncodeArgs(profile = streamProfile()) {
   const rate = bitrate(profile);
   const keyframes = Math.max(8, Math.round(profile.fps * 0.5));
-  if (encoder.name === 'h264_nvenc') {
-    return ['-c:v', 'h264_nvenc', '-preset', 'p2', '-tune', 'll', '-rc', 'cbr', '-b:v', rate,
-      '-maxrate', rate, '-bufsize', rate, '-g', String(keyframes), '-keyint_min', String(keyframes),
-      '-bf', '0', '-spatial-aq', '1', '-pix_fmt', 'yuv420p'];
-  }
+  const gop = ['-g', String(keyframes), '-keyint_min', String(keyframes)];
+  if (encoder.family === 'nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p2', '-tune', 'll', '-rc', 'cbr',
+    '-b:v', rate, '-maxrate', rate, '-bufsize', rate, ...gop, '-bf', '0', '-spatial-aq', '1', '-pix_fmt', 'yuv420p'];
+  if (encoder.family === 'amf') return ['-c:v', 'h264_amf', '-usage', 'lowlatency', '-rc', 'cbr',
+    '-b:v', rate, '-maxrate', rate, ...gop, '-bf', '0', '-pix_fmt', 'yuv420p'];
+  if (encoder.family === 'qsv') return ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-b:v', rate,
+    '-maxrate', rate, '-bufsize', rate, ...gop, '-bf', '0', '-async_depth', '1', '-pix_fmt', 'nv12'];
   return ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-pix_fmt', 'yuv420p',
-    '-g', String(keyframes), '-keyint_min', String(keyframes), '-sc_threshold', '0', '-b:v', rate,
-    '-maxrate', rate, '-bufsize', rate];
+    ...gop, '-sc_threshold', '0', '-b:v', rate, '-maxrate', rate, '-bufsize', rate];
 }
 
 // Раньше здесь стоял constqp: качество постоянное, а битрейт какой получится.
@@ -1582,14 +1597,19 @@ function producerEncodeArgs(profile = streamProfile()) {
   // Профиль main и уровень 4.1: так поток понимают все плееры, включая Quest,
   // где high-профиль берётся не всегда. Цена — несколько процентов лишнего
   // размера при том же качестве, и это дешевле, чем «у друга не открылось».
-  if (encoder.name === 'h264_nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p3', '-tune', 'll',
-    '-profile:v', 'main', '-level:v', '4.1', ...rateControlArgs(rate), '-rc-lookahead', '0',
-    '-g', String(keyframes), '-keyint_min', String(keyframes), '-bf', '0', '-pix_fmt', 'yuv420p'];
+  const gop = ['-g', String(keyframes), '-keyint_min', String(keyframes)];
+  const proff = ['-profile:v', 'main', '-level:v', '4.1'];
+  if (encoder.family === 'nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p3', '-tune', 'll',
+    ...proff, ...rateControlArgs(rate), '-rc-lookahead', '0', ...gop, '-bf', '0', '-pix_fmt', 'yuv420p'];
+  if (encoder.family === 'amf') return ['-c:v', 'h264_amf', '-usage', 'lowlatency', '-quality', 'speed',
+    ...proff, '-rc', 'cbr', '-b:v', rate, '-maxrate', rate, ...gop, '-bf', '0', '-pix_fmt', 'yuv420p'];
+  if (encoder.family === 'qsv') return ['-c:v', 'h264_qsv', '-preset', 'veryfast',
+    ...proff, '-b:v', rate, '-maxrate', rate, '-bufsize', rate, ...gop, '-bf', '0', '-async_depth', '1', '-pix_fmt', 'nv12'];
   // На слабой машине даже veryfast не успевает: тогда переходим на ultrafast,
   // это заметно дешевле по процессору ценой чуть большего размера потока.
   return ['-c:v', 'libx264', '-preset', lightMode ? 'ultrafast' : 'veryfast', '-tune', 'zerolatency',
-    '-profile:v', 'main', '-level:v', '4.1', '-b:v', rate, '-maxrate', rate, '-bufsize', rate,
-    '-g', String(keyframes), '-keyint_min', String(keyframes), '-sc_threshold', '0', '-bf', '0', '-pix_fmt', 'yuv420p'];
+    ...proff, '-b:v', rate, '-maxrate', rate, '-bufsize', rate,
+    ...gop, '-sc_threshold', '0', '-bf', '0', '-pix_fmt', 'yuv420p'];
 }
 
 function encodedOutputArgs(profile = streamProfile()) {
@@ -2664,11 +2684,16 @@ function stopMediaCacheDownloads() {
 
 function unityVideoEncodeArgs(profile) {
   const keyframes = Math.max(30, profile.fps * 2);
-  if (encoder.name === 'h264_nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-profile:v', 'baseline', '-level:v', '4.1',
-    '-rc', 'vbr', '-cq', '24', '-b:v', '0', '-g', String(keyframes), '-bf', '0', '-pix_fmt', 'yuv420p',
-    '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709'];
-  return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-profile:v', 'baseline', '-level:v', '4.1',
-    '-g', String(keyframes), '-bf', '0', '-pix_fmt', 'yuv420p', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709'];
+  const col = ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709'];
+  const base = ['-profile:v', 'baseline', '-level:v', '4.1', '-g', String(keyframes), '-bf', '0'];
+  if (encoder.family === 'nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p4', ...base,
+    '-rc', 'vbr', '-cq', '24', '-b:v', '0', '-pix_fmt', 'yuv420p', ...col];
+  if (encoder.family === 'amf') return ['-c:v', 'h264_amf', '-quality', 'quality', ...base,
+    '-rc', 'cqp', '-qp_i', '24', '-qp_p', '24', '-pix_fmt', 'yuv420p', ...col];
+  if (encoder.family === 'qsv') return ['-c:v', 'h264_qsv', '-preset', 'slow', ...base,
+    '-global_quality', '24', '-pix_fmt', 'nv12', ...col];
+  return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', ...base,
+    '-pix_fmt', 'yuv420p', ...col];
 }
 
 function runUnityFfmpeg(args, label, generation = unityBuildGeneration) {
