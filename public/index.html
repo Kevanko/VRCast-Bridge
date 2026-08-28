@@ -78,24 +78,38 @@
           <summary class="rail-card-head"><svg class="ic" aria-hidden="true"><use href="#i-broadcast"/></svg><span>Кто увидит</span><svg class="ic chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
           <div class="broadcast-mode"><button class="active" data-output="local" title="Ссылка работает только на этом компьютере">Только я</button><button data-output="remote" title="Через ваш сервер — ссылка не меняется">Мой сервер</button><button data-output="tunnel" title="Бесплатный туннель, задержка около трёх секунд">Друзья</button></div>
           <section class="output-panel" id="remoteOutput" hidden>
-            <label>Сервер<select id="serverSelect"></select></label>
-            <div id="serverEdit" hidden>
-              <label>Название<input id="serverRename" type="text" autocomplete="off" maxlength="60"></label>
-              <label>Адрес<input id="serverAddress" type="text" placeholder="123.45.67.89 или my-server.com" autocomplete="off"></label>
-              <button class="quiet-button" id="saveServer" type="button">Сохранить</button>
-              <p class="field-help">Пароль здесь не нужен. Появился домен — впишите его вместо адреса, ссылка сразу станет с доменом.</p>
-            </div>
-            <div class="server-actions">
-              <button id="addServerToggle" type="button"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>Добавить</button>
-              <button id="removeServer" type="button" disabled>Удалить</button>
-            </div>
-            <div id="addServerForm" hidden>
-              <label>Адрес сервера<input id="serverHost" type="text" placeholder="123.45.67.89 или my-server.com" autocomplete="off"></label>
-              <label>Пароль root<input id="serverPassword" type="password" placeholder="пароль от сервера" autocomplete="off"></label>
-              <label>Как назвать<input id="serverName" type="text" placeholder="можно не заполнять" autocomplete="off"></label>
-              <button class="deploy-button" id="deployServer" type="button"><svg class="ic" aria-hidden="true"><use href="#i-server"/></svg>Настроить сервер</button>
-              <p class="field-help">Пароль нужен один раз — чтобы поставить на сервер программу трансляции. Он не сохраняется. Дальше сервер работает без него.</p>
-            </div>
+            <ul class="server-list" id="serverList"></ul>
+            <button class="btn" id="addServerToggle" type="button" aria-expanded="false" aria-controls="addServerForm">
+              <svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>Добавить сервер
+            </button>
+
+            <form id="addServerForm" hidden autocomplete="off">
+              <div class="seg wide" id="addMode" role="radiogroup" aria-label="Что за сервер">
+                <button type="button" role="radio" aria-checked="true" data-mode="attach">Уже настроен</button>
+                <button type="button" role="radio" aria-checked="false" data-mode="deploy">Настроить с нуля</button>
+              </div>
+
+              <label>Адрес<input id="serverHost" type="text" placeholder="123.45.67.89 или my-server.com" required></label>
+              <label>Как назвать<input id="serverName" type="text" placeholder="придумаем сами"></label>
+
+              <div id="attachFields">
+                <p class="field-help">Ключ публикации выдаёт сервер при установке. Хозяин сервера берёт его в приложении и передаёт вам — с ним вещать может каждый, root не нужен.</p>
+                <label>Ключ публикации<input id="serverKey" type="text" placeholder="строка из 24 знаков"></label>
+              </div>
+
+              <div id="deployFields" hidden>
+                <p class="field-help">Пароль root нужен один раз — поставить на машину программу трансляции. Он не сохраняется и никуда не уходит: подключение идёт с вашего компьютера напрямую.</p>
+                <label>Пароль root<input id="serverPassword" type="password" placeholder="пароль от сервера"></label>
+              </div>
+
+              <p class="form-error" id="addServerError" hidden></p>
+              <p class="deploy-progress" id="deployProgress" hidden></p>
+              <div class="form-actions">
+                <button class="btn" id="addServerCancel" type="button">Отмена</button>
+                <button class="btn primary" id="addServerSubmit" type="submit">Подключить</button>
+              </div>
+            </form>
+
             <p class="field-help" id="serverHint"></p>
           </section>
         </details>
@@ -128,16 +142,33 @@
               <button class="chip-button" id="speedSelect" title="Скорость" data-value="1">1×</button>
               <button class="chip-button" id="loopSelect" title="Повтор" data-value="once"><svg class="ic" aria-hidden="true"><use href="#i-repeat"/></svg></button>
               <button id="previewToggle" title="Выключить картинку — разгрузит процессор"><svg class="ic" aria-hidden="true"><use href="#i-eye"/></svg></button>
-              <button id="playerSettings" title="Настройки"><svg class="ic" aria-hidden="true"><use href="#i-gear"/></svg></button>
+              <button id="playerSettings" title="Что уходит в эфир" aria-haspopup="dialog" aria-expanded="false" aria-controls="playerMenu"><svg class="ic" aria-hidden="true"><use href="#i-gear"/></svg></button>
             </div>
           </div>
 
-          <div class="player-menu" id="playerMenu" hidden>
-            <div class="menu-row" id="menuMediaQuality"><span>Качество</span><select id="mediaQuality"><option value="480p">480p</option><option value="720p">720p</option><option value="1080p">1080p</option></select></div>
-            <div class="menu-row" id="menuMediaFps"><span>Плавность</span><select id="mediaFps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></div>
-            <div class="menu-row" id="menuScreenQuality" hidden><span>Качество</span><select id="quality"><option value="480p">480p</option><option value="720p">720p</option><option value="1080p">1080p</option></select></div>
-            <div class="menu-row" id="menuScreenFps" hidden><span>Плавность</span><select id="fps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></div>
-            <div class="menu-row"><span>Битрейт</span><select id="videoBitrate"><option value="0">Авто</option><option value="1500">1500 Кбит/с</option><option value="2500">2500 Кбит/с</option><option value="3500">3500 Кбит/с</option><option value="4500">4500 Кбит/с</option><option value="6000">6000 Кбит/с</option><option value="8000">8000 Кбит/с</option><option value="12000">12000 Кбит/с</option></select></div>
+          <div class="player-menu" id="playerMenu" role="dialog" aria-label="Что уходит в эфир" hidden>
+            <p class="menu-title">Что уходит в эфир</p>
+            <div class="menu-row" id="menuMediaQuality"><span>Чёткость</span>
+              <div class="seg" data-for="mediaQuality" role="radiogroup" aria-label="Чёткость"></div>
+              <select id="mediaQuality" hidden><option value="480p">480p</option><option value="720p">720p</option><option value="1080p">1080p</option></select></div>
+            <div class="menu-row" id="menuMediaFps"><span>Плавность</span>
+              <div class="seg" data-for="mediaFps" role="radiogroup" aria-label="Плавность"></div>
+              <select id="mediaFps" hidden><option value="30" data-short="30">30 кадров</option><option value="60" data-short="60">60 кадров</option></select></div>
+            <div class="menu-row" id="menuScreenQuality" hidden><span>Чёткость</span>
+              <div class="seg" data-for="quality" role="radiogroup" aria-label="Чёткость"></div>
+              <select id="quality" hidden><option value="480p">480p</option><option value="720p">720p</option><option value="1080p">1080p</option></select></div>
+            <div class="menu-row" id="menuScreenFps" hidden><span>Плавность</span>
+              <div class="seg" data-for="fps" role="radiogroup" aria-label="Плавность"></div>
+              <select id="fps" hidden><option value="30" data-short="30">30 кадров</option><option value="60" data-short="60">60 кадров</option></select></div>
+            <div class="menu-row"><span>Поток</span>
+              <div class="seg" data-for="videoBitrate" role="radiogroup" aria-label="Поток"></div>
+              <select id="videoBitrate" hidden>
+                <option value="0" data-short="Авто">Авто</option>
+                <option value="2500" data-short="2,5">2500 Кбит/с</option>
+                <option value="4500" data-short="4,5">4500 Кбит/с</option>
+                <option value="8000" data-short="8">8000 Кбит/с</option>
+              </select></div>
+            <p class="menu-note" id="menuNote">На картинку в этом окне не влияет — только на то, что видят в VRChat.</p>
           </div>
         </div>
 
@@ -238,6 +269,33 @@
   </div>
 
   <dialog id="logDialog"><div class="dialog-head"><b>Журнал</b><button id="copyLogs" title="Скопировать весь журнал"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg>Скопировать</button><button id="openLogFolder" title="Скопировать путь к папке с журналом"><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg>Папка</button><button id="closeLogs" title="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div><pre id="logs">Запуск…</pre></dialog>
+  <dialog id="serverDialog">
+    <div class="dialog-head"><b id="serverDialogTitle">Сервер</b><button id="serverDialogClose" type="button" aria-label="Закрыть">×</button></div>
+    <label>Название<input id="serverRename" type="text" maxlength="60" autocomplete="off"></label>
+    <label>Адрес<input id="serverAddress" type="text" placeholder="123.45.67.89 или my-server.com" autocomplete="off"></label>
+    <p class="field-help">Купили домен — впишите его вместо адреса. Ссылка станет с доменом сразу, переустанавливать ничего не нужно.</p>
+
+    <div class="key-row">
+      <span>Ключ для друзей</span>
+      <code id="serverKeyValue">—</code>
+      <button id="copyServerKey" type="button" title="Скопировать ключ"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button>
+    </div>
+    <p class="field-help">С этим ключом друг подключит ваш сервер у себя и будет вещать через него. Пароль root ему не нужен.</p>
+
+    <p class="form-error" id="serverDialogError" hidden></p>
+
+    <div id="wipeConfirm" hidden>
+      <p class="field-help">Программа трансляции будет удалена с машины. Нужен пароль root.</p>
+      <label>Пароль root<input id="wipePassword" type="password" autocomplete="off"></label>
+    </div>
+
+    <div class="dialog-actions">
+      <button class="btn danger" id="serverForget" type="button">Убрать из списка</button>
+      <button class="btn danger" id="serverWipe" type="button">Снести с машины…</button>
+      <button class="btn primary" id="saveServer" type="button">Сохранить</button>
+    </div>
+  </dialog>
+
   <dialog id="updateDialog">
     <div class="update-head"><b>Новая версия</b><span id="updateVersion"></span></div>
     <p class="update-note" id="updateNotes"></p>
