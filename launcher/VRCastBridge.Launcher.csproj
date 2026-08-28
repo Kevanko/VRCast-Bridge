@@ -7,9 +7,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>VRCast Bridge</AssemblyName>
     <RootNamespace>VRCastBridge.Launcher</RootNamespace>
-    <Version>0.50.2</Version>
-    <FileVersion>0.50.2.0</FileVersion>
-    <AssemblyVersion>0.50.2.0</AssemblyVersion>
+    <Version>0.50.3</Version>
+    <FileVersion>0.50.3.0</FileVersion>
+    <AssemblyVersion>0.50.3.0</AssemblyVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
