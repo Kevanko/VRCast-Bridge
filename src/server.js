@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.50.2';
+const APP_VERSION = '0.50.3';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -2114,6 +2114,8 @@ function rtspTargets() {
   return targets;
 }
 
+const rtspPushFailures = new Map();
+
 function startRtspPush() {
   if (!mediaMtxProcess) return;
   for (const target of rtspTargets()) {
@@ -2160,13 +2162,25 @@ function startRtspPush() {
       });
       child.on('error', error => log(`Свой сервер: ${error.message}`));
     } else attachProcessLogs(child, 'RTSP push');
+    const startedAt = Date.now();
+    // Продержался несколько секунд — публикация пошла, счётчик быстрых падений
+    // обнуляем, чтобы следующий разрыв снова начинал с короткой паузы.
+    setTimeout(() => { if (rtspPushProcesses.get(target.id) === child) rtspPushFailures.set(target.id, 0); }, 5000).unref?.();
     child.on('close', () => {
       if (rtspPushProcesses.get(target.id) !== child) return;
       rtspPushProcesses.delete(target.id);
       // Обрыв одного получателя не трогает ни HLS, ни остальные каналы:
       // недоступный свой сервер не должен ронять локальную ссылку.
       if (stopping || shuttingDown || !relayProcess || rtspPushTimers.has(target.id)) return;
-      rtspPushTimers.set(target.id, setTimeout(() => { rtspPushTimers.delete(target.id); startRtspPush(); }, 700));
+      // Пушер, упавший через доли секунды, — это публикация до первого
+      // видеокадра («dimensions not set»): в потоке пока одна аудио-заглушка.
+      // Раньше он перезапускался каждые 0,7 с без конца и заваливал журнал
+      // сотнями строк. Теперь пауза растёт с числом быстрых падений.
+      const быстро = Date.now() - startedAt < 4000;
+      const счёт = быстро ? (rtspPushFailures.get(target.id) || 0) + 1 : 0;
+      rtspPushFailures.set(target.id, счёт);
+      const пауза = счёт > 3 ? Math.min(15000, 1500 * (счёт - 2)) : 700;
+      rtspPushTimers.set(target.id, setTimeout(() => { rtspPushTimers.delete(target.id); startRtspPush(); }, пауза));
     });
   }
 }
@@ -3988,5 +4002,17 @@ server.on('error', error => {
   if (error.code === 'EADDRINUSE') { console.error(`Порт ${PORT} уже занят.`); process.exit(1); }
   throw error;
 });
+// Необработанная ошибка не должна уносить весь сервер: окно остаётся живым,
+// а страница молча теряет связь с ним — это и был тот самый «Failed to fetch».
+// Записываем причину и продолжаем работать; действительно смертельное всё
+// равно свалит процесс, но одиночный сбой пушера или таймера — нет.
+process.on('uncaughtException', error => {
+  logDetail(`Непойманная ошибка: ${error?.stack || error}`);
+  log(`Внутренняя ошибка обработана: ${String(error?.message || error).slice(0, 160)}`);
+});
+process.on('unhandledRejection', reason => {
+  logDetail(`Необработанный промис: ${reason?.stack || reason}`);
+});
+
 process.on('SIGINT', () => { shuttingDown = true; if (hlsHealthTimer) clearInterval(hlsHealthTimer); stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); });
 process.on('SIGTERM', () => { shuttingDown = true; if (hlsHealthTimer) clearInterval(hlsHealthTimer); stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); });
