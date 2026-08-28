@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.50.6';
+const APP_VERSION = '0.50.7';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -3293,7 +3293,9 @@ const очередьПревью = [];
 let занятоПревью = 0;
 
 function generateThumbnail(item) {
-  if (!item.hasVideo) return;
+  // Раньше превью делалось только для видео. Но у музыки внутри часто лежит
+  // обложка альбома — берём её. Так у трека в списке появляется картинка, а
+  // не серый квадрат.
   очередьПревью.push(item);
   качатьПревью();
 }
@@ -3303,8 +3305,13 @@ function качатьПревью() {
     const item = очередьПревью.shift();
     занятоПревью++;
     const destination = join(THUMB_DIR, `${item.id}.jpg`);
-    const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-ss', '1', '-i', item.sourceUrl,
-      '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination], { windowsHide: true, stdio: 'ignore' });
+    // Для видео — кадр на первой секунде; для музыки — встроенная обложка.
+    const args = item.hasVideo
+      ? ['-hide_banner', '-loglevel', 'error', '-ss', '1', '-i', item.sourceUrl,
+         '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination]
+      : ['-hide_banner', '-loglevel', 'error', '-i', item.sourceUrl,
+         '-an', '-map', 'disp:attached_pic', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination];
+    const child = spawn('ffmpeg', args, { windowsHide: true, stdio: 'ignore' });
     const дальше = () => { занятоПревью--; качатьПревью(); };
     child.on('close', code => {
       if (code === 0 && queue.some(entry => entry.id === item.id)) {
@@ -3607,8 +3614,10 @@ function serveRangeMp4(req, res, filePath, public_ = false) {
   if (!existsSync(filePath)) return false;
   const size = statSync(filePath).size;
   const range = String(req.headers.range || '').match(/^bytes=(\d*)-(\d*)$/);
-  const common = { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache, no-store',
-    'CDN-Cache-Control': 'no-store', ...общийДоступ(public_) };
+  const типы = { '.webm': 'video/webm', '.m4v': 'video/mp4', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.wav': 'audio/wav' };
+  const common = { 'Content-Type': типы[extname(filePath).toLowerCase()] || 'video/mp4', 'Accept-Ranges': 'bytes',
+    'Cache-Control': 'no-cache, no-store', 'CDN-Cache-Control': 'no-store', ...общийДоступ(public_) };
   if (!range) {
     res.writeHead(200, { ...common, 'Content-Length': size });
     if (req.method === 'HEAD') res.end(); else createReadStream(filePath).pipe(res);
@@ -3919,7 +3928,22 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/start/screen') { await startScreen(); return json(res, 200, status()); }
-    if (req.method === 'POST' && url.pathname === '/api/start/queue') { startQueue(); return json(res, 200, status()); }
+    if (req.method === 'POST' && url.pathname === '/api/start/queue') {
+      const body = await readBody(req).catch(() => ({}));
+      const индекс = body.id ? queue.findIndex(item => item.id === String(body.id)) : 0;
+      startQueue(индекс < 0 ? 0 : индекс);
+      return json(res, 200, status());
+    }
+    // Локальный предпросмотр: отдаём файл трека прямо браузеру, без эфира.
+    // Так видео можно посмотреть и проиграть до запуска трансляции.
+    if (req.method === 'GET' && url.pathname.startsWith('/api/local-media/')) {
+      const id = decodeURIComponent(url.pathname.slice('/api/local-media/'.length));
+      const item = queue.find(entry => entry.id === id);
+      if (!item?.local || !existsSync(item.sourceUrl)) return json(res, 404, { error: 'Файл не найден.' });
+      // Браузер играет mp4/webm/m4v и звук напрямую; mkv и прочее — только через эфир.
+      if (!/\.(mp4|webm|m4v|m4a|mp3|aac|ogg|opus|wav)$/i.test(item.sourceUrl)) return json(res, 415, { error: 'Этот формат смотрится только в эфире.' });
+      return void serveRangeMp4(req, res, item.sourceUrl);
+    }
     if (req.method === 'POST' && url.pathname === '/api/skip') { transitionQueue('next'); return json(res, 200, status()); }
     if (req.method === 'POST' && url.pathname === '/api/playback') { const body = await readBody(req); return json(res, 200, playbackCommand(body)); }
     if (req.method === 'POST' && url.pathname === '/api/stop') { stopActive(); return json(res, 200, status()); }
