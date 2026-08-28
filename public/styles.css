@@ -379,3 +379,15 @@ option{background:var(--dusk);color:var(--text)}
     transition-duration:.01ms!important}
   .state-dot.live{animation:none;box-shadow:0 0 12px var(--air)}
 }
+
+/* ─── Меньше подписей, меньше цвета ────────────────────────────────────────
+   Ссылку читают и копируют — она обычный текст, а не украшение. Фиолетовый
+   остаётся за тем, с чем взаимодействуют: выбранное, кнопка, фокус. */
+.rail-card code{color:var(--text)}
+.player-mode{gap:0}
+#serverHint{margin-top:10px}
+#serverHint:empty{display:none}
+/* Состояние сервера подписывается словом только когда что-то не так.
+   Когда всё хорошо, об этом уже говорит лампа. */
+.card-pick em:empty{display:none}
+#trustHint:empty{display:none}

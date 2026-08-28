@@ -59,7 +59,7 @@
 
         <details class="rail-card" id="cardLink" open>
           <summary class="rail-card-head"><svg class="ic" aria-hidden="true"><use href="#i-link"/></svg><span>Ссылка</span><svg class="ic chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
-          <label class="player-mode">Плеер в мире<select id="playerMode"><option value="avpro">AVPro — живой эфир</option><option value="unity">Unity — готовый файл</option></select></label>
+          <label class="player-mode"><select id="playerMode"><option value="avpro">AVPro — живой эфир</option><option value="unity">Unity — готовый файл</option></select></label>
           <div class="link-row"><code id="playbackUrl">http://127.0.0.1:4717/stream/live.m3u8</code><button id="copyUrl" title="Скопировать ссылку"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
           <div class="alt-link" id="altLinkRow" hidden><span>Запасная — для Quest</span><div class="link-row"><code id="altLink"></code><button id="copyAltUrl" title="Скопировать запасную ссылку"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button></div></div>
           <small id="trustHint"></small>
@@ -93,13 +93,11 @@
               <label>Название<input id="serverName" type="text" placeholder="придумаем сами"></label>
 
               <div id="attachFields">
-                <p class="field-help">Ключ выдаёт сервер при установке. Хозяин копирует его у себя и передаёт вам.</p>
-                <label>Ключ<input id="serverKey" type="text" placeholder="24 знака"></label>
+                <label>Ключ<input id="serverKey" type="text" placeholder="выдал сервер при установке"></label>
               </div>
 
               <div id="deployFields" hidden>
-                <p class="field-help">Нужен один раз, чтобы поставить программу на машину. Не сохраняется.</p>
-                <label>Пароль root<input id="serverPassword" type="password" placeholder="пароль от сервера"></label>
+                <label>Пароль root<input id="serverPassword" type="password" placeholder="нужен один раз, не сохраняем"></label>
               </div>
 
               <p class="form-error" id="addServerError" hidden></p>
@@ -273,14 +271,13 @@
     <div class="dialog-head"><b id="serverDialogTitle">Сервер</b><button id="serverDialogClose" type="button" aria-label="Закрыть">×</button></div>
     <label>Название<input id="serverRename" type="text" maxlength="60" autocomplete="off"></label>
     <label>Адрес<input id="serverAddress" type="text" placeholder="123.45.67.89" autocomplete="off"></label>
-    <p class="field-help">Можно вписать домен вместо адреса — ссылка сменится сразу.</p>
-
+    
     <div class="key-row">
       <span>Ключ для друзей</span>
       <code id="serverKeyValue">—</code>
       <button id="copyServerKey" type="button" title="Скопировать ключ"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button>
     </div>
-    <p class="field-help">Передайте ключ другу — он подключит ваш сервер у себя без пароля root.</p>
+    <p class="field-help">Передайте другу — он подключит ваш сервер у себя.</p>
 
     <p class="form-error" id="serverDialogError" hidden></p>
 

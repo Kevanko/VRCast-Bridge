@@ -150,7 +150,9 @@ function renderServers(state) {
     список.innerHTML=servers.length?servers.map(item=>{
       const выбран=item.id===active&&state.config.outputMode==='remote';
       const лампа=!выбран?'':remote.live?'live':remote.reachable===false?'down':'wait';
-      const состояние=!выбран?'Не используется':remote.live?'Эфир идёт':remote.reachable===false?'Не отвечает':'Подключаюсь';
+      // Слово появляется только если что-то не так: зелёная лампа и без него
+      // говорит «идёт», а лишняя подпись на каждой карточке — шум.
+      const состояние=!выбран?'':remote.reachable===false?'Не отвечает':remote.live?'':'Подключаюсь';
       return `<li class="server-card${выбран?' on':''}" data-id="${escapeHtml(item.id)}">
         <button class="card-pick" type="button" aria-pressed="${выбран}" title="Вещать через этот сервер">
           <i class="lamp ${лампа}"></i>
@@ -162,10 +164,11 @@ function renderServers(state) {
       </li>`;
     }).join(''):'<li class="server-empty">Сервера пока нет.<br>Он даёт постоянную ссылку — раздать её можно один раз и больше не менять.</li>';
   }
+  // Молчим, когда всё идёт как надо: об этом уже говорят лампа и карточка.
   $('#serverHint').textContent=!servers.length?'Есть свой VPS — подключите его, и ссылка перестанет меняться.'
-    :remote.live?'Эфир идёт через ваш сервер.'
-    :state.config.outputMode==='remote'?'Подключаюсь к серверу…'
-    :'Выберите сервер, чтобы вещать через него.';
+    :remote.reachable===false?'Сервер не отвечает. Проверьте, что машина включена и порт 8554 открыт.'
+    :state.config.outputMode!=='remote'?'Выберите сервер, чтобы вещать через него.'
+    :'';
 }
 
 // Карточка целиком — переключатель: нажали, значит вещаем через этот сервер.
@@ -280,7 +283,7 @@ function render(state) {
   else if(state.config.outputMode==='remote'){
     const remote=state.rtsp?.remote||{};
     shownUrl=remote.configured?remote.url:'';
-    hint=remote.channelRejected?'Нажмите «Настроить сервер» — на нём стоит старая настройка.':'Ссылка постоянная, её можно дать друзьям.';
+    hint=remote.channelRejected?'Нажмите «Настроить сервер» — на нём стоит старая настройка.':'';
     linkText=!remote.configured?'Выберите сервер':remote.reachable===false?'Сервер не отвечает':remote.channelRejected?'Сервер настроен по-старому':remote.live?'Через ваш сервер':'Подключаюсь…';
     linkGood=Boolean(remote.live);
     linkError=Boolean(remote.configured&&(remote.reachable===false||(!remote.live&&state.running)));
@@ -291,7 +294,7 @@ function render(state) {
     // ссылку можно было вставить, и в VRChat она молча не открывалась.
     const rtspLive=!tunnelMode&&Boolean(state.linkReady);
     shownUrl=tunnelReady?state.tunnel.url:tunnelMode?'':state.playbackUrl;
-    hint=rtspLive?'В мире включите AVPro и Untrusted URLs.':'В мире выберите плеер AVPro.';
+    hint=rtspLive?'':'В мире выберите плеер AVPro и разрешите Untrusted URLs.';
     // Бесплатный туннель не тянет тяжёлый поток — это и есть причина рывков у друзей.
     if(tunnelMode){const heavy=ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30);
       if(heavy)hint+=' Через бесплатный туннель 1080p и 60 кадров рвутся — поставьте 720p и 30 кадров.';
