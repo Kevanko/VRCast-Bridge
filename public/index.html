@@ -166,6 +166,14 @@
                 <option value="4500" data-short="4,5">4500 Кбит/с</option>
                 <option value="8000" data-short="8">8000 Кбит/с</option>
               </select></div>
+            <div class="menu-row"><span>Кодирует</span>
+              <div class="seg" data-for="encoderMode" role="radiogroup" aria-label="Кодирует"></div>
+              <select id="encoderMode" hidden>
+                <option value="auto" data-short="Авто">Авто</option>
+                <option value="gpu" data-short="Видеокарта">Видеокарта</option>
+                <option value="cpu" data-short="Процессор">Процессор</option>
+              </select></div>
+            <p class="menu-note" id="encoderNote"></p>
             <p class="menu-note" id="menuNote">На картинку в этом окне не влияет — только на то, что видят в VRChat.</p>
           </div>
         </div>

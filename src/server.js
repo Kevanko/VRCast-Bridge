@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.51.0';
+const APP_VERSION = '0.52.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -85,6 +85,7 @@ const defaults = {
   videoBitrate: 0,
   autoQuality: true,
   cacheLimitGb: 0,
+  encoderMode: 'auto',
 };
 
 function loadConfig() {
@@ -272,19 +273,30 @@ let tools = {
 };
 // Пробуем аппаратные кодировщики по очереди: NVIDIA, потом AMD, потом
 // встроенная графика Intel. Что первым отзовётся на пробном кадре — тем и
-// кодируем. Не нашлось ни одного — считаем на процессоре, это работает везде.
-function pickEncoder() {
+// кодируем. Проба тяжёлая (запуск ffmpeg), поэтому результат кешируем.
+const CPU_ENCODER = { name: 'libx264', label: 'Процессор', family: 'x264', hardware: false };
+let hardwareEncoder; // undefined — ещё не проверяли; объект или null — проверили
+function detectHardwareEncoder() {
+  if (hardwareEncoder !== undefined) return hardwareEncoder;
   const варианты = [
-    { name: 'h264_nvenc', label: 'NVIDIA NVENC', family: 'nvenc' },
-    { name: 'h264_amf', label: 'AMD AMF', family: 'amf' },
-    { name: 'h264_qsv', label: 'Intel QuickSync', family: 'qsv' },
+    { name: 'h264_nvenc', label: 'Видеокарта NVIDIA', family: 'nvenc' },
+    { name: 'h264_amf', label: 'Видеокарта AMD', family: 'amf' },
+    { name: 'h264_qsv', label: 'Видеокарта Intel', family: 'qsv' },
   ];
+  hardwareEncoder = null;
   for (const вариант of варианты) {
-    if (encoderWorks(вариант.name)) return { ...вариант, hardware: true };
+    if (encoderWorks(вариант.name)) { hardwareEncoder = { ...вариант, hardware: true }; break; }
   }
-  return { name: 'libx264', label: 'CPU x264', family: 'x264', hardware: false };
+  return hardwareEncoder;
 }
-const encoder = pickEncoder();
+// Режим выбора: auto — видеокарта, если есть, иначе процессор; gpu — только
+// видеокарта (нет — откат на процессор); cpu — всегда процессор.
+function pickEncoder(mode) {
+  if (mode === 'cpu') return CPU_ENCODER;
+  return detectHardwareEncoder() || CPU_ENCODER;
+}
+let encoder = pickEncoder(config.encoderMode);
+detectHardwareEncoder(); // узнаём про видеокарту сразу, чтобы настройки её показывали
 
 function pinggyEnvironment() {
   const roaming = join(PINGGY_DATA_DIR, 'roaming'), local = join(PINGGY_DATA_DIR, 'local');
@@ -1300,6 +1312,7 @@ function status() {
       limitGb: Number(config.cacheLimitGb) || 0 },
     audio: { levelDb: audioLevelDb, silent: audioLevelDb < -70 },
     performance: { encoder: encoder.label, hardware: encoder.hardware, continuousQueue: true, outputProfile: relayProfile,
+      encoderMode: config.encoderMode || 'auto', gpuLabel: hardwareEncoder ? hardwareEncoder.label : '',
       streamClock: Number(streamTimestamp().toFixed(3)),
       realtimeRatio: Number(hlsHealth.realtimeRatio.toFixed(2)), segmentAge: hlsHealth.segmentAge === null ? null : Number(hlsHealth.segmentAge.toFixed(1)) },
     stream: { ready: hlsHealth.ready, segmentCount: hlsHealth.segmentCount,
@@ -3869,6 +3882,7 @@ const server = http.createServer(async (req, res) => {
         cacheRoot: typeof body.cacheRoot === 'string' ? body.cacheRoot.trim().slice(0, 300) : config.cacheRoot,
         videoBitrate: Math.max(0, Math.min(20000, Number(body.videoBitrate ?? config.videoBitrate ?? 0) || 0)),
         autoQuality: body.autoQuality === undefined ? config.autoQuality !== false : Boolean(body.autoQuality),
+        encoderMode: ['auto', 'gpu', 'cpu'].includes(body.encoderMode) ? body.encoderMode : (config.encoderMode || 'auto'),
         cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),
@@ -3896,6 +3910,7 @@ const server = http.createServer(async (req, res) => {
       };
       const previousOutput = config.outputMode;
       const previousRemoteTarget = remoteRtspTarget();
+      const previousEncoderMode = config.encoderMode;
       const applyLive = Boolean(body.applyLive);
       // Смена диска для кеша: проверяем, что папка создаётся и туда можно писать,
       // и только потом сохраняем — иначе загрузки молча перестанут работать.
@@ -3909,6 +3924,11 @@ const server = http.createServer(async (req, res) => {
         } catch { return json(res, 400, { error: `Не удаётся писать в ${target}. Выберите другой диск.` }); }
       }
       saveConfig(next);
+      const encoderChanged = previousEncoderMode !== config.encoderMode;
+      if (encoderChanged) {
+        encoder = pickEncoder(config.encoderMode);
+        log(`Кодировщик: ${encoder.label}`);
+      }
       if (mediaCacheDir() !== previousCacheDir) {
         // Старую папку убираем: треки перекачаются на новое место сами.
         // Удаляем только свою папку кеша: cacheRoot приходит извне, и рекурсивное
@@ -3948,9 +3968,14 @@ const server = http.createServer(async (req, res) => {
       if (applyLive && activeKind) {
         const desired = streamProfile(activeKind);
         // Пересборка сессии сама поднимает источник заново — второй раз не надо.
-        if (relayProcess && !sameProfile(relayProfile, desired)) restartRelaySession(desired);
+        // Смена кодировщика профиль не меняет, поэтому пересобираем явно.
+        if (relayProcess && (encoderChanged || !sameProfile(relayProfile, desired))) restartRelaySession(desired);
         else if (activeKind === 'screen') await startScreen();
         else if (activeKind === 'queue' && currentId) transitionQueue('seek', currentSourcePosition());
+      } else if (encoderChanged && relayProcess && activeKind) {
+        // Настройки применили без «применить на лету», но эфир идёт — всё равно
+        // перезапускаем сессию, иначе новый кодировщик подхватится только со следующим треком.
+        restartRelaySession(streamProfile(activeKind));
       }
       return json(res, 200, status());
     }
