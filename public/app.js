@@ -196,12 +196,27 @@ async function openServerDialog(id){
   $('#wipeConfirm').hidden=true;
   $('#wipePassword').value='';
   показатьОшибку($('#serverDialogError'),'');
-  $('#serverKeyValue').textContent='загружаю…';
+  // Ключ прячем: это пароль, показывать его первым встречному через плечо ни
+  // к чему. Точки, пока не нажмут «показать»; настоящее значение — в data-key.
+  const плашка=$('#serverKeyValue');
+  плашка.dataset.key=''; плашка.dataset.shown='0'; плашка.textContent='••••••••••••';
   if(!serverDialog.open)serverDialog.showModal();
   try{
     const ответ=await api(`/api/servers/${encodeURIComponent(id)}/key`);
-    $('#serverKeyValue').textContent=ответ.key||'ключа нет — сервер подключён без него';
-  }catch{ $('#serverKeyValue').textContent='не удалось прочитать'; }
+    плашка.dataset.key=ответ.key||'';
+  }catch{ плашка.dataset.key=''; }
+  рисоватьКлюч();
+}
+
+function рисоватьКлюч(){
+  const плашка=$('#serverKeyValue');
+  const есть=Boolean(плашка.dataset.key);
+  const открыт=плашка.dataset.shown==='1';
+  плашка.textContent=!есть?'ключа нет — сервер подключён без него'
+    :открыт?плашка.dataset.key:'••••••••••••';
+  $('#revealServerKey').querySelector('use').setAttribute('href',открыт?'#i-eye-off':'#i-eye');
+  $('#revealServerKey').hidden=!есть;
+  $('#copyServerKey').hidden=!есть;
 }
 
 function закрытьДиалогСервера(){
@@ -212,11 +227,16 @@ $('#serverDialogClose').addEventListener('click',закрытьДиалогСе�
 // Клик по затемнению и Escape закрывают тоже — как ждёшь от любого окна.
 serverDialog.addEventListener('click',event=>{ if(event.target===serverDialog)закрытьДиалогСервера(); });
 serverDialog.addEventListener('cancel',event=>{ event.preventDefault(); закрытьДиалогСервера(); });
+$('#revealServerKey').addEventListener('click',()=>{
+  const плашка=$('#serverKeyValue');
+  плашка.dataset.shown=плашка.dataset.shown==='1'?'0':'1';
+  рисоватьКлюч();
+});
 $('#copyServerKey').addEventListener('click',async()=>{
-  const ключ=$('#serverKeyValue').textContent.trim();
-  if(!ключ||ключ.length<8)return toast('Ключа нет',true);
+  const ключ=$('#serverKeyValue').dataset.key||'';
+  if(!ключ)return toast('Ключа нет',true);
   const получилось=await copyText(ключ);
-  toast(получилось?'Ключ скопирован':'Не удалось скопировать',!получилось);
+  toast(получилось?'Ключ скопирован — можно отдать другу':'Не удалось скопировать',!получилось);
 });
 $('#saveServer').addEventListener('click',async()=>{
   const кнопка=$('#saveServer'); кнопка.disabled=true;
@@ -350,6 +370,10 @@ function render(state) {
     ?`${state.activeKind==='screen'?'Экран':'Видео'} · ${чёткость} · ${кадры} к/с`
     :'Нет эфира';
   const monitor=$('#monitor');
+  // Транспорт (перемотка, пауза, скорость) нужен только когда идёт живое
+  // видео. На предпросмотре источника и при остановленном эфире управлять
+  // нечем — панель тогда прячется, чтобы не всплывать пустыми кнопками.
+  monitor.classList.toggle('live-video',Boolean(state.running&&state.activeKind==='queue'));
   monitor.classList.toggle('tally-live',Boolean(state.running&&streamReady));
   monitor.classList.toggle('tally-cue',Boolean(state.running&&!streamReady));
   const list=$('#queueList');
