@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.50.7';
+const APP_VERSION = '0.50.8';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -2125,11 +2125,13 @@ function startRtspPush() {
     // а из MPEG-TS он приходит в ADTS — с «-c copy» публикация просто не стартует
     // («AAC with no global headers»), aac_adtstoasc тут не помогает, потому что
     // заголовок SDP пишется до первого пакета.
-    const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts+discardcorrupt+nobuffer',
-      // Разбирать полмегабайта перед публикацией незачем: в потоке всего две
-      // дорожки, и на заставке эти полмегабайта набираются секунду с лишним —
-      // ровно та секунда, когда ссылка ещё не играет.
-      '-probesize', '120000', '-analyzeduration', '200000', '-f', 'mpegts', '-i', 'pipe:0',
+    const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts+discardcorrupt',
+      // Без nobuffer и с запасом на разбор: публикация стартует раньше, чем
+      // relay выдаст первый кадр, и с урезанным probesize ffmpeg сдавался —
+      // «dimensions not set», падение, перезапуск по кругу. Теперь он спокойно
+      // ждёт появления видео и звука. RTSP-муксеру нужны оба параметра до
+      // первого пакета, иначе header не пишется вовсе.
+      '-probesize', '2000000', '-analyzeduration', '2000000', '-f', 'mpegts', '-i', 'pipe:0',
       '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
       // Пакеты уходят сразу, без придержки в муксере: каждая такая задержка
       // складывается с буфером плеера и в VRChat видна как отставание.
