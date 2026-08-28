@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.49.0';
+const APP_VERSION = '0.50.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -830,6 +830,37 @@ function editServer(id, body) {
   }
   log(`Сервер «${next.name}»: адрес ${next.host}`);
   return next;
+}
+
+// Подключение сервера, который уже настроен. Пароль root тут не нужен и не
+// уместен: при установке сервер выдал ключ публикации, он лежит у него в
+// /opt/vrcast-relay/publish.key — этим ключом хозяин делится с друзьями, и
+// каждый из них вещает через ту же машину, ничего на ней не трогая.
+async function attachServer(body) {
+  const адрес = String(body.host || '').trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0];
+  const ключ = String(body.key || '').trim();
+  if (!адрес) throw new Error('Укажите адрес сервера.');
+  if (!/^[a-z0-9.-]+$/i.test(адрес)) throw new Error('Адрес сервера: только буквы, цифры, точки и дефис.');
+  if (!ключ) throw new Error('Укажите ключ публикации — его выдаёт сервер при установке.');
+  const порт = Number(body.rtspPort) || SERVER_RTSP_PORT;
+  const канал = String(body.channel || 'live').replace(/[^a-z0-9_-]/gi, '') || 'live';
+  // Проверяем, что там вообще кто-то отвечает: адрес с опечаткой не должен
+  // молча ложиться в список и всплывать только при запуске эфира.
+  const отвечает = await probeServer(адрес, порт);
+  if (!отвечает) throw new Error(`${адрес}:${порт} не отвечает. Проверьте адрес или настройте сервер заново.`);
+  const прежний = savedServers().find(item => item.host === адрес);
+  const entry = {
+    id: прежний?.id || crypto.randomUUID(),
+    name: String(body.name || прежний?.name || '').trim().slice(0, 60) || randomServerName(),
+    host: адрес, sshPort: прежний?.sshPort || 22, user: прежний?.user || 'root', hostKey: прежний?.hostKey || '',
+    channel: канал, publicIp: адрес, rtspPort: порт, hlsPort: прежний?.hlsPort || 0, publishKey: ключ,
+    addedAt: прежний?.addedAt || new Date().toISOString(),
+  };
+  saveConfig({ servers: [...savedServers().filter(item => item.id !== entry.id), entry].slice(0, 20), activeServerId: entry.id });
+  stopRtspPush();
+  if (relayProcess && config.outputMode === 'remote') startRtspPush();
+  log(`Сервер подключён: ${entry.name} · ${entry.host}`);
+  return entry;
 }
 
 async function deployServer(body) {
@@ -3693,6 +3724,19 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const server = await deployServer(body);
       return json(res, 201, { server: { id: server.id, name: server.name, host: server.host, rtspPort: server.rtspPort }, status: status() });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/servers/attach') {
+      const body = await readBody(req);
+      const server = await attachServer(body);
+      return json(res, 201, { server: { id: server.id, name: server.name, host: server.host }, status: status() });
+    }
+    // Ключ публикации отдаём только своему интерфейсу — чтобы человек мог его
+    // скопировать и передать другу. Наружу он не уходит: пульт закрыт по Host.
+    if (req.method === 'GET' && /^\/api\/servers\/[^/]+\/key$/.test(url.pathname)) {
+      const id = decodeURIComponent(url.pathname.split('/')[3]);
+      const server = savedServers().find(item => item.id === id);
+      if (!server) return json(res, 404, { error: 'Сервер не найден.' });
+      return json(res, 200, { key: server.publishKey || '', host: server.host, rtspPort: server.rtspPort || SERVER_RTSP_PORT });
     }
     if (req.method === 'POST' && /^\/api\/servers\/[^/]+\/edit$/.test(url.pathname)) {
       const id = decodeURIComponent(url.pathname.split('/')[3]);

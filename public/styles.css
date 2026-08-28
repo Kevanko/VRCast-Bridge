@@ -273,3 +273,105 @@ option{background:var(--dusk);color:var(--text)}
 .update-bar i{display:block;width:0;height:100%;border-radius:inherit;background:var(--iris);transition:width .3s var(--ease)}
 /* Кнопка сохранения сервера стоит в ряду обычных полей */
 #saveServer{width:100%;margin-top:2px}
+
+/* ─── Пульт: один словарь на всё приложение ─────────────────────────────────
+   Лампа значит одно и то же везде — в шапке, на кадре и на карточке сервера.
+   Зелёная: канал отвечает. Янтарная: поднимается. Красная: не отвечает.
+   Красный мигающий остаётся только за эфиром. */
+
+.server-list{margin:0 0 8px;padding:0;display:grid;gap:6px;list-style:none}
+.server-card{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:stretch;
+  border:1px solid var(--edge);border-radius:10px;background:var(--surface);overflow:hidden}
+.server-card.on{border-color:var(--iris);background:rgba(122,120,207,.10)}
+/* Имя и состояние в строку, адрес — во всю ширину под ними: у адреса длина
+   непредсказуемая, и обрезать его первым неправильно — это то, что копируют. */
+.card-pick{display:grid;grid-template-columns:8px minmax(0,1fr) auto;grid-template-areas:"lamp name state" ". host host";
+  align-items:center;gap:2px 9px;min-height:44px;padding:8px 4px 8px 10px;border:0;background:transparent;color:inherit;text-align:left}
+.card-pick .lamp{grid-area:lamp}
+.card-pick b{grid-area:name;min-width:0}
+.card-pick em{grid-area:state}
+.card-pick small{grid-area:host;min-width:0}
+.server-card b{display:block;font-size:11px;font-weight:600;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.server-card small{display:block;color:var(--muted);font:10px "JetBrains Mono",ui-monospace,monospace;
+  overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.server-card em{color:var(--muted);font-style:normal;font-size:10px;white-space:nowrap}
+.server-card.on em{color:var(--text)}
+.card-more{padding:0 10px;border:0;border-left:1px solid var(--edge);background:transparent;
+  color:var(--muted);font-size:14px;line-height:1;letter-spacing:.08em}
+.card-more:hover{background:var(--haze);color:var(--text)}
+.lamp{width:8px;height:8px;border-radius:50%;background:var(--edge)}
+.lamp.live{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.lamp.wait{background:var(--cue)}
+.lamp.down{background:var(--air)}
+.server-empty{padding:14px;border:1px dashed var(--edge);border-radius:10px;
+  color:var(--muted);font-size:10px;line-height:1.55;text-align:center}
+
+/* Форма добавления: два ясных случая вместо анкеты на все сразу */
+#addServerForm{display:grid;gap:8px;margin-bottom:8px;padding:10px;border:1px solid var(--edge);
+  border-radius:10px;background:var(--surface)}
+#addServerForm label{display:block;margin:0;color:var(--text);font-size:11px;font-weight:600}
+#addServerForm input{width:100%;min-height:36px;margin-top:5px;padding:0 10px;border:1px solid var(--edge);
+  border-radius:var(--r);background:var(--night);color:var(--text);font-size:11px;font-weight:400}
+#addServerForm input:focus-visible{border-color:var(--iris)}
+#addServerForm .field-help{margin:0}
+.form-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.form-error{margin:0;padding:7px 9px;border:1px solid rgba(207,90,99,.4);border-radius:var(--r);
+  background:rgba(207,90,99,.09);color:#f0a9ad;font-size:10px;line-height:1.45}
+.deploy-progress{margin:0;padding:7px 9px;border:1px solid var(--edge);border-radius:var(--r);
+  background:var(--haze);color:var(--muted);font-size:10px;line-height:1.45}
+
+/* Ключ для друзей — то, чем делятся, поэтому он на виду и копируется одним нажатием */
+.key-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;
+  margin:10px 0 4px;padding:8px 10px;border:1px solid var(--edge);border-radius:var(--r);background:var(--haze)}
+.key-row span{color:var(--muted);font:9px "JetBrains Mono",ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase}
+.key-row code{font:11px "JetBrains Mono",ui-monospace,monospace;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.key-row button{padding:4px;border:0;background:none;color:var(--muted)}
+.key-row button:hover{color:var(--text)}
+
+/* Сегменты: значение видно всегда, выбор — одно нажатие */
+.seg{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--edge);border-radius:8px;background:var(--night)}
+.seg.wide{display:grid;grid-template-columns:1fr 1fr}
+.seg button{min-height:26px;padding:0 10px;border:0;border-radius:6px;background:transparent;
+  color:var(--muted);font:500 10px/1 "Golos Text",system-ui,sans-serif;white-space:nowrap;transition:.15s var(--ease)}
+.seg button:hover{color:var(--text)}
+.seg button[aria-checked="true"]{background:var(--iris);color:#0d1017;font-weight:600}
+.menu-title{margin:2px 8px 8px;color:var(--muted);font:500 9px/1 "JetBrains Mono",ui-monospace,monospace;
+  letter-spacing:.14em;text-transform:uppercase}
+.menu-note{margin:8px 8px 2px;padding-top:8px;border-top:1px solid var(--edge);
+  color:var(--muted);font-size:10px;line-height:1.45}
+.player-menu .menu-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px}
+.player-menu .menu-row:hover{background:transparent}
+
+/* Три роли кнопки вместо семи наборов правил */
+.btn{min-height:36px;padding:0 14px;display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  border:1px solid var(--edge);border-radius:var(--r);background:var(--haze);color:var(--text);font-size:11px;
+  transition:.15s var(--ease)}
+.btn:hover:not(:disabled){border-color:var(--iris);background:var(--surface)}
+.btn:disabled{opacity:.5}
+.btn.primary{border-color:var(--iris);background:var(--iris);color:#0d1017;font-weight:600}
+.btn.primary:hover:not(:disabled){background:var(--iris-soft);border-color:var(--iris-soft)}
+.btn.danger{border-color:rgba(207,90,99,.45);background:rgba(207,90,99,.10);color:#f0a9ad}
+.btn.danger:hover:not(:disabled){background:rgba(207,90,99,.18);border-color:rgba(207,90,99,.7)}
+
+#serverDialog{width:min(420px,92vw);display:grid;gap:2px;padding:16px}
+#serverDialog label{display:block;margin:0 0 10px;color:var(--text);font-size:11px;font-weight:600}
+#serverDialog input{width:100%;min-height:36px;margin-top:5px;padding:0 10px;border:1px solid var(--edge);
+  border-radius:var(--r);background:var(--night);color:var(--text);font-size:11px;font-weight:400}
+#serverDialog input:focus-visible{border-color:var(--iris)}
+#serverDialog .dialog-head{margin-bottom:12px}
+#serverDialog .dialog-head b{font-size:16px}
+#serverDialog .dialog-head button{color:var(--muted);font-size:18px;line-height:1}
+#serverDialog .field-help{margin:-4px 0 10px}
+#serverDialog .dialog-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:12px}
+#serverDialog .dialog-actions .btn.primary{grid-column:1/-1}
+
+/* Скрытое — скрыто. Одно правило вместо десяти частных. */
+[hidden]{display:none!important}
+
+/* Движение уважает системную настройку. Точка эфира остаётся видимой:
+   она несёт информацию, поэтому вместо мигания — ровное свечение. */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;
+    transition-duration:.01ms!important}
+  .state-dot.live{animation:none;box-shadow:0 0 12px var(--air)}
+}

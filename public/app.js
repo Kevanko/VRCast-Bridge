@@ -141,28 +141,108 @@ function renderStorage(state){
 }
 
 function renderServers(state) {
-  const select=$('#serverSelect'), servers=state.config.servers||[], active=state.config.activeServerId||'';
-  const signature=JSON.stringify([servers.map(item=>[item.id,item.name,item.host,item.rtspPort]),active]);
-  if(select.dataset.signature!==signature){
-    select.dataset.signature=signature;
-    select.innerHTML=servers.length?servers.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.host)}</option>`).join(''):'<option value="">Серверов пока нет</option>';
-    if(active&&servers.some(item=>item.id===active))select.value=active;
-  }
-  $('#removeServer').disabled=!servers.length;
-  // Поля правки заполняем выбранным сервером, но не перебиваем то, что человек
-  // прямо сейчас печатает.
-  const выбран=servers.find(item=>item.id===select.value)||servers.find(item=>item.id===active)||null;
-  $('#serverEdit').hidden=!выбран;
-  if(выбран){
-    if(document.activeElement!==$('#serverRename')&&$('#serverRename').value!==выбран.name)$('#serverRename').value=выбран.name;
-    if(document.activeElement!==$('#serverAddress')&&$('#serverAddress').value!==выбран.host)$('#serverAddress').value=выбран.host;
-  }
+  const servers=state.config.servers||[], active=state.config.activeServerId||'';
   const remote=state.rtsp?.remote||{};
-  $('#serverHint').textContent=!servers.length?'Добавьте сервер — настрою его сам.'
+  const список=$('#serverList');
+  const подпись=JSON.stringify([servers.map(item=>[item.id,item.name,item.host]),active,remote.live,remote.reachable,state.config.outputMode]);
+  if(список.dataset.signature!==подпись){
+    список.dataset.signature=подпись;
+    список.innerHTML=servers.length?servers.map(item=>{
+      const выбран=item.id===active&&state.config.outputMode==='remote';
+      const лампа=!выбран?'':remote.live?'live':remote.reachable===false?'down':'wait';
+      const состояние=!выбран?'Не используется':remote.live?'Эфир идёт':remote.reachable===false?'Не отвечает':'Подключаюсь';
+      return `<li class="server-card${выбран?' on':''}" data-id="${escapeHtml(item.id)}">
+        <button class="card-pick" type="button" aria-pressed="${выбран}" title="Вещать через этот сервер">
+          <i class="lamp ${лампа}"></i>
+          <b>${escapeHtml(item.name)}</b>
+          <em>${состояние}</em>
+          <small>${escapeHtml(item.host)}</small>
+        </button>
+        <button class="card-more" type="button" data-edit="${escapeHtml(item.id)}" aria-label="Настроить «${escapeHtml(item.name)}»">···</button>
+      </li>`;
+    }).join(''):'<li class="server-empty">Сервера пока нет.<br>Он даёт постоянную ссылку — раздать её можно один раз и больше не менять.</li>';
+  }
+  $('#serverHint').textContent=!servers.length?'Есть свой VPS — подключите его, и ссылка перестанет меняться.'
     :remote.live?'Эфир идёт через ваш сервер.'
-    :state.config.outputMode==='remote'?'Подключаюсь…'
-    :'Сервер сохранён.';
+    :state.config.outputMode==='remote'?'Подключаюсь к серверу…'
+    :'Выберите сервер, чтобы вещать через него.';
 }
+
+// Карточка целиком — переключатель: нажали, значит вещаем через этот сервер.
+$('#serverList').addEventListener('click',async event=>{
+  const правка=event.target.closest('[data-edit]');
+  if(правка)return openServerDialog(правка.dataset.edit);
+  const карточка=event.target.closest('.server-card');
+  if(!карточка)return;
+  try{ render(await api(`/api/servers/${encodeURIComponent(карточка.dataset.id)}/activate`,{method:'POST'})); }
+  catch(error){ toast(error.message,true); }
+});
+
+const serverDialog=$('#serverDialog');
+let правимСервер='';
+
+function показатьОшибку(поле,текст){ поле.textContent=текст||''; поле.hidden=!текст; }
+
+async function openServerDialog(id){
+  const сервер=(ui.status?.config?.servers||[]).find(item=>item.id===id);
+  if(!сервер)return;
+  правимСервер=id;
+  $('#serverDialogTitle').textContent=сервер.name;
+  $('#serverRename').value=сервер.name;
+  $('#serverAddress').value=сервер.host;
+  $('#wipeConfirm').hidden=true;
+  $('#wipePassword').value='';
+  показатьОшибку($('#serverDialogError'),'');
+  $('#serverKeyValue').textContent='загружаю…';
+  if(!serverDialog.open)serverDialog.showModal();
+  try{
+    const ответ=await api(`/api/servers/${encodeURIComponent(id)}/key`);
+    $('#serverKeyValue').textContent=ответ.key||'ключа нет — сервер подключён без него';
+  }catch{ $('#serverKeyValue').textContent='не удалось прочитать'; }
+}
+
+$('#serverDialogClose').addEventListener('click',()=>serverDialog.close());
+$('#copyServerKey').addEventListener('click',async()=>{
+  const ключ=$('#serverKeyValue').textContent.trim();
+  if(!ключ||ключ.length<8)return toast('Ключа нет',true);
+  toast(await copyText(ключ)?'Ключ скопирован':'Не удалось скопировать',!await copyText(ключ));
+});
+$('#saveServer').addEventListener('click',async()=>{
+  const кнопка=$('#saveServer'); кнопка.disabled=true;
+  try{
+    const результат=await api(`/api/servers/${encodeURIComponent(правимСервер)}/edit`,{method:'POST',
+      body:JSON.stringify({name:$('#serverRename').value,host:$('#serverAddress').value})});
+    render(результат.status); serverDialog.close(); toast('Сохранено');
+  }catch(error){ показатьОшибку($('#serverDialogError'),error.message); }
+  finally{ кнопка.disabled=false; }
+});
+$('#serverForget').addEventListener('click',async()=>{
+  try{
+    const результат=await api(`/api/servers/${encodeURIComponent(правимСервер)}/remove`,{method:'POST',body:JSON.stringify({password:''})});
+    render(результат.status); serverDialog.close(); toast('Сервер убран из списка — на машине ничего не изменилось');
+  }catch(error){ показатьОшибку($('#serverDialogError'),error.message); }
+});
+// Первое нажатие раскрывает поле пароля, второе — сносит. Раньше здесь стояло
+// системное окно ввода, и его закрытие крестиком считалось за согласие: сервер
+// исчезал из списка, хотя человек отказался.
+$('#serverWipe').addEventListener('click',async()=>{
+  if($('#wipeConfirm').hidden){
+    $('#wipeConfirm').hidden=false;
+    $('#serverWipe').textContent='Снести';
+    $('#wipePassword').focus();
+    return;
+  }
+  const пароль=$('#wipePassword').value;
+  if(!пароль)return показатьОшибку($('#serverDialogError'),'Введите пароль root — без него удалить с машины нельзя.');
+  const кнопка=$('#serverWipe'); кнопка.disabled=true; кнопка.textContent='Сношу…';
+  try{
+    const результат=await api(`/api/servers/${encodeURIComponent(правимСервер)}/remove`,{method:'POST',body:JSON.stringify({password:пароль})});
+    render(результат.status); serverDialog.close();
+    toast(результат.cleaned?'Сервер очищен и убран из списка':'Убран из списка, но на машине не очистился');
+  }catch(error){ показатьОшибку($('#serverDialogError'),error.message); }
+  finally{ кнопка.disabled=false; кнопка.textContent='Снести'; }
+});
+serverDialog.addEventListener('close',()=>{ $('#serverWipe').textContent='Снести с машины…'; $('#wipeConfirm').hidden=true; });
 
 function renderTemplates(state) {
   const select=$('#templateSelect'), selected=select.value, templates=state.templates||[];
@@ -246,7 +326,15 @@ function render(state) {
   const тяжело=слабый&&(ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30));
   const ratio=Number(state.performance?.realtimeRatio||0); $('#streamHealth').textContent=тяжело?'видеокарта не кодирует — поставьте 720p и 30 кадров':streamReady?(ratio&&ratio<0.97?`отстаёт на ${Math.round((1-ratio)*100)}%`:'идёт вовремя'):streamStalled?'не успевает — снизьте качество':'набирает буфер';
   $('#queueCount').textContent=state.queue.length; $('#logs').textContent=state.logs.join('\n')||'Журнал пуст';
-  $('#monitorBadge').textContent=state.running?(state.activeKind==='screen'?'Экран':'Видео'):'Нет эфира';
+  // Показания выхода всегда на виду: что уходит в эфир, какая чёткость и
+  // сколько кадров. Раньше это было спрятано под шестерёнкой, и автопонижение
+  // качества человек замечал только в журнале.
+  const выход=state.activeKind==='screen'?'screen':'queue';
+  const чёткость=выход==='screen'?state.config.quality:state.config.mediaQuality;
+  const кадры=выход==='screen'?state.config.fps:state.config.mediaFps;
+  $('#monitorBadge').textContent=state.running
+    ?`${state.activeKind==='screen'?'Экран':'Видео'} · ${чёткость} · ${кадры} к/с`
+    :'Нет эфира';
   const monitor=$('#monitor');
   monitor.classList.toggle('tally-live',Boolean(state.running&&streamReady));
   monitor.classList.toggle('tally-cue',Boolean(state.running&&!streamReady));
@@ -328,6 +416,20 @@ $('#windowPickerList').addEventListener('click',event=>{
   $('#windowSource').dispatchEvent(new Event('change'));
 });
 document.addEventListener('click',event=>{ if(!event.target.closest('#windowPicker'))openWindowPicker(false); });
+// Стрелки по списку окон: у нативного списка это было бесплатно, свой список
+// без этого хуже того, что заменил.
+$('#windowPickerList').addEventListener('keydown',event=>{
+  const шаг={ArrowDown:1,ArrowUp:-1}[event.key];
+  if(шаг){
+    event.preventDefault();
+    const строки=[...$$('#windowPickerList .app-row')];
+    if(!строки.length)return;
+    const текущая=строки.indexOf(document.activeElement);
+    строки[(текущая+шаг+строки.length)%строки.length].focus();
+    return;
+  }
+  if(event.key==='Escape'){ openWindowPicker(false); $('#windowPickerButton').focus(); }
+});
 
 function fillSelect(select, items, value, placeholder, mapper) {
   select.innerHTML=`<option value="">${placeholder}</option>`+items.map(mapper).join(''); if(value&&[...select.options].some(option=>option.value===String(value)))select.value=String(value);
@@ -349,7 +451,7 @@ async function refreshWindows() {
 
 function configPayload() {
   const selectedWindow=ui.sources.windows.find(item=>item.handle===$('#windowSource').value);
-  return { outputMode:ui.output,activeServerId:$('#serverSelect').value,quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100 };
+  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100 };
 }
 async function saveConfig(applyLive = false) { return api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),applyLive})}); }
 
@@ -400,26 +502,67 @@ $('#saveTemplate').addEventListener('click',async()=>{const button=$('#saveTempl
 async function loadTemplate(append){const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}/load`,{method:'POST',body:JSON.stringify({append})}));toast(append?'Шаблон добавлен к очереди':'Шаблон загружен');}catch(error){toast(error.message,true);}}
 $('#loadTemplate').addEventListener('click',()=>loadTemplate(false)); $('#appendTemplate').addEventListener('click',()=>loadTemplate(true));
 $('#deleteTemplate').addEventListener('click',async()=>{const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}`,{method:'DELETE'}));$('#templateName').value='';toast('Шаблон удалён');}catch(error){toast(error.message,true);}});
-$('#addServerToggle').addEventListener('click',()=>{const form=$('#addServerForm');form.hidden=!form.hidden;if(!form.hidden)$('#serverHost').focus();});
-$('#serverSelect').addEventListener('change',async event=>{if(!event.target.value)return;$('#serverRename').value='';$('#serverAddress').value='';try{render(await api(`/api/servers/${encodeURIComponent(event.target.value)}/activate`,{method:'POST'}));toast('Эфир переключён на выбранный сервер');}catch(error){toast(error.message,true);}});
-$('#deployServer').addEventListener('click',async()=>{
-  const button=$('#deployServer'),host=$('#serverHost').value.trim(),password=$('#serverPassword').value;
-  if(!host||!password)return toast('Нужны адрес сервера и пароль root',true);
-  button.disabled=true;button.textContent='Настраиваю сервер…';
-  try{
-    const result=await api('/api/servers',{method:'POST',body:JSON.stringify({host,password,name:$('#serverName').value})});
-    $('#serverPassword').value='';$('#serverHost').value='';$('#serverName').value='';
-    $('#addServerForm').hidden=true;
-    render(result.status);toast(`Сервер готов: ${result.server.name}`);
-  }catch(error){toast(error.message,true);}
-  finally{button.disabled=false;button.textContent='Развернуть и подключить';}
+// Форма добавления: два ясных случая вместо одной анкеты на всё.
+// «Уже настроен» — вставили адрес и ключ, который выдал сервер при установке.
+// «Настроить с нуля» — пароль root, и программа сама всё поставит.
+let режимДобавления='attach';
+
+function выбратьРежим(режим){
+  режимДобавления=режим;
+  for(const кнопка of $$('#addMode button'))кнопка.setAttribute('aria-checked',String(кнопка.dataset.mode===режим));
+  $('#attachFields').hidden=режим!=='attach';
+  $('#deployFields').hidden=режим!=='deploy';
+  $('#addServerSubmit').textContent=режим==='attach'?'Подключить':'Настроить сервер';
+  показатьОшибку($('#addServerError'),'');
+}
+
+function открытьДобавление(открыть){
+  const форма=$('#addServerForm');
+  форма.hidden=!открыть;
+  $('#addServerToggle').setAttribute('aria-expanded',String(открыть));
+  $('#addServerToggle').hidden=открыть;
+  if(открыть){ выбратьРежим('attach'); $('#serverHost').focus(); }
+  else { показатьОшибку($('#addServerError'),''); $('#deployProgress').hidden=true; }
+}
+
+$('#addServerToggle').addEventListener('click',()=>открытьДобавление(true));
+$('#addServerCancel').addEventListener('click',()=>открытьДобавление(false));
+$('#addMode').addEventListener('click',event=>{
+  const кнопка=event.target.closest('button[data-mode]');
+  if(кнопка)выбратьРежим(кнопка.dataset.mode);
 });
-$('#removeServer').addEventListener('click',async()=>{
-  const id=$('#serverSelect').value;if(!id)return;
-  const password=prompt('Пароль root, чтобы убрать медиасервер с машины. Оставьте пустым — сервер просто исчезнет из списка, на машине ничего не изменится.')??'';
-  try{const result=await api(`/api/servers/${encodeURIComponent(id)}/remove`,{method:'POST',body:JSON.stringify({password})});
-    render(result.status);toast(result.cleaned?'Сервер очищен и удалён из списка':'Сервер удалён из списка');
-  }catch(error){toast(error.message,true);}
+
+$('#addServerForm').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const кнопка=$('#addServerSubmit');
+  const адрес=$('#serverHost').value.trim();
+  const имя=$('#serverName').value.trim();
+  if(!адрес)return показатьОшибку($('#addServerError'),'Укажите адрес сервера.');
+  показатьОшибку($('#addServerError'),'');
+  кнопка.disabled=true;
+  try{
+    if(режимДобавления==='attach'){
+      const ключ=$('#serverKey').value.trim();
+      if(!ключ)throw new Error('Нужен ключ публикации. Его показывает приложение хозяина сервера в настройках этого сервера.');
+      кнопка.textContent='Проверяю…';
+      const результат=await api('/api/servers/attach',{method:'POST',body:JSON.stringify({host:адрес,name:имя,key:ключ})});
+      render(результат.status); открытьДобавление(false);
+      $('#serverHost').value=''; $('#serverName').value=''; $('#serverKey').value='';
+      toast(`Сервер подключён: ${результат.server.name}`);
+    } else {
+      const пароль=$('#serverPassword').value;
+      if(!пароль)throw new Error('Нужен пароль root — им программа поставит себя на машину.');
+      кнопка.textContent='Настраиваю…';
+      ui.deploying=true; $('#deployProgress').hidden=false;
+      $('#deployProgress').textContent='Подключаюсь по SSH · обычно одна-две минуты';
+      const результат=await api('/api/servers',{method:'POST',body:JSON.stringify({host:адрес,password:пароль,name:имя})});
+      render(результат.status); открытьДобавление(false);
+      $('#serverHost').value=''; $('#serverName').value=''; $('#serverPassword').value='';
+      toast(`Сервер готов: ${результат.server.name}`);
+    }
+  }catch(error){ показатьОшибку($('#addServerError'),error.message); }
+  finally{ ui.deploying=false; $('#deployProgress').hidden=true; кнопка.disabled=false;
+    кнопка.textContent=режимДобавления==='attach'?'Подключить':'Настроить сервер'; }
 });
 // В WebView2 navigator.clipboard отказывает, когда окно не в фокусе, поэтому
 // нужен запасной путь через скрытое поле — иначе кнопка молча ничего не делает.
@@ -484,6 +627,40 @@ $('#speedSelect').addEventListener('click',async()=>{const current=Number($('#sp
 $('#loopSelect').addEventListener('click',async()=>{const current=$('#loopSelect').dataset.value||'once';
   const next=LOOP_STEPS[(LOOP_STEPS.findIndex(item=>item[0]===current)+1)%LOOP_STEPS.length][0];
   paintLoop(next);ui.loopPendingUntil=Date.now()+1500;await playback('loop',{mode:next});paintLoop(next);ui.loopPendingUntil=0;});
+// Сегменты: один клик — одно изменение, без второго выпадающего списка
+// поверх первого. Значение продолжает жить в скрытом select, поэтому весь
+// остальной код (сохранение настроек, восстановление при запуске) не менялся.
+function paintSegments(select) {
+  const box=document.querySelector(`.seg[data-for="${select.id}"]`);
+  if(!box)return;
+  for(const button of box.children)button.setAttribute('aria-checked',String(button.dataset.value===select.value));
+}
+
+function buildSegments() {
+  for(const box of $$('.seg[data-for]')){
+    const select=document.getElementById(box.dataset.for);
+    if(!select)continue;
+    box.innerHTML=[...select.options].map(option=>
+      `<button type="button" role="radio" aria-checked="false" data-value="${escapeHtml(option.value)}">${escapeHtml(option.dataset.short||option.textContent)}</button>`).join('');
+    box.addEventListener('click',event=>{
+      const button=event.target.closest('button[data-value]');
+      if(!button||button.dataset.value===select.value)return;
+      select.value=button.dataset.value;
+      paintSegments(select);
+      select.dispatchEvent(new Event('change'));
+    });
+    box.addEventListener('keydown',event=>{
+      const шаг={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[event.key];
+      if(!шаг)return;
+      event.preventDefault();
+      const кнопки=[...box.children];
+      const следующая=кнопки[(кнопки.indexOf(document.activeElement)+шаг+кнопки.length)%кнопки.length];
+      следующая.focus(); следующая.click();
+    });
+    paintSegments(select);
+  }
+}
+
 function paintVolume(input, output) { const value=Number(input.value); output.value=`${value}%`; input.style.setProperty('--volume',`${value/input.max*100}%`); }
 $('#mediaVolume').addEventListener('input',event=>paintVolume(event.target,$('#mediaVolumeValue')));
 $('#mediaVolume').addEventListener('change',async event=>{if(ui.status?.activeKind==='queue')playback('volume',{volume:Number(event.target.value)/100});else try{await saveConfig();}catch(error){toast(error.message,true);}});
@@ -497,7 +674,7 @@ $('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast:/
 $('#appSoundSettings').addEventListener('click',()=>{window.location.href='vrcast://app-sound';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
 async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);paintPreviewToggle();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);// Снимок источника обновляем только когда открыта вкладка «Экран», окно видно и эфир не идёт: раньше программа бесконечно порождала ffmpeg каждые две секунды даже на простое.
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);// Снимок источника обновляем только когда открыта вкладка «Экран», окно видно и эфир не идёт: раньше программа бесконечно порождала ffmpeg каждые две секунды даже на простое.
 // Пока открыта вкладка «Экран» и эфир не идёт, сервер держит живой поток
 // картинки — забираем её пятнадцать раз в секунду. Раз в две секунды просим
 // сервер поддержать поток: без этого он гаснет сам через пять секунд.
@@ -548,13 +725,18 @@ paintPreviewSound();
 // Меню настроек — как у видеосервисов: одна шестерёнка в углу кадра.
 const playerMenu=$('#playerMenu');
 function togglePlayerMenu(open){
-  playerMenu.hidden=open===undefined?!playerMenu.hidden:!open;
-  $('#monitor').classList.toggle('menu-open',!playerMenu.hidden);
-  $('#playerSettings').classList.toggle('on',!playerMenu.hidden);
+  const было=!playerMenu.hidden;
+  playerMenu.hidden=open===undefined?было:!open;
+  const открыто=!playerMenu.hidden;
+  $('#monitor').classList.toggle('menu-open',открыто);
+  $('#playerSettings').classList.toggle('on',открыто);
+  $('#playerSettings').setAttribute('aria-expanded',String(открыто));
+  // Закрыли — фокус возвращается на шестерёнку, а не повисает в пустоте.
+  if(было&&!открыто&&playerMenu.contains(document.activeElement))$('#playerSettings').focus();
 }
-$('#playerSettings').addEventListener('click',event=>{event.stopPropagation();togglePlayerMenu();});
-playerMenu.addEventListener('click',event=>event.stopPropagation());
-document.addEventListener('click',()=>togglePlayerMenu(false));
+$('#playerSettings').addEventListener('click',()=>togglePlayerMenu());
+
+document.addEventListener('click',event=>{ if(!event.target.closest('#playerMenu, #playerSettings'))togglePlayerMenu(false); });
 document.addEventListener('keydown',event=>{ if(event.key==='Escape')togglePlayerMenu(false); });
 
 $('#copyLogs').addEventListener('click',async()=>{
@@ -573,19 +755,6 @@ async function startSource(){
   finally{ button.disabled=false; }
 }
 
-// Название и адрес выбранного сервера правятся без пароля: ключ публикации
-// уже сохранён, и переезд с голого IP на домен ничего не ломает.
-$('#saveServer').addEventListener('click',async()=>{
-  const id=$('#serverSelect').value;
-  if(!id)return toast('Сначала выберите сервер',true);
-  const button=$('#saveServer');button.disabled=true;
-  try{
-    const result=await api(`/api/servers/${encodeURIComponent(id)}/edit`,{method:'POST',
-      body:JSON.stringify({name:$('#serverRename').value,host:$('#serverAddress').value})});
-    render(result.status);toast('Сохранено — скопируйте ссылку заново');
-  }catch(error){ toast(error.message,true); }
-  finally{ button.disabled=false; }
-});
 
 // Обновление: окно появляется само, когда на GitHub вышла версия новее.
 // «Позже» откладывает на сутки, «Пропустить» — до следующей версии.
