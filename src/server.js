@@ -2,13 +2,13 @@ import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
-import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
+import { basename, dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.48.0';
+const APP_VERSION = '0.49.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -50,8 +50,11 @@ const WEBRTC_PORT = RTSP_PORT + 100;
 const HOST = '127.0.0.1';
 // Прямая ссылка на файл или плейлист: разбирать её через yt-dlp незачем.
 const DIRECT_LIVE = /[.](m3u8|mpd)([?#]|$)/i;
-const DIRECT_FILE = /[.](mp4|mkv|webm|mov|avi|m4v|mp3|m4a|aac|flac|wav|ogg|opus|ts)([?#]|$)/i;
-const MEDIA_EXTENSIONS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v', '.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus']);
+// Один список на оба случая: раньше по ссылке .ts принимался, а тот же файл
+// с диска — нет.
+const MEDIA_EXTENSIONS = new Set(['.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v', '.ts',
+  '.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus']);
+const DIRECT_FILE = new RegExp(`[.](${[...MEDIA_EXTENSIONS].map(e => e.slice(1)).join('|')})([?#]|$)`, 'i');
 
 mkdirSync(HLS_DIR, { recursive: true });
 mkdirSync(THUMB_DIR, { recursive: true });
@@ -77,7 +80,7 @@ const defaults = {
   captureMode: 'monitor', captureMonitorId: '', captureWindowHandle: '', regionX: 0, regionY: 0,
   regionWidth: 1280, regionHeight: 720, audioMode: 'system', captureAudioDevice: '',
   audioOutputId: '', audioProcessId: '', loopMode: 'once', playbackSpeed: 1,
-  captureVolume: 1.5, mediaVolume: 1, mediaQuality: '720p', mediaFps: 60, previewDelay: 0, localAppVolume: 1, rtspTransport: 'tcp',
+  captureVolume: 1.5, mediaVolume: 1, mediaQuality: '720p', mediaFps: 60, localAppVolume: 1,
   cacheRoot: '',
   videoBitrate: 0,
   autoQuality: true,
@@ -92,10 +95,6 @@ function loadConfig() {
 let config = loadConfig();
 // Разовый перенос старой настройки: раньше по умолчанию стояли 5 секунд
 // задержки предпросмотра под HLS, сейчас канал мгновенный и ждать нечего.
-if (!config.previewDelayReset) {
-  config = { ...config, previewDelay: 0, previewDelayReset: true };
-  try { saveConfig({ previewDelay: 0, previewDelayReset: true }); } catch {}
-}
 let queue = loadQueue();
 let templates = loadTemplates();
 let activeProcess = null;
@@ -107,6 +106,8 @@ let pauseFrameProcess = null;
 let relayStartedAt = 0;
 let relayProfile = null;
 let mediaMtxProcess = null;
+let mediaMtxFailures = 0;
+let mediaMtxLastError = '';
 const rtspPushProcesses = new Map();
 let lastRemotePushError = '';
 const rtspPushTimers = new Map();
@@ -321,16 +322,37 @@ function saveConfig(next) {
   writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
 }
 
+// Дочитывает то, чего не хватает, не блокируя работу: длительность, кодеки,
+// пригодность для Unity. Идёт по одному файлу за раз, чтобы не устраивать
+// толпу ffprobe на большом списке.
+async function fillMissingInfo(items) {
+  for (const item of items) {
+    if (!item.local || item.probed) continue;
+    try {
+      const сведения = await mediaInfoAsync(item.sourceUrl);
+      Object.assign(item, {
+        duration: item.duration || сведения.duration || null,
+        hasVideo: сведения.hasVideo, hasAudio: сведения.hasAudio,
+        videoCodec: сведения.videoCodec, audioCodec: сведения.audioCodec,
+        unityCompatible: Boolean(сведения.unityCompatible), probed: true,
+      });
+      if (сведения.hasVideo && !item.thumbnail) generateThumbnail(item);
+    } catch { item.probed = true; }
+  }
+  saveQueue();
+}
+
 function normalizeQueueItem(raw, freshId = false) {
   if (!raw || typeof raw !== 'object' || typeof raw.sourceUrl !== 'string' || !raw.sourceUrl.trim()) return null;
   const local = Boolean(raw.local);
   const sourceUrl = local ? resolve(raw.sourceUrl) : raw.sourceUrl.trim();
   if (local && (!existsSync(sourceUrl) || !statSync(sourceUrl).isFile())) return null;
   if (!local && !validWebUrl(sourceUrl)) return null;
-  let technical = {};
-  if (local && (!raw.videoCodec || raw.unityCompatible === undefined)) {
-    try { technical = mediaInfo(sourceUrl); } catch {}
-  }
+  // Разбор файла тут больше не делается. Условие «нет кодека» истинно для
+  // любого mp3, и шаблон из шестидесяти песен превращался в шестьдесят
+  // блокирующих запусков ffprobe подряд — процесс замирал на минуты. Файлы
+  // разбираются отдельно и без блокировки, сразу после добавления.
+  const technical = {};
   return {
     id: freshId ? crypto.randomUUID() : String(raw.id || crypto.randomUUID()),
     title: String(raw.title || (local ? basename(sourceUrl) : sourceUrl)).slice(0, 500), sourceUrl,
@@ -339,7 +361,7 @@ function normalizeQueueItem(raw, freshId = false) {
     hasVideo: technical.hasVideo ?? raw.hasVideo !== false, hasAudio: technical.hasAudio ?? raw.hasAudio !== false,
     videoCodec: String(technical.videoCodec || raw.videoCodec || ''), audioCodec: String(technical.audioCodec || raw.audioCodec || ''),
     unityCompatible: Boolean(technical.unityCompatible ?? raw.unityCompatible),
-    unavailable: Boolean(raw.unavailable),
+    unavailable: Boolean(raw.unavailable), probed: Boolean(raw.probed),
     direct: Boolean(raw.direct), live: Boolean(raw.live),
   };
 }
@@ -415,6 +437,7 @@ function applyQueueTemplate(id, append = false) {
   const template = templates.find(item => item.id === String(id));
   if (!template) throw new Error('Шаблон не найден.');
   const restored = template.items.map(item => normalizeQueueItem(item, true)).filter(Boolean);
+  fillMissingInfo(restored).catch(() => {});
   if (!restored.length) throw new Error('В шаблоне не осталось доступных медиафайлов.');
   if (activeKind === 'queue') stopActive();
   queue = append ? [...queue, ...restored].slice(0, 500) : restored;
@@ -884,7 +907,7 @@ function remoteRtspTarget() {
     // проходит — Quest, строгие сети, старые плееры. Задержка больше, зато берёт везде.
     // Запасной HLS с MediaMTX не отдаётся напрямую: сервер отвечает перенаправлением
     // с cookie, за которым плееры не идут. Для Quest работает режим «Друзья».
-    hlsUrl: '',
+
     publishUrl: `rtsp://vrcast:${encodeURIComponent(server.publishKey || '')}@${server.host}:${port}/${channel}` };
 }
 
@@ -929,7 +952,7 @@ function unityCompatibility() {
       available: queueReady, url: queueReady ? `${unityBaseAddress()}/media/unity-queue.mp4` : '', scope: unityPublic ? 'public' : 'local' },
     capture: { ...unityCapture, elapsed: unityCaptureStartedAt ? (Date.now() - unityCaptureStartedAt) / 1000 : 0,
       available: captureReady, url: captureReady ? `${unityBaseAddress()}/media/unity-capture.mp4` : '', scope: unityPublic ? 'public' : 'local' },
-    liveUnsupported: true };
+    };
 }
 
 // ─── Автообновление ───────────────────────────────────────────────────────
@@ -1234,7 +1257,7 @@ function status() {
       realtimeRatio: Number(hlsHealth.realtimeRatio.toFixed(2)), segmentAge: hlsHealth.segmentAge === null ? null : Number(hlsHealth.segmentAge.toFixed(1)) },
     stream: { ready: hlsHealth.ready, segmentCount: hlsHealth.segmentCount,
       state: !relayProcess ? 'offline' : hlsHealth.ready ? 'ready' : hlsHealth.segmentAge !== null && hlsHealth.segmentAge >= 4 ? 'stalled' : 'starting' },
-    compatibility: { live: { player: 'AVPro', supported: true }, unity: unityCompatibility() },
+    compatibility: { unity: unityCompatibility() },
     // linkReady — единственный честный признак «ссылку уже можно вставлять».
     linkReady: config.outputMode === 'remote' ? remoteChannelLive : channelLive,
     rtsp: { available: Boolean(mediaMtxProcess && rtspPushProcesses.has('local')), live: channelLive, url: rtspAddress(),
@@ -1242,7 +1265,7 @@ function status() {
       remote: config.outputMode === 'remote'
         ? { configured: Boolean(remoteRtspTarget()), live: remoteChannelLive, pushing: rtspPushProcesses.has('remote'), reachable: remoteReachable,
             channel: remoteRtspTarget()?.channel || '', channelRejected: remoteChannelRejected,
-            url: remoteRtspTarget()?.playUrl || '', hlsUrl: remoteRtspTarget()?.hlsUrl || '' }
+            url: remoteRtspTarget()?.playUrl || '' }
         : null },
     tunnel: { state: tunnelState, ready: Boolean(tunnelUrl), provider: tunnelProvider, expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError },
     config: { ...config,
@@ -1251,22 +1274,24 @@ function status() {
     playbackUrl: publicAddress(),
     webrtcUrl: mediaMtxProcess ? `http://127.0.0.1:${WEBRTC_PORT}/live/whep` : '',
     localPlaybackUrl: `http://127.0.0.1:${PORT}/stream/live.m3u8`,
-    lanAddresses: getLanAddresses().map(ip => `http://${ip}:${PORT}/stream/live.m3u8`),
     logs: logLines, logFolder: DATA_DIR, update: updateState,
   };
 }
 
 // ponytail: грубый счётчик для UI — наличие каталога кеша, без обхода файлов.
 // Точную проверку содержимого делает cachedMediaPath в момент воспроизведения.
-function cachedReadyCount() {
-  let directories;
-  try { directories = new Set(readdirSync(mediaCacheDir())); } catch { directories = new Set(); }
-  return queue.filter(item => item.local || (directories.has(item.id) && !mediaCacheJobs.has(item.id))).length;
+// Что уже лежит в кеше. Раньше на каждый запрос состояния (а их 1,25 в
+// секунду, круглосуточно) шёл обход каталога кеша синхронным readdirSync —
+// прямо во время эфира. Теперь набор обновляется по событиям: при уборке,
+// после удачной загрузки и при удалении трека.
+let готовыеВКеше = new Set();
+
+function обновитьГотовые() {
+  try { готовыеВКеше = new Set(readdirSync(mediaCacheDir())); } catch { готовыеВКеше = new Set(); }
 }
 
-function maskSecret(value) {
-  if (value.length < 18) return '••••••••';
-  return `${value.slice(0, 14)}••••••••${value.slice(-4)}`;
+function cachedReadyCount() {
+  return queue.filter(item => item.local || (готовыеВКеше.has(item.id) && !mediaCacheJobs.has(item.id))).length;
 }
 
 function getLanAddresses() {
@@ -1664,48 +1689,56 @@ function stopAudioHelper(child) {
 }
 
 function stopWindowWatch() {
+  stopWindowWatcher();
   if (windowWatchTimer) clearInterval(windowWatchTimer);
   windowWatchTimer = null; windowCaptureState = null;
 }
 
-async function getCapturedWindowState(handle) {
-  const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
-  if (!existsSync(helper)) return { exists: false, minimized: false, width: 0, height: 0 };
-  const result = await spawnCollect(helper, ['--state', '--hwnd', String(handle)], 1500);
-  try { return result.status === 0 ? JSON.parse(result.stdout) : { exists: false, minimized: false, width: 0, height: 0 }; }
-  catch { return { exists: false, minimized: false, width: 0, height: 0 }; }
+// Свёрнуто окно или закрыто — сообщает сам захватчик: он держит окно и знает
+// об этом первым. Раньше об этом спрашивал отдельный процесс каждые три
+// секунды, притом что помощник уже работал рядом.
+// Пока окно свёрнуто, захвата нет — и о его возвращении сообщить некому.
+// На это время запускаем тот же помощник в режиме наблюдения: он ничего не
+// снимает и только сообщает, когда окно вернулось или закрылось.
+let windowWatcher = null;
+
+function stopWindowWatcher() {
+  if (!windowWatcher) return;
+  try { windowWatcher.kill('SIGTERM'); } catch {}
+  windowWatcher = null;
 }
 
-function watchCapturedWindow(handle, initialState) {
-  stopWindowWatch();
-  windowCaptureState = initialState;
-  let checking = false;
-  windowWatchTimer = setInterval(async () => {
-    if (checking) return;
-    if (activeKind !== 'screen' || config.captureMode !== 'window' || String(config.captureWindowHandle) !== String(handle)) return stopWindowWatch();
-    checking = true;
-    try {
-      const selected = await getCapturedWindowState(handle);
-      if (windowCaptureState === null || activeKind !== 'screen' || String(config.captureWindowHandle) !== String(handle)) return;
-      // Размер окна в это состояние больше не входит: перетаскивание за угол
-      // меняло его десятки раз, и каждый раз захват перезапускался целиком —
-      // именно отсюда бралось провисание эфира при изменении окна. Размер
-      // теперь отрабатывает сам захватчик, без разрыва потока.
-      const nextState = !selected.exists ? 'missing' : selected.minimized ? 'minimized' : 'visible';
-      if (windowCaptureState && nextState !== windowCaptureState) {
-        log(nextState === 'visible' ? 'Окно снова на экране — захват продолжен' : 'Окно свернуто — показывается заглушка');
-        windowCaptureState = nextState;
-        await startScreen();
-      } else windowCaptureState = nextState;
-    } catch (error) { log(`Наблюдение за окном: ${error.message}`); }
-    finally { checking = false; }
-    // Раз в три секунды: размер окна нас больше не волнует, а исчезновение или
-    // сворачивание — событие редкое. Каждая проверка запускает отдельный
-    // процесс, и делать это чаще незачем.
-  }, 3000);
+function startWindowWatcher(handle) {
+  stopWindowWatcher();
+  const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
+  if (!existsSync(helper)) return;
+  const child = spawn(helper, ['--watch', '--hwnd', String(handle)], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  windowWatcher = child;
+  child.stderr.setEncoding('utf8');
+  let остаток = '';
+  child.stderr.on('data', chunk => {
+    остаток = (остаток + chunk).slice(-400);
+    const строки = остаток.split(String.fromCharCode(10));
+    остаток = строки.pop() || '';
+    for (const строка of строки) {
+      const метка = строка.match(/^state=(\w+)$/);
+      if (метка) applyWindowState(метка[1]);
+    }
+  });
+  child.on('close', () => { if (windowWatcher === child) windowWatcher = null; });
+}
+
+function applyWindowState(state) {
+  if (activeKind !== 'screen' || config.captureMode !== 'window') return;
+  const следующее = state === 'gone' ? 'missing' : state;
+  if (!windowCaptureState || следующее === windowCaptureState) { windowCaptureState = следующее; return; }
+  windowCaptureState = следующее;
+  log(следующее === 'visible' ? 'Окно снова на экране — захват продолжен' : 'Окно свернуто — показывается заглушка');
+  startScreen().catch(error => log(`Наблюдение за окном: ${error.message}`));
 }
 
 function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null) {
+  stopLivePreview();
   stopping = false;
   activeKind = 'screen';
   log(`Захват экрана · ${encoder.label} · ${config.quality}/${config.fps} FPS`);
@@ -1769,7 +1802,27 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
       activeWindowProcess = windowCapture;
       windowCapture.stdout.on('error', () => {});
       windowCapture.stdout.pipe(child.stdio[4]);
-      attachProcessLogs(windowCapture, 'Window capture');
+      windowCapture.stderr.setEncoding('utf8');
+      let остатокСостояния = '';
+      windowCapture.stderr.on('data', chunk => {
+        остатокСостояния = (остатокСостояния + chunk).slice(-400);
+        const строки = остатокСостояния.split(String.fromCharCode(10));
+        остатокСостояния = строки.pop() || '';
+        for (const строка of строки) {
+          const метка = строка.match(/^state=(\w+)$/);
+          if (метка) applyWindowState(метка[1]);
+          else if (строка.trim()) logDetail(`Window capture: ${строка.trim()}`);
+        }
+      });
+      windowCapture.on('close', code => {
+        // Смерть захватчика раньше проходила молча: эфир превращался в
+        // заставку, и никто этого не замечал. У звукового помощника такой
+        // перезапуск есть — теперь он есть и здесь.
+        if (activeWindowProcess !== windowCapture || stopping || shuttingDown || !activeProcess || !code) return;
+        activeWindowProcess = null; windowHelperKey = '';
+        log(`Захват окна неожиданно остановился (код ${code}) — перезапускаю`);
+        startScreen().catch(error => log(`Перезапуск захвата: ${error.message}`));
+      });
     }
     windowHelperKey = [config.captureWindowHandle, windowHelperArgs[3], windowHelperArgs[5], windowHelperArgs[7]].join('|');
   }
@@ -1851,7 +1904,7 @@ async function startScreenInner() {
   if (config.captureMode === 'window') {
     if (!/^\d+$/.test(String(config.captureWindowHandle))) throw new Error('Выберите окно для захвата.');
     selectedWindow = (await listWindows()).find(item => item.handle === String(config.captureWindowHandle)) || null;
-    windowCaptureState = !selectedWindow ? 'missing' : selectedWindow.minimized ? 'minimized' : 'visible';
+      windowCaptureState = !selectedWindow ? 'missing' : selectedWindow.minimized ? 'minimized' : 'visible';
   } else if (config.captureMode === 'monitor') {
     const monitors = await listMonitors();
     captureRect = monitors.find(item => item.id === config.captureMonitorId) || monitors.find(item => item.primary) || monitors[0];
@@ -1863,9 +1916,12 @@ async function startScreenInner() {
   if (config.captureMode === 'window' && windowCaptureState === 'visible') {
     const captureWidth = width;
     const captureHeight = height;
+    stopWindowWatcher();
     windowHelperArgs = ['--hwnd', String(config.captureWindowHandle), '--width', String(captureWidth), '--height', String(captureHeight), '--fps', String(profile.fps)];
-    args.push('-fflags', 'nobuffer', '-thread_queue_size', '8', '-use_wallclock_as_timestamps', '1', '-f', 'rawvideo', '-pixel_format', 'bgra', '-video_size', `${captureWidth}x${captureHeight}`, '-framerate', String(profile.fps), '-i', 'pipe:4');
+    args.push('-fflags', 'nobuffer', '-thread_queue_size', '8', '-use_wallclock_as_timestamps', '1', '-f', 'rawvideo', '-pixel_format', 'nv12', '-video_size', `${captureWidth}x${captureHeight}`, '-framerate', String(profile.fps), '-i', 'pipe:4');
   } else if (config.captureMode === 'window') {
+    // Окна на экране нет: показываем подложку и ждём его возвращения.
+    startWindowWatcher(config.captureWindowHandle);
     args.push('-re', '-f', 'lavfi', '-i', `color=c=0x24202c:s=${width}x${height}:r=${profile.fps}`);
   } else if (config.captureMode === 'monitor' && (ddagrabOutput = await ddagrabIndexFor(captureRect)) !== null) {
     // Это не генератор вроде color или anullsrc, а живой источник со своим
@@ -1906,7 +1962,6 @@ async function startScreenInner() {
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile));
   runScreenProcess(args, audioHelperArgs, windowHelperArgs);
   startPublicTunnel();
-  if (config.captureMode === 'window') watchCapturedWindow(config.captureWindowHandle, windowCaptureState);
 }
 
 // Локальный RTSP-сервер (MediaMTX): AVPro в VRChat играет rtspt:// с задержкой
@@ -1914,7 +1969,11 @@ async function startScreenInner() {
 // чтение открыто (этот ПК + локальная сеть). HLS остаётся для туннеля и Quest.
 function startMediaMtx() {
   if (!tools.mediamtx || mediaMtxProcess) return;
-  const configFile = join(DATA_DIR, 'mediamtx.yml');
+  // Имя файла настроек привязано к порту. Раньше он был один на всех, и две
+  // запущенные копии программы (например, обычная и запасная на другом порту)
+  // переписывали его друг за другом: вторая поднимала RTSP-сервер с чужими
+  // портами, тот упирался в занятый адрес и падал — раз в две секунды по кругу.
+  const configFile = join(DATA_DIR, `mediamtx-${RTSP_PORT}.yml`);
   // RTP-порт обязан быть чётным (RTP чётный, RTCP следующий нечётный) —
   // иначе MediaMTX отказывается стартовать и мгновенный канал не поднимается.
   const rtpPort = RTSP_PORT + 1 + ((RTSP_PORT + 1) % 2);
@@ -1938,6 +1997,11 @@ function startMediaMtx() {
   ].join('\n'), 'utf8');
   const child = spawn(MEDIAMTX(), [configFile], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
   mediaMtxProcess = child;
+  child.stderr?.setEncoding('utf8');
+  child.stderr?.on('data', chunk => {
+    const строка = String(chunk).trim().split(String.fromCharCode(10)).pop();
+    if (строка) { mediaMtxLastError = строка.slice(0, 200); logDetail(`RTSP-сервер: ${строка.slice(0, 300)}`); }
+  });
   // Поднялись после падения — публикацию надо восстановить самим. Без этого
   // сервер работал, а канал оставался пустым: пушер умер вместе с ним, а его
   // собственная попытка перезапуска пришлась на те секунды, когда сервера ещё
@@ -1946,8 +2010,20 @@ function startMediaMtx() {
   attachProcessLogs(child, 'RTSP server');
   child.on('close', code => {
     if (mediaMtxProcess === child) mediaMtxProcess = null;
-    if (!stopping && !shuttingDown && code) { log(`RTSP-сервер остановился (код ${code}), перезапускаю`); setTimeout(startMediaMtx, 2000); }
+    if (stopping || shuttingDown || !code) return;
+    // Бесконечный перезапуск раз в две секунды заваливал журнал и ничего не
+    // чинил. Пробуем несколько раз с нарастающей паузой и говорим, почему.
+    mediaMtxFailures += 1;
+    if (mediaMtxFailures > 5) {
+      log(`RTSP-сервер не запускается (код ${code}). Причина: ${mediaMtxLastError || 'не сообщил'}`);
+      return;
+    }
+    const пауза = Math.min(15000, 1500 * mediaMtxFailures);
+    log(`RTSP-сервер остановился (код ${code}), перезапускаю через ${Math.round(пауза / 1000)} с${mediaMtxLastError ? ` · ${mediaMtxLastError}` : ''}`);
+    setTimeout(startMediaMtx, пауза);
   });
+  // Продержался десять секунд — считаем, что поднялся.
+  setTimeout(() => { if (mediaMtxProcess === child) mediaMtxFailures = 0; }, 10000).unref?.();
 }
 
 // Готовность ссылки проверяем ровно так, как это делает плеер: спрашиваем у
@@ -2407,6 +2483,7 @@ function mediaCacheLimit() {
 // и временные файлы Unity. Без неё мусор копился до конца свободного места.
 function cleanupStorage() {
   trimMediaCache();
+  обновитьГотовые();
   storageInfo = { sizeMb: mediaCacheSizeMb(), drives: listDrives() };
   const alive = new Set(queue.map(item => item.id));
   try {
@@ -2497,7 +2574,7 @@ function startCacheDownload(item) {
       cachedMedia(item, file).then(resolvePromise, reject);
     });
   }).then(media => {
-    log(`Трек буферизирован: ${item.title}`); trimMediaCache(); return media;
+    log(`Трек буферизирован: ${item.title}`); готовыеВКеше.add(item.id); trimMediaCache(); return media;
   }).finally(() => { if (mediaCacheJobs.get(item.id) === promise) mediaCacheJobs.delete(item.id); });
   mediaCacheJobs.set(item.id, promise);
   return promise;
@@ -2601,7 +2678,9 @@ async function buildUnityQueue(itemId = '') {
   const selectedItem = queue.find(item => item.id === String(itemId)) || queue.find(item => item.id === currentId) || queue[0];
   const generation = ++unityBuildGeneration;
   const signature = unityQueueSignature(selectedItem);
-  const snapshot = [{ ...selectedItem }];
+  // Готовится ровно один трек. Раньше здесь был цикл по списку файлов — от
+  // версии, склеивавшей всю очередь; от неё же остались рабочая папка и доли
+  // прогресса, считавшиеся от длины списка из одного элемента.
   const profile = streamProfile('queue');
   const workDir = join(UNITY_ITEMS_DIR, `${signature}-${Date.now()}`);
   mkdirSync(workDir, { recursive: true });
@@ -2609,22 +2688,16 @@ async function buildUnityQueue(itemId = '') {
     itemId: selectedItem.id, title: selectedItem.title, updatedAt: Date.now() };
   log(`Unity: подготовка одного трека — ${selectedItem.title}`);
   try {
-    const files = [];
-    for (let index = 0; index < snapshot.length; index++) {
-      if (generation !== unityBuildGeneration) throw new Error('Подготовка отменена.');
-      const item = snapshot[index];
-      unityBuild = { ...unityBuild, progress: index / snapshot.length, message: `Кодирование ${index + 1}/${snapshot.length}: ${item.title}`, updatedAt: Date.now() };
-      const media = await stableQueueMedia(item);
-      const output = join(workDir, `${String(index + 1).padStart(4, '0')}.mp4`);
-      const canRemux = media.unityCompatible && (Number(config.playbackSpeed) || 1) === 1 && (Number(config.mediaVolume) || 0) === 1;
-      await runUnityFfmpeg(canRemux ? unityFastRemuxArgs(media, output) : unityNormalizeArgs(media, output, profile), `Элемент ${index + 1}`, generation);
-      files.push(output);
-      unityBuild = { ...unityBuild, progress: (index + 0.85) / snapshot.length, updatedAt: Date.now() };
-    }
+    if (generation !== unityBuildGeneration) throw new Error('Подготовка отменена.');
+    unityBuild = { ...unityBuild, progress: 0.05, message: `Кодирование: ${selectedItem.title}`, updatedAt: Date.now() };
+    const media = await stableQueueMedia(selectedItem);
+    const output = join(workDir, 'track.mp4');
+    const canRemux = media.unityCompatible && (Number(config.playbackSpeed) || 1) === 1 && (Number(config.mediaVolume) || 0) === 1;
+    await runUnityFfmpeg(canRemux ? unityFastRemuxArgs(media, output) : unityNormalizeArgs(media, output, profile), 'Трек', generation);
     const temporary = join(UNITY_DIR, `queue-${signature}.tmp.mp4`);
     unityBuild = { ...unityBuild, progress: 0.97, message: 'Создаю индекс MP4…', updatedAt: Date.now() };
     if (existsSync(temporary)) rmSync(temporary, { force: true });
-    renameSync(files[0], temporary);
+    renameSync(output, temporary);
     if (existsSync(UNITY_QUEUE_FILE)) rmSync(UNITY_QUEUE_FILE, { force: true });
     renameSync(temporary, UNITY_QUEUE_FILE);
     unityBuild = { state: 'ready', progress: 1, message: `Готово: ${selectedItem.title}`, signature,
@@ -2684,10 +2757,9 @@ function stopUnityCaptureRecording() {
 }
 
 function preloadNext(index) {
-  if (!queue.length) return;
-  const next = queue[(index + 1) % queue.length];
-  stableQueueMedia(next).catch(error => log(`Предзагрузка «${next.title}»: ${error.message}`));
-  prefetchQueue(index);
+  // prefetchQueue уже берёт следующие треки — отдельный вызов на соседний
+  // ролик только дублировал работу.
+  if (queue.length) prefetchQueue(index);
 }
 
 // Переключение на трек, который ещё не скачан, стоит секунд: yt-dlp сначала
@@ -2696,6 +2768,13 @@ function preloadNext(index) {
 // и переключаются мгновенно. Всю очередь качать нельзя: на плейлисте в полсотни
 // роликов это часы работы yt-dlp фоном, и эфир от такой нагрузки дёргается.
 const PREFETCH_AHEAD = 2;
+// Паузы между остановкой прежнего источника и запуском следующего. Числа
+// подобраны замерами: меньше — ffmpeg не успевает освободить устройство
+// захвата, больше — переход становится заметен глазу.
+const ПАУЗА_ПЕРЕХОДА = 40;
+const ПАУЗА_ОЧЕРЕДИ = 25;
+const ПАУЗА_ПОВТОРА = 120;
+
 let prefetching = false;
 async function prefetchQueue(fromIndex = queueIndex) {
   if (prefetching || !queue.length) return;
@@ -2854,19 +2933,19 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
       // производитель стартует через десятки миллисекунд, а лишний запуск
       // ffmpeg только добавлял задержку на каждое переключение.
       if (transition?.type !== 'seek' && transition?.type !== 'jump') startStandby(sessionProfile('queue'));
-      if (transition?.type === 'seek') return setTimeout(() => startQueueItem(queueIndex, transition.position, generation), 40);
-      if (transition?.type === 'jump') return setTimeout(() => startQueueItem(transition.index, transition.position || 0, generation), 40);
+      if (transition?.type === 'seek') return setTimeout(() => startQueueItem(queueIndex, transition.position, generation), ПАУЗА_ПЕРЕХОДА);
+      if (transition?.type === 'jump') return setTimeout(() => startQueueItem(transition.index, transition.position || 0, generation), ПАУЗА_ПЕРЕХОДА);
       if (code && code !== 255 && !item.local && retry < 1 && ranFor < 8) {
         resolvedMedia.delete(item.id);
         playbackBusy = true;
         log(`Источник устарел — обновляю прямую ссылку: ${item.title}`);
-        return setTimeout(() => startQueueItem(queueIndex, sourcePosition, generation, retry + 1), 120);
+        return setTimeout(() => startQueueItem(queueIndex, sourcePosition, generation, retry + 1), ПАУЗА_ПОВТОРА);
       }
       if (code && code !== 255) log(`Трек завершился с кодом ${code}`);
-      if (config.loopMode === 'one') return setTimeout(() => startQueueItem(queueIndex, 0, generation), 40);
+      if (config.loopMode === 'one') return setTimeout(() => startQueueItem(queueIndex, 0, generation), ПАУЗА_ПЕРЕХОДА);
       const nextIndex = queueIndex + 1;
-      if (nextIndex < queue.length) return setTimeout(() => startQueueItem(nextIndex, 0, generation), 40);
-      if (config.loopMode === 'all') return setTimeout(() => startQueueItem(0, 0, generation), 40);
+      if (nextIndex < queue.length) return setTimeout(() => startQueueItem(nextIndex, 0, generation), ПАУЗА_ПЕРЕХОДА);
+      if (config.loopMode === 'all') return setTimeout(() => startQueueItem(0, 0, generation), ПАУЗА_ПЕРЕХОДА);
       log('Очередь проиграна один раз');
       stopActive();
     });
@@ -2889,8 +2968,8 @@ function consumeManualTransition(generation = playGeneration) {
   const transition = manualTransition;
   manualTransition = null;
 
-  if (transition.type === 'seek') setTimeout(() => startQueueItem(queueIndex, transition.position, generation), 25);
-  if (transition.type === 'jump') setTimeout(() => startQueueItem(transition.index, transition.position || 0, generation), 25);
+  if (transition.type === 'seek') setTimeout(() => startQueueItem(queueIndex, transition.position, generation), ПАУЗА_ОЧЕРЕДИ);
+  if (transition.type === 'jump') setTimeout(() => startQueueItem(transition.index, transition.position || 0, generation), ПАУЗА_ОЧЕРЕДИ);
 }
 
 function stopActive(clearCurrent = true, keepTunnel = true, keepRelay = true) {
@@ -2938,7 +3017,7 @@ function transitionQueue(type, value = null) {
     currentStartedAt = null;
     playbackBusy = false;
     manualTransition = null;
-    pauseWithFrozenFrame(playGeneration, pausingPendingSeek ? null : latestHlsSegment(config.previewDelay || 0), pausingPendingSeek);
+    pauseWithFrozenFrame(playGeneration, pausingPendingSeek ? null : latestHlsSegment(0), pausingPendingSeek);
     return;
   } else if (type === 'resume') {
     if (!queuePaused) return;
@@ -3198,7 +3277,7 @@ async function addLocalFiles(paths) {
     if (!existsSync(filePath) || !statSync(filePath).isFile() || !MEDIA_EXTENSIONS.has(extname(filePath).toLowerCase())) continue;
     const info = await mediaInfoAsync(filePath);
     if (!info.hasVideo && !info.hasAudio) continue;
-    const item = { id: crypto.randomUUID(), title: basename(filePath), sourceUrl: filePath, thumbnail: '', local: true, ...info };
+    const item = { id: crypto.randomUUID(), title: basename(filePath), sourceUrl: filePath, thumbnail: '', local: true, probed: true, ...info };
     queue.push(item); added.push(item); generateThumbnail(item);
   }
   if (!added.length) throw new Error('Не найдено поддерживаемых видео или аудиофайлов.');
@@ -3352,12 +3431,73 @@ async function selectedCaptureRect() {
   return null;
 }
 
+// Живой предпросмотр источника: один ffmpeg переписывает картинку пятнадцать
+// раз в секунду, пока человек смотрит вкладку «Экран». Раньше на каждый кадр
+// запускался отдельный ffmpeg — отсюда и «будто два кадра в секунду», и стена
+// процессов на простое. Через пять секунд без запросов поток гаснет сам.
+let previewProcess = null;
+let previewKind = '';
+let previewLastAsked = 0;
+let previewIdleTimer = null;
+
+function stopLivePreview() {
+  if (previewIdleTimer) { clearInterval(previewIdleTimer); previewIdleTimer = null; }
+  if (!previewProcess) return;
+  try { previewProcess.kill('SIGTERM'); } catch {}
+  previewProcess = null; previewKind = '';
+}
+
+async function ensureLivePreview() {
+  previewLastAsked = Date.now();
+  if (activeKind) { stopLivePreview(); return false; }
+  const rect = await selectedCaptureRect();
+  if (config.captureMode === 'window' && (!rect || rect.minimized)) { stopLivePreview(); return false; }
+  const вид = [config.captureMode, config.captureMonitorId, config.captureWindowHandle,
+    config.regionX, config.regionY, config.regionWidth, config.regionHeight].join('|');
+  if (previewProcess && previewKind === вид) return true;
+  stopLivePreview();
+
+  const кадры = '15';
+  if (config.captureMode === 'window') {
+    const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
+    if (!existsSync(helper)) return false;
+    const захват = spawn(helper, ['--hwnd', String(rect.handle), '--width', '960', '--height', '540', '--fps', кадры],
+      { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+    const перевод = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'rawvideo', '-pixel_format', 'nv12',
+      '-video_size', '960x540', '-framerate', кадры, '-i', 'pipe:0',
+      '-vf', `fps=${кадры}`, '-q:v', '5', '-update', '1', '-y', CAPTURE_PREVIEW],
+      { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
+    захват.stdout.on('error', () => {}); перевод.stdin.on('error', () => {});
+    захват.stdout.pipe(перевод.stdin);
+    перевод.on('close', () => { try { захват.stdin.end(); } catch {} });
+    previewProcess = { kill: () => { try { захват.stdin.end(); } catch {} try { перевод.kill('SIGTERM'); } catch {} } };
+  } else {
+    const args = ['-hide_banner', '-loglevel', 'error', '-f', 'gdigrab', '-draw_mouse', '1', '-framerate', кадры];
+    if (rect) args.push('-offset_x', String(rect.x), '-offset_y', String(rect.y), '-video_size', `${rect.width}x${rect.height}`, '-i', 'desktop');
+    else args.push('-i', 'desktop');
+    args.push('-vf', 'scale=960:-2:flags=fast_bilinear', '-q:v', '5', '-update', '1', '-y', CAPTURE_PREVIEW);
+    previewProcess = spawn('ffmpeg', args, { windowsHide: true, stdio: 'ignore' });
+  }
+  previewKind = вид;
+  previewIdleTimer = setInterval(() => {
+    if (Date.now() - previewLastAsked > 5000 || activeKind) stopLivePreview();
+  }, 2000);
+  previewIdleTimer.unref?.();
+  return true;
+}
+
 async function generateCapturePreview() {
   // Во время эфира скриншоты не делаем: параллельный захват дерётся за GPU/CPU
   // с рабочим кодировщиком, а монитор в UI и так показывает сам поток.
   if (activeKind === 'screen') {
     if (existsSync(CAPTURE_PREVIEW)) return { url: `/api/capture-preview?time=${Date.now()}`, rect: null };
     throw new Error('Идёт эфир — предпросмотр показывает сам поток.');
+  }
+  // Живой поток уже пишет картинку — снимать отдельный кадр незачем.
+  if (await ensureLivePreview()) {
+    const rect = await selectedCaptureRect();
+    if (!existsSync(CAPTURE_PREVIEW)) return { unavailable: true, minimized: false, rect, reason: 'Кадр ещё готовится.' };
+    return { url: `/api/capture-preview?time=${Date.now()}`, rect, live: true };
   }
   const rect = await selectedCaptureRect();
   const args = ['-hide_banner', '-loglevel', 'error', '-f', 'gdigrab', '-draw_mouse', '1', '-framerate', '1'];
@@ -3367,7 +3507,7 @@ async function generateCapturePreview() {
     const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
     if (!existsSync(helper)) throw new Error('Компонент изолированного захвата окна не найден.');
     const capture = spawn(helper, ['--hwnd', rect.handle, '--width', '960', '--height', '540', '--fps', '5'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    const converter = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'rawvideo', '-pixel_format', 'bgra', '-video_size', '960x540', '-framerate', '5', '-i', 'pipe:0', '-frames:v', '1', '-q:v', '3', '-y', CAPTURE_PREVIEW], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+    const converter = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'rawvideo', '-pixel_format', 'nv12', '-video_size', '960x540', '-framerate', '5', '-i', 'pipe:0', '-frames:v', '1', '-q:v', '3', '-y', CAPTURE_PREVIEW], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
     capture.stdout.on('error', () => {}); converter.stdin.on('error', () => {});
     capture.stdout.pipe(converter.stdin);
     let errorText = '';
@@ -3410,7 +3550,7 @@ function общийДоступ(public_) { return public_ ? { 'Access-Control-Al
 function serveFile(res, base, relative, cache = false, public_ = false) {
   const safe = normalize(relative).replace(/^(\.\.(\\|\/|$))+/, '');
   const file = join(base, safe);
-  if (!file.startsWith(base) || !existsSync(file)) return false;
+  if ((!file.startsWith(base + sep) && file !== base) || !existsSync(file)) return false;
   res.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream',
     'Cache-Control': cache ? 'public, max-age=3600' : 'no-store', ...общийДоступ(public_) });
   createReadStream(file).pipe(res); return true;
@@ -3654,12 +3794,9 @@ const server = http.createServer(async (req, res) => {
         playbackSpeed: [0.5, 0.75, 1, 1.25, 1.5, 2].includes(Number(body.playbackSpeed)) ? Number(body.playbackSpeed) : (config.playbackSpeed || 1),
         captureVolume: Math.max(0, Math.min(6, Number(body.captureVolume ?? config.captureVolume ?? 1.5))),
         localAppVolume: Math.max(0.02, Math.min(1, Number(body.localAppVolume ?? config.localAppVolume ?? 1))),
-        rtspTransport: ['tcp', 'udp'].includes(body.rtspTransport) ? body.rtspTransport : (config.rtspTransport || 'tcp'),
         mediaVolume: Math.max(0, Math.min(4, Number(body.mediaVolume ?? config.mediaVolume ?? 1))),
         mediaQuality: ['480p', '720p', '1080p'].includes(body.mediaQuality) ? body.mediaQuality : (config.mediaQuality || '720p'),
         mediaFps: body.mediaFps === 60 ? 60 : (body.mediaFps === 30 ? 30 : (config.mediaFps || 30)),
-        previewDelay: [0, 3, 5, 7, 10].includes(Number(body.previewDelay)) ? Number(body.previewDelay) : Math.min(10, Number(config.previewDelay) || 0),
-        previewDelayReset: true,
       };
       const previousOutput = config.outputMode;
       const previousRemoteTarget = remoteRtspTarget();
@@ -3736,12 +3873,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname.startsWith('/stream/')) {
       if ((url.pathname === '/stream/live.m3u8' || url.pathname === '/stream/preview.m3u8') && existsSync(join(HLS_DIR, 'live.m3u8'))) {
         const preview = url.pathname === '/stream/preview.m3u8';
-        const delay = Math.max(0, Math.min(10, Number(config.previewDelay) || 0));
         // ponytail: локальное окно 4×1с — минимальная задержка для AVPro на этом
         // же ПК; публичное окно шире, потому что туннель добавляет джиттер.
         const liveWindow = publicTunnelHost ? 10 : 4;
         const liveOffset = publicTunnelHost ? 3 : 1.5;
-        const playlist = prepareLivePlaylist(readFileSync(join(HLS_DIR, 'live.m3u8'), 'utf8'), preview ? 60 : liveWindow, preview ? Math.max(2, delay) : liveOffset);
+        const playlist = prepareLivePlaylist(readFileSync(join(HLS_DIR, 'live.m3u8'), 'utf8'), preview ? 60 : liveWindow, preview ? 2 : liveOffset);
         res.writeHead(200, { 'Content-Type': mime['.m3u8'], 'Cache-Control': 'no-cache, no-store, must-revalidate',
           'CDN-Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': 'no-store', 'Surrogate-Control': 'no-store',
           'Pragma': 'no-cache', 'Expires': '0', ...общийДоступ(publicTunnelHost) });

@@ -114,10 +114,6 @@ internal static class Program
             ["VRCast.Payload.AudioCapture.exe"] = Path.Combine("tools", "VRCast.AudioCapture.exe"),
             ["VRCast.Payload.WindowCapture.exe"] = Path.Combine("tools", "VRCast.WindowCapture.exe"),
             ["VRCast.Payload.Plink.exe"] = Path.Combine("tools", "plink.exe"),
-            ["VRCast.Payload.Cloudflared.exe"] = Path.Combine("tools", "cloudflared.exe"),
-            ["VRCast.Payload.Pinggy.exe"] = Path.Combine("tools", "pinggy.exe"),
-            ["VRCast.Payload.MediaMtx.exe"] = Path.Combine("tools", "mediamtx.exe"),
-            ["VRCast.Payload.ytdlp.exe"] = Path.Combine("tools", "yt-dlp.exe"),
             ["VRCast.Payload.logo.png"] = Path.Combine("public", "logo.png"),
             ["VRCast.Payload.standby.png"] = Path.Combine("public", "standby.png")
         };
@@ -374,10 +370,16 @@ internal static class Program
 
     private static void CleanupOrphanHelpers()
     {
+        // mediamtx может стоять у человека и сам по себе — убиваем только тот,
+        // что лежит в нашей папке компонентов.
+        var наша = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge");
         foreach (var name in new[] { "VRCast.AudioCapture", "VRCast.WindowCapture", "mediamtx" })
         {
             foreach (var process in Process.GetProcessesByName(name))
             {
+                var путь = string.Empty;
+                try { путь = process.MainModule?.FileName ?? string.Empty; } catch { }
+                if (name == "mediamtx" && !путь.StartsWith(наша, StringComparison.OrdinalIgnoreCase)) { process.Dispose(); continue; }
                 try { process.Kill(true); process.WaitForExit(1500); }
                 catch { }
                 finally { process.Dispose(); }

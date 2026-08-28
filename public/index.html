@@ -59,7 +59,6 @@
 
         <details class="rail-card" id="cardLink" open>
           <summary class="rail-card-head"><svg class="ic" aria-hidden="true"><use href="#i-link"/></svg><span>Ссылка</span><svg class="ic chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
-          <input type="hidden" id="rtspTransport" value="tcp">
           <label class="player-mode">Плеер в мире<select id="playerMode"><option value="avpro">AVPro — живой эфир</option><option value="unity">Unity — готовый файл</option></select></label>
           <div class="link-row"><code id="playbackUrl">http://127.0.0.1:4717/stream/live.m3u8</code><button id="copyUrl" title="Скопировать ссылку"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
           <div class="alt-link" id="altLinkRow" hidden><span>Запасная — для Quest</span><div class="link-row"><code id="altLink"></code><button id="copyAltUrl" title="Скопировать запасную ссылку"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button></div></div>
@@ -139,7 +138,6 @@
             <div class="menu-row" id="menuScreenQuality" hidden><span>Качество</span><select id="quality"><option value="480p">480p</option><option value="720p">720p</option><option value="1080p">1080p</option></select></div>
             <div class="menu-row" id="menuScreenFps" hidden><span>Плавность</span><select id="fps"><option value="30">30 кадров</option><option value="60">60 кадров</option></select></div>
             <div class="menu-row"><span>Битрейт</span><select id="videoBitrate"><option value="0">Авто</option><option value="1500">1500 Кбит/с</option><option value="2500">2500 Кбит/с</option><option value="3500">3500 Кбит/с</option><option value="4500">4500 Кбит/с</option><option value="6000">6000 Кбит/с</option><option value="8000">8000 Кбит/с</option><option value="12000">12000 Кбит/с</option></select></div>
-            <input type="hidden" id="previewDelay" value="0">
           </div>
         </div>
 

@@ -27,7 +27,9 @@ if (args.Contains("--list-devices", StringComparer.OrdinalIgnoreCase))
 // Нужна, чтобы проверять «тише у себя» не на слух, а по числу.
 if (args.Contains("--session-volume", StringComparer.OrdinalIgnoreCase))
 {
-    var target = uint.TryParse(args[Array.FindIndex(args, value => value.Equals("--session-volume", StringComparison.OrdinalIgnoreCase)) + 1], out var wanted) ? wanted : 0;
+    var индекс = Array.FindIndex(args, value => value.Equals("--session-volume", StringComparison.OrdinalIgnoreCase));
+    var значение = индекс >= 0 && индекс + 1 < args.Length ? args[индекс + 1] : string.Empty;
+    var target = uint.TryParse(значение, out var wanted) ? wanted : 0;
     using var probe = new MMDeviceEnumerator();
     using var endpoint = probe.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
     var list = endpoint.AudioSessionManager.Sessions;
@@ -220,6 +222,10 @@ internal static class ProcessLoopback
                 // ровно столько кадров, сколько положено по настенным часам —
                 // недостающее уходит тишиной, чтобы поток не замирал при паузах звука.
                 var ring = new PcmRingBuffer(192000 * 400 / 1000);
+                // Два буфера на весь сеанс вместо новых на каждый пакет:
+                // в звуковом тракте пауза сборщика мусора слышна сразу.
+                float[] samples = new float[8192];
+                byte[] packet = new byte[16384];
                 var outputBlock = new byte[48000 * 2];
                 var clock = System.Diagnostics.Stopwatch.StartNew();
                 long framesWritten = 0;
@@ -230,12 +236,13 @@ internal static class ProcessLoopback
                     while (frames > 0)
                     {
                         Marshal.ThrowExceptionForHR(capture.GetBuffer(out var data, out frames, out var flags, out _, out _));
-                        var floatBytes = checked((int)frames * 8);
-                        var samples = new float[frames * 2];
-                        if ((flags & 2) == 0 && data != IntPtr.Zero) Marshal.Copy(data, samples, 0, samples.Length);
+                        var нужно = checked((int)frames * 2);
+                        if (samples.Length < нужно) samples = new float[нужно];
+                        if (packet.Length < нужно * 2) packet = new byte[нужно * 2];
+                        if ((flags & 2) == 0 && data != IntPtr.Zero) Marshal.Copy(data, samples, 0, нужно);
+                        else Array.Clear(samples, 0, нужно);
                         Marshal.ThrowExceptionForHR(capture.ReleaseBuffer(frames));
-                        var packet = new byte[frames * 4];
-                        for (var index = 0; index < samples.Length; index++)
+                        for (var index = 0; index < нужно; index++)
                         {
                             var value = samples[index] * Gain;
                             if (value > 1f) value = 1f; else if (value < -1f) value = -1f;
@@ -399,14 +406,25 @@ internal sealed class SessionMuter : IDisposable
         catch { }
     }
 
+    // Имя процесса по его номеру запоминаем: раньше это спрашивалось у Windows
+    // для каждой сессии каждого устройства раз в секунду, и для закрытых
+    // программ каждый такой вопрос стоил исключения в горячем месте.
+    private readonly Dictionary<uint, string> _names = new();
+
     private bool Matches(AudioSessionControl session)
     {
         try
         {
-            if (session.GetProcessID == _processId) return true;
+            var pid = session.GetProcessID;
+            if (pid == _processId) return true;
             if (string.IsNullOrEmpty(_processName)) return false;
-            // Дочерние процессы того же приложения носят то же имя
-            return System.Diagnostics.Process.GetProcessById((int)session.GetProcessID).ProcessName == _processName;
+            if (!_names.TryGetValue(pid, out var имя))
+            {
+                try { имя = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; }
+                catch { имя = string.Empty; }
+                _names[pid] = имя;
+            }
+            return имя == _processName;
         }
         catch { return false; }
     }
