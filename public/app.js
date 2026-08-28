@@ -112,8 +112,9 @@ function startPreview(state) {
     return;
   }
   if (window.Hls?.isSupported()) {
-    const sync=delay>0?{liveSyncDuration:delay,liveMaxLatencyDuration:delay+3}:{liveSyncDurationCount:1,liveMaxLatencyDurationCount:3};
-    const hls=new window.Hls({lowLatencyMode:delay===0,...sync,maxBufferLength:Math.max(12,delay+5),maxMaxBufferLength:Math.max(15,delay+10),backBufferLength:1,manifestLoadingTimeOut:5000,levelLoadingTimeOut:5000}); ui.hls=hls;
+    // Предпросмотр всегда живой, без отложенного показа: настройка задержки
+    // убрана, поэтому и здесь минимальный буфер.
+    const hls=new window.Hls({lowLatencyMode:true,liveSyncDurationCount:1,liveMaxLatencyDurationCount:3,maxBufferLength:12,maxMaxBufferLength:15,backBufferLength:1,manifestLoadingTimeOut:5000,levelLoadingTimeOut:5000}); ui.hls=hls;
     hls.loadSource(`${previewSource}?preview=${Date.now()}`); hls.attachMedia(video);
     hls.on(window.Hls.Events.MANIFEST_PARSED,()=>{monitor.classList.add('previewing');video.play().catch(()=>{});});
     hls.on(window.Hls.Events.ERROR,(_,data)=>{if(!data.fatal||!ui.status?.running)return;hls.destroy();ui.hls=null;ui.previewUrl='';if(ui.status?.stream?.state!=='offline')setTimeout(()=>startPreview(ui.status),2000);});
@@ -622,7 +623,7 @@ $('#prepareUnityQueue').addEventListener('click',async()=>{const button=$('#prep
 $('#recordUnityCapture').addEventListener('click',async()=>{const recording=ui.status?.compatibility?.unity?.capture?.state==='recording';try{render(await api(recording?'/api/unity/capture/stop':'/api/unity/capture/start',{method:'POST'}));toast(recording?'Завершаю MP4…':'Запись Unity-клипа началась');}catch(error){toast(error.message,true);}});
 
 async function playback(action,extra={}){try{render(await api('/api/playback',{method:'POST',body:JSON.stringify({action,...extra})}));return true;}catch(error){toast(error.message,true);return false;}}
-$('#togglePause').addEventListener('click',()=>!ui.status?.running?startSource():ui.status?.playback?.paused?playback('resume'):playback('pause',{position:ui.seekPending?ui.seekDraft:presentedProgress(ui.status).position})); $('#previousTrack').addEventListener('click',()=>playback('previous')); $('#nextTrack').addEventListener('click',()=>playback('next')); $('#skipTrack').addEventListener('click',()=>playback('next'));
+$('#togglePause').addEventListener('click',()=>!ui.status?.running?startSource():ui.status?.playback?.paused?playback('resume'):playback('pause',{position:ui.seekPending?ui.seekDraft:progressPosition(ui.status)})); $('#previousTrack').addEventListener('click',()=>playback('previous')); $('#nextTrack').addEventListener('click',()=>playback('next')); $('#skipTrack').addEventListener('click',()=>playback('next'));
 $('#cacheRoot').addEventListener('change',async()=>{
   try{ render(await api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),cacheRoot:$('#cacheRoot').value})}));
     toast('Кеш переехал, треки перекачаются на новое место'); }
