@@ -1,6 +1,6 @@
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
-const ui = { previewOn: localStorage.getItem('previewOn')!=='0', windowHidden: false, source: 'queue', output: 'local', status: null, sources: { windows: [], monitors: [], audioDevices: [], audioOutputs: [] }, hls: null, previewUrl: '', progressAt: 0, progressHistory: [], seeking: false, seekPending: false, seekVisualUntil: 0, seekDraft: 0, seekRevision: 0, previewBusy: false, previewTimer: null, speedPendingUntil: 0, loopPendingUntil: 0, liveApplyTimer: null, queueSignature: '', unitySelectedId: '' };
+const ui = { previewOn: localStorage.getItem('previewOn')!=='0', windowHidden: false, source: 'queue', output: 'local', status: null, sources: { windows: [], monitors: [], audioDevices: [], audioOutputs: [] }, hls: null, previewUrl: '', progressAt: 0, seeking: false, seekPending: false, seekDraft: 0, seekRevision: 0, previewBusy: false, previewTimer: null, speedPendingUntil: 0, loopPendingUntil: 0, liveApplyTimer: null, queueSignature: '', unitySelectedId: '' };
 
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
@@ -24,27 +24,6 @@ function progressPosition(state = ui.status) {
   return Math.min(Number(state.progress.duration) || Number.MAX_SAFE_INTEGER, Number(state.progress.elapsed || 0) + extra);
 }
 
-function rememberProgress(state, at = Date.now()) {
-  ui.progressHistory.push({ at, currentId: state.currentId, activeKind: state.activeKind, running: state.running,
-    progress: state.progress ? { ...state.progress } : null, playback: state.playback ? { ...state.playback } : null });
-  ui.progressHistory = ui.progressHistory.filter(entry => entry.at >= at - 45000);
-}
-
-function presentedProgress(state = ui.status) {
-  if (!state?.progress) return { position: 0, total: 0 };
-  const delay = Math.max(0, Number(state.config?.previewDelay) || 0);
-  if (!delay) return { position: progressPosition(state), total: Number(state.progress.duration) || 0 };
-  const target = Date.now() - delay * 1000;
-  const matching = ui.progressHistory.filter(entry => entry.currentId === state.currentId && entry.activeKind === 'queue' && entry.progress);
-  const sample = [...matching].reverse().find(entry => entry.at <= target);
-  if (!sample) {
-    const liveOffset = state.running && !state.playback?.paused ? delay * (state.playback?.speed || 1) : 0;
-    return { position: Math.max(0, Number(state.progress.elapsed || 0) - liveOffset), total: Number(state.progress.duration) || 0 };
-  }
-  const extra = sample.running && !sample.playback?.paused ? Math.max(0, target - sample.at) / 1000 * (sample.playback?.speed || 1) : 0;
-  const total = Number(sample.progress.duration) || Number(state.progress.duration) || 0;
-  return { position: Math.min(total || Number.MAX_SAFE_INTEGER, Number(sample.progress.elapsed || 0) + extra), total };
-}
 
 function renderProgress() {
   const state = ui.status;
@@ -53,7 +32,7 @@ function renderProgress() {
     if (!ui.seeking&&!ui.seekPending) { $('#seekBar').value='0'; $('#seekBar').style.setProperty('--seek','0%'); }
     return;
   }
-  const presented=presentedProgress(state), position=(ui.seeking||ui.seekPending)?ui.seekDraft:presented.position, total=presented.total, percent=total?Math.min(100,position/total*100):0;
+  const position=(ui.seeking||ui.seekPending)?ui.seekDraft:progressPosition(state), total=Number(state?.progress?.duration)||0, percent=total?Math.min(100,position/total*100):0;
   $('#elapsedTime').textContent=formatTime(position); $('#totalTime').textContent=total?formatTime(total):'LIVE';
   if (!ui.seeking&&!ui.seekPending) { $('#seekBar').value=String(Math.round(percent*10)); $('#seekBar').style.setProperty('--seek',`${percent}%`); }
 }
@@ -99,12 +78,8 @@ function stopPreview() {
   video.pause(); video.srcObject=null; video.removeAttribute('src'); video.load?.();
   // Кадр захвата — отдельная картинка: без этого при выключении оставался экран.
   const снимок=$('#capturePreview');
-  snapshotClear(снимок);
+  снимок.removeAttribute('src');
   $('#monitor').classList.remove('previewing','source-preview');
-}
-
-function snapshotClear(image){
-  image.removeAttribute('src');
 }
 
 function paintPreviewToggle() {
@@ -125,10 +100,9 @@ function startPreview(state) {
   if (!state.running) {
     ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl=''; video.removeAttribute('src'); video.srcObject=null; monitor.classList.remove('previewing'); return;
   }
-  const delay=Math.max(0,Number(state.config.previewDelay)||0);
   const previewSource=(state.localPlaybackUrl||state.playbackUrl).replace(/live\.m3u8(?:\?.*)?$/,'preview.m3u8');
   const черезWebrtc=Boolean(state.webrtcUrl)&&!ui.webrtcFailed;
-  const previewKey=`${черезWebrtc?'rtc':'hls'}|${previewSource}|${delay}`;
+  const previewKey=`${черезWebrtc?'rtc':'hls'}|${previewSource}`;
   // Ключ включает способ показа: без этого связь WebRTC пересоздавалась на
   // каждом обновлении состояния, и картинка дёргалась.
   if (ui.previewUrl===previewKey && (ui.hls||ui.rtc)) return;
@@ -199,8 +173,8 @@ function renderTemplates(state) {
 }
 
 function render(state) {
-  ui.status=state; ui.progressAt=Date.now(); rememberProgress(state,ui.progressAt); const ready=state.tools.ffmpeg&&state.tools.ytdlp;
-  if(ui.seekPending&&!state.playback?.busy&&Number(state.playback?.revision)>=ui.seekRevision&&Date.now()>=ui.seekVisualUntil)ui.seekPending=false;
+  ui.status=state; ui.progressAt=Date.now();  const ready=state.tools.ffmpeg&&state.tools.ytdlp;
+  if(ui.seekPending&&!state.playback?.busy&&Number(state.playback?.revision)>=ui.seekRevision)ui.seekPending=false;
   const streamReady=Boolean(state.stream?.ready), streamStalled=state.stream?.state==='stalled';
   $('#stateDot').className=`state-dot ${state.disk?.low||streamStalled?'error':state.running?'live':ready?'ready':''}`;
   $('#systemState').textContent=state.disk?.low?`Мало места на диске · ${Math.max(0,Math.round(state.disk.freeMb/1024*10)/10)} ГБ`:state.playback?.buffering?'Загружаю видео':streamStalled?'Не успевает':state.running&&streamReady?'В эфире':state.running?'Запускаю…':streamReady?'Готово':ready?'Готов к эфиру':'Нужен FFmpeg';
@@ -239,8 +213,7 @@ function render(state) {
     linkError=streamStalled||state.tunnel?.state==='error';
   }
   $('#playbackUrl').textContent=shownUrl||(linkError?'Ссылка пока недоступна':'Подготовка ссылки…'); $('#trustHint').textContent=hint;
-  const altUrl=!unityMode&&state.config.outputMode==='remote'?(state.rtsp?.remote?.hlsUrl||''):'';
-  $('#altLinkRow').hidden=!altUrl; if(altUrl)$('#altLink').textContent=altUrl;
+  $('#altLinkRow').hidden=true;
   $('#copyUrl').disabled=!shownUrl;
   const linkState=$('#linkState'); linkState.className=`link-state ${linkGood?'public':linkError?'error':''}`; linkState.querySelector('span').textContent=linkText;
   // Транспорт имеет смысл только для RTSP-ссылки
@@ -376,7 +349,7 @@ async function refreshWindows() {
 
 function configPayload() {
   const selectedWindow=ui.sources.windows.find(item=>item.handle===$('#windowSource').value);
-  return { outputMode:ui.output,activeServerId:$('#serverSelect').value,quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),previewDelay:Number($('#previewDelay').value),videoBitrate:Number($('#videoBitrate').value),captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),rtspTransport:$('#rtspTransport').value,loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100 };
+  return { outputMode:ui.output,activeServerId:$('#serverSelect').value,quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100 };
 }
 async function saveConfig(applyLive = false) { return api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),applyLive})}); }
 
@@ -464,11 +437,10 @@ async function copyText(value){
 $('#copyUrl').addEventListener('click',async()=>{const value=$('#playbackUrl').textContent;if(!/^(https?|rtspt?):\/\//.test(value))return toast('Ссылка ещё создаётся',true);const ok=await copyText(value);toast(ok?'Ссылка скопирована':'Не удалось скопировать',!ok);});
 $('#copyAltUrl').addEventListener('click',async()=>{const value=$('#altLink').textContent;if(!value)return;const ok=await copyText(value);toast(ok?'Запасная ссылка скопирована':'Не удалось скопировать',!ok);});
 $('#playerMode').addEventListener('change',()=>{if(ui.status)render(ui.status);});
-$('#rtspTransport').addEventListener('change',async()=>{try{render(await saveConfig(false));toast('Скопируйте ссылку заново');}catch(error){toast(error.message,true);}});
 $('#prepareUnityQueue').addEventListener('click',async()=>{const button=$('#prepareUnityQueue');button.disabled=true;try{render(await api('/api/unity/queue/build',{method:'POST',body:JSON.stringify({id:ui.unitySelectedId})}));toast('Подготовка выбранного трека началась');}catch(error){toast(error.message,true);}finally{if(ui.status?.compatibility?.unity?.queue?.state!=='building')button.disabled=false;}});
 $('#recordUnityCapture').addEventListener('click',async()=>{const recording=ui.status?.compatibility?.unity?.capture?.state==='recording';try{render(await api(recording?'/api/unity/capture/stop':'/api/unity/capture/start',{method:'POST'}));toast(recording?'Завершаю MP4…':'Запись Unity-клипа началась');}catch(error){toast(error.message,true);}});
 
-async function playback(action,extra={}){try{render(await api('/api/playback',{method:'POST',body:JSON.stringify({action,...extra})}));const delay=Math.max(0,Number(ui.status?.config?.previewDelay)||0);if(delay&&['pause','resume','seek'].includes(action))toast(`В VRChat это появится через ${delay} с`);return true;}catch(error){toast(error.message,true);return false;}}
+async function playback(action,extra={}){try{render(await api('/api/playback',{method:'POST',body:JSON.stringify({action,...extra})}));return true;}catch(error){toast(error.message,true);return false;}}
 $('#togglePause').addEventListener('click',()=>!ui.status?.running?startSource():ui.status?.playback?.paused?playback('resume'):playback('pause',{position:ui.seekPending?ui.seekDraft:presentedProgress(ui.status).position})); $('#previousTrack').addEventListener('click',()=>playback('previous')); $('#nextTrack').addEventListener('click',()=>playback('next')); $('#skipTrack').addEventListener('click',()=>playback('next'));
 $('#cacheRoot').addEventListener('change',async()=>{
   try{ render(await api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),cacheRoot:$('#cacheRoot').value})}));
@@ -499,14 +471,13 @@ $('#clearCache').addEventListener('click',async()=>{
   catch(error){ toast(error.message,true); }
 });
 $('#seekBar').addEventListener('input',event=>{ui.seeking=true;const percent=Number(event.target.value)/10;event.target.style.setProperty('--seek',`${percent}%`);const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*percent/100;$('#elapsedTime').textContent=formatTime(ui.seekDraft);});
-$('#seekBar').addEventListener('change',async event=>{const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*Number(event.target.value)/1000;ui.seeking=false;ui.seekPending=true;ui.seekVisualUntil=Date.now()+Math.max(0,Number(ui.status?.config?.previewDelay)||0)*1000;ui.seekRevision=Number(ui.status?.playback?.revision||0)+1;if(!await playback('seek',{position:ui.seekDraft}))ui.seekPending=false;});
+$('#seekBar').addEventListener('change',async event=>{const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*Number(event.target.value)/1000;ui.seeking=false;ui.seekPending=true;ui.seekRevision=Number(ui.status?.playback?.revision||0)+1;if(!await playback('seek',{position:ui.seekDraft}))ui.seekPending=false;});
 function applyQualityLive(kind,что='Качество'){clearTimeout(ui.liveApplyTimer);ui.liveApplyTimer=setTimeout(async()=>{try{const live=ui.status?.activeKind===kind;render(await saveConfig(live));toast(live?`${что} применён${что==='Качество'?'о':''}`:`${что} сохранён${что==='Качество'?'о':''}`);}catch(error){toast(error.message,true);}},350);}
 $('#quality').addEventListener('change',()=>applyQualityLive('screen'));$('#fps').addEventListener('change',()=>applyQualityLive('screen'));
 // Битрейт применяется к тому, что идёт прямо сейчас: раньше выбор просто лежал
 // в настройках до следующего запуска, и казалось, что регулятор ничего не делает.
 $('#videoBitrate').addEventListener('change',()=>applyQualityLive(ui.status?.activeKind||'screen','Битрейт'));
 $('#mediaQuality').addEventListener('change',()=>applyQualityLive('queue'));$('#mediaFps').addEventListener('change',()=>applyQualityLive('queue'));
-$('#previewDelay').addEventListener('change',async()=>{try{ui.hls?.destroy();ui.hls=null;ui.previewUrl='';render(await saveConfig(false));toast('Задержка предпросмотра изменена');}catch(error){toast(error.message,true);}});
 $('#speedSelect').addEventListener('click',async()=>{const current=Number($('#speedSelect').dataset.value)||1;
   const next=SPEED_STEPS[(SPEED_STEPS.indexOf(current)+1)%SPEED_STEPS.length];
   paintSpeed(next);ui.speedPendingUntil=Date.now()+1500;await playback('speed',{speed:next});paintSpeed(next);ui.speedPendingUntil=0;});
@@ -526,8 +497,17 @@ $('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast:/
 $('#appSoundSettings').addEventListener('click',()=>{window.location.href='vrcast://app-sound';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
 async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#previewDelay').value=String(state.config.previewDelay??0);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#rtspTransport').value=state.config.rtspTransport||'tcp';paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);paintPreviewToggle();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);// Снимок источника обновляем только когда открыта вкладка «Экран», окно видно и эфир не идёт: раньше программа бесконечно порождала ffmpeg каждые две секунды даже на простое.
-ui.previewTimer=setInterval(()=>{if(ui.source!=='screen'||document.hidden||ui.windowHidden||ui.status?.activeKind==='screen')return;refreshCapturePreview(false).catch(()=>{});},6000);
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);$('#addServerForm').hidden=Boolean(state.config.servers?.length);paintPreviewToggle();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);// Снимок источника обновляем только когда открыта вкладка «Экран», окно видно и эфир не идёт: раньше программа бесконечно порождала ffmpeg каждые две секунды даже на простое.
+// Пока открыта вкладка «Экран» и эфир не идёт, сервер держит живой поток
+// картинки — забираем её пятнадцать раз в секунду. Раз в две секунды просим
+// сервер поддержать поток: без этого он гаснет сам через пять секунд.
+ui.previewTimer=setInterval(()=>{if(ui.source!=='screen'||document.hidden||ui.windowHidden||ui.status?.activeKind==='screen')return;refreshCapturePreview(false).catch(()=>{});},2000);
+ui.previewFrameTimer=setInterval(()=>{
+  if(ui.source!=='screen'||document.hidden||ui.windowHidden||ui.status?.activeKind==='screen')return;
+  const снимок=$('#capturePreview');
+  if(!снимок.getAttribute('src'))return;
+  снимок.src=`/api/capture-preview?time=${Date.now()}`;
+},66);
 const stall={time:0,strikes:0};
 setInterval(()=>{const video=$('#streamPreview');
   if(!ui.hls||!ui.status?.running||ui.status?.stream?.state!=='ready'){stall.strikes=0;stall.time=video.currentTime;return;}
@@ -615,7 +595,6 @@ function updateBlocked(version){
   const снова=Number(localStorage.getItem('updateSnooze')||0);
   return Date.now()<снова;
 }
-function качества(item){return item.totalMb;}
 
 function paintUpdateDialog(update){
   $('#updateVersion').textContent=update.version||'';
@@ -680,7 +659,7 @@ async function startWebrtcPreview(url, video, monitor, key){
     if(!previewAllowed()||ui.previewUrl!==key){ rtc.close(); if(ui.rtc===rtc)ui.rtc=null; return; }
     await rtc.setRemoteDescription({type:'answer',sdp:await ответ.text()});
   }catch(error){
-    ui.rtc?.close(); ui.rtc=null; ui.webrtcFailed=true; ui.previewUrl='';
+    ui.rtc?.close(); ui.rtc=null; ui.webrtcFailed=true;setTimeout(()=>{ui.webrtcFailed=false;},60000); ui.previewUrl='';
     console.warn('WebRTC-предпросмотр недоступен, перехожу на HLS:',error.message);
     if(ui.status)startPreview(ui.status);
   }

@@ -1,3 +1,5 @@
+mod scaler;
+
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -43,6 +45,23 @@ fn run() -> Result<()> {
             if has_rect { rect.right - rect.left } else { 0 }, if has_rect { rect.bottom - rect.top } else { 0 });
         return Ok(());
     }
+    // Лёгкое наблюдение: ни захвата, ни видеокарты — только сообщения о том,
+    // что окно свернули, развернули или закрыли. Нужен, пока окно свёрнуто:
+    // захват в это время не идёт, а узнать о возвращении окна как-то надо.
+    if std::env::args().any(|value| value == "--watch") {
+        let mut последнее = "";
+        loop {
+            let существует = unsafe { IsWindow(Some(hwnd)).as_bool() };
+            let свёрнуто = существует && unsafe { IsIconic(hwnd).as_bool() };
+            let состояние = if !существует { "gone" } else if свёрнуто { "minimized" } else { "visible" };
+            if состояние != последнее {
+                последнее = состояние;
+                eprintln!("state={состояние}");
+                if !существует { return Ok(()); }
+            }
+            thread::sleep(Duration::from_millis(400));
+        }
+    }
     unsafe { RoInitialize(RO_INIT_MULTITHREADED)?; }
     let output_width = argument("--width").and_then(|v| v.parse::<u32>().ok()).unwrap_or(1280).max(64);
     let output_height = argument("--height").and_then(|v| v.parse::<u32>().ok()).unwrap_or(720).max(64);
@@ -86,8 +105,23 @@ fn run() -> Result<()> {
     let mut staging = staging.unwrap();
     let mut pool_size = item_size;
     let mut last_size_check = Instant::now();
-    let mut latest = vec![0x24u8; output_width as usize * output_height as usize * 4];
-    for pixel in latest.chunks_exact_mut(4) { pixel.copy_from_slice(&[0x2c, 0x20, 0x24, 0xff]); }
+
+    // Масштабирование и перевод в NV12 отдаём видеокарте. Если она этого не
+    // умеет (старый драйвер, программный адаптер), остаётся прежний путь через
+    // процессор — он медленнее, но работает везде.
+    let mut gpu = scaler::Scaler::new(&device, &context,
+        texture_desc.Width, texture_desc.Height, output_width, output_height).ok();
+    if gpu.is_none() { eprintln!("GPU scaling unavailable, using CPU path"); }
+    let mut gpu_errors = 0u32;
+    let mut последнее_состояние = "visible";
+    // Кадр уходит в NV12: яркость плюс вдвое меньшая цветовая плоскость.
+    // Это втрое меньше данных через канал, чем сырой BGRA, и ровно тот формат,
+    // который нужен кодировщику — лишнего перевода уже не будет.
+    let mut latest = vec![0u8; scaler::nv12_size(output_width, output_height)];
+    let серый = output_width as usize * output_height as usize;
+    for byte in latest[..серый].iter_mut() { *byte = 20; }
+    for byte in latest[серый..].iter_mut() { *byte = 128; }
+    let mut bgra = vec![0u8; output_width as usize * output_height as usize * 4];
 
     // Пока мы держим сессию захвата, Windows рисует вокруг окна жёлтую рамку и
     // сама её убирает, когда сессия закрыта. При жёстком убийстве процесса
@@ -123,7 +157,20 @@ fn run() -> Result<()> {
         // долго — цикл захвата вставал вместе с ним, и эфир замирал на всё
         // время перетаскивания.
         let пора_проверить = last_size_check.elapsed() >= Duration::from_millis(250);
-        if пора_проверить { last_size_check = Instant::now(); }
+        if пора_проверить {
+            last_size_check = Instant::now();
+            // О сворачивании и закрытии окна сообщаем сами. Раньше об этом
+            // спрашивал отдельный процесс раз в три секунды — лишний запуск
+            // на ровном месте, притом что мы держим окно и знаем о нём всё.
+            let существует = unsafe { IsWindow(Some(hwnd)).as_bool() };
+            let свёрнуто = существует && unsafe { IsIconic(hwnd).as_bool() };
+            let состояние = if !существует { "gone" } else if свёрнуто { "minimized" } else { "visible" };
+            if состояние != последнее_состояние {
+                последнее_состояние = состояние;
+                eprintln!("state={состояние}");
+                if !существует { break; }
+            }
+        }
         if let Ok(current) = (if пора_проверить { item.Size() } else { Ok(pool_size) }) {
             if (current.Width != pool_size.Width || current.Height != pool_size.Height)
                 && current.Width > 0 && current.Height > 0
@@ -138,6 +185,8 @@ fn run() -> Result<()> {
                             staging = next;
                             texture_desc = desc;
                             pool_size = current;
+                            gpu = scaler::Scaler::new(&device, &context,
+                                texture_desc.Width, texture_desc.Height, output_width, output_height).ok();
                         }
                     }
                 }
@@ -147,10 +196,38 @@ fn run() -> Result<()> {
             let surface = frame.Surface()?;
             let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
             let source: ID3D11Texture2D = unsafe { access.GetInterface()? };
+            let content = frame.ContentSize()?;
+            if let Some(масштабатор) = gpu.as_mut() {
+                // Размер входа берём у самого кадра: сразу после пересоздания
+                // пула в очереди может лежать кадр прежнего размера, и
+                // видеопроцессор такой вход не принимает.
+                let mut описание = D3D11_TEXTURE2D_DESC::default();
+                unsafe { source.GetDesc(&mut описание); }
+                if описание.Width != масштабатор.source_width() || описание.Height != масштабатор.source_height() {
+                    gpu = scaler::Scaler::new(&device, &context, описание.Width, описание.Height,
+                        output_width, output_height).ok();
+                }
+                let итог = gpu.as_mut().map(|м| м.blit(&device, &context, &source,
+                    content.Width.max(1) as u32, content.Height.max(1) as u32, &mut latest));
+                match итог {
+                    Some(Ok(())) => { has_frame = true; gpu_errors = 0; }
+                    Some(Err(ошибка)) => {
+                        gpu_errors += 1;
+                        // Одиночный отказ — это кадр не того размера на стыке,
+                        // такой просто пропускаем. Пять подряд означают, что
+                        // видеокарта этого не умеет: уходим на процессор.
+                        if gpu_errors >= 5 {
+                            eprintln!("GPU scaling failed ({ошибка}), switching to CPU path");
+                            gpu = None;
+                        }
+                    }
+                    None => {}
+                }
+            }
+            if gpu.is_none() {
             unsafe { context.CopyResource(&staging, &source); }
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             if unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }.is_ok() {
-                let content = frame.ContentSize()?;
                 let source_width = (content.Width.max(1) as u32).min(texture_desc.Width) as usize;
                 let source_height = (content.Height.max(1) as u32).min(texture_desc.Height) as usize;
                 let scale = (output_width as f64 / source_width as f64).min(output_height as f64 / source_height as f64);
@@ -158,7 +235,7 @@ fn run() -> Result<()> {
                 let scaled_height = ((source_height as f64 * scale).round() as usize).max(1).min(output_height as usize);
                 let offset_x = (output_width as usize - scaled_width) / 2;
                 let offset_y = (output_height as usize - scaled_height) / 2;
-                for pixel in latest.chunks_exact_mut(4) { pixel.copy_from_slice(&[0x2c, 0x20, 0x24, 0xff]); }
+                for pixel in bgra.chunks_exact_mut(4) { pixel.copy_from_slice(&[0x2c, 0x20, 0x24, 0xff]); }
                 for destination_y in 0..scaled_height {
                     let source_y = destination_y * source_height / scaled_height;
                     let source_row = unsafe { std::slice::from_raw_parts((mapped.pData as *const u8).add(source_y * mapped.RowPitch as usize), source_width * 4) };
@@ -167,11 +244,13 @@ fn run() -> Result<()> {
                         let source_x = destination_x * source_width / scaled_width;
                         let source_offset = source_x * 4;
                         let destination_offset = destination_row + (destination_x + offset_x) * 4;
-                        latest[destination_offset..destination_offset + 4].copy_from_slice(&source_row[source_offset..source_offset + 4]);
+                        bgra[destination_offset..destination_offset + 4].copy_from_slice(&source_row[source_offset..source_offset + 4]);
                     }
                 }
                 unsafe { context.Unmap(&staging, 0); }
+                bgra_to_nv12(&bgra, output_width as usize, output_height as usize, &mut latest);
                 has_frame = true;
+            }
             }
         }
         let now = Instant::now();
@@ -188,4 +267,35 @@ fn run() -> Result<()> {
     let _ = session.Close();
     let _ = frame_pool.Close();
     Ok(())
+}
+
+// Запасной путь: перевод BGRA в NV12 на процессоре по BT.601 — тем же
+// уравнением, каким это сделал бы ffmpeg, если бы получал сырой BGRA.
+fn bgra_to_nv12(bgra: &[u8], width: usize, height: usize, out: &mut [u8]) {
+    let плоскость = width * height;
+    for y in 0..height {
+        for x in 0..width {
+            let p = (y * width + x) * 4;
+            let (b, g, r) = (bgra[p] as f32, bgra[p + 1] as f32, bgra[p + 2] as f32);
+            let яркость = 16.0 + 0.257 * r + 0.504 * g + 0.098 * b;
+            out[y * width + x] = яркость.clamp(0.0, 255.0) as u8;
+        }
+    }
+    for y in (0..height).step_by(2) {
+        for x in (0..width).step_by(2) {
+            let mut сумма = (0.0f32, 0.0f32, 0.0f32);
+            for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                let p = ((y + dy).min(height - 1) * width + (x + dx).min(width - 1)) * 4;
+                сумма.0 += bgra[p] as f32;
+                сумма.1 += bgra[p + 1] as f32;
+                сумма.2 += bgra[p + 2] as f32;
+            }
+            let (b, g, r) = (сумма.0 / 4.0, сумма.1 / 4.0, сумма.2 / 4.0);
+            let u = 128.0 - 0.148 * r - 0.291 * g + 0.439 * b;
+            let v = 128.0 + 0.439 * r - 0.368 * g - 0.071 * b;
+            let сдвиг = плоскость + (y / 2) * width + x;
+            out[сдвиг] = u.clamp(0.0, 255.0) as u8;
+            out[сдвиг + 1] = v.clamp(0.0, 255.0) as u8;
+        }
+    }
 }
