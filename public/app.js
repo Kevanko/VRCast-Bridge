@@ -336,7 +336,12 @@ function закрытьДиалогСервера(){
 }
 $('#serverDialogClose').addEventListener('click',закрытьДиалогСервера);
 // Клик по затемнению и Escape закрывают тоже — как ждёшь от любого окна.
-serverDialog.addEventListener('click',event=>{ if(event.target===serverDialog)закрытьДиалогСервера(); });
+// Но закрываем только если нажатие И началось на затемнении: иначе выделение
+// текста в поле, когда мышь заезжает за край и отпускается на фоне, считалось
+// кликом по фону и захлопывало окно — бесячий стандартный баг.
+let нажалиНаФон=false;
+serverDialog.addEventListener('mousedown',event=>{ нажалиНаФон=(event.target===serverDialog); });
+serverDialog.addEventListener('click',event=>{ if(event.target===serverDialog && нажалиНаФон)закрытьДиалогСервера(); });
 serverDialog.addEventListener('cancel',event=>{ event.preventDefault(); закрытьДиалогСервера(); });
 $('#revealServerKey').addEventListener('click',()=>{
   const плашка=$('#serverKeyValue');
