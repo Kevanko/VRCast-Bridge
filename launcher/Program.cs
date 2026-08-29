@@ -266,6 +266,14 @@ internal static class Program
 
     internal static Action<string>? BootStatus;
 
+    // Группа процессов сервера. Привязываем её сразу при запуске node, до того
+    // как он поднимет mediamtx и ffmpeg: тогда все дочерние процессы попадают в
+    // группу и гибнут вместе с приложением — хоть при закрытии, хоть при снятии
+    // через диспетчер задач. Раньше привязка ждала готовности сервера, и
+    // запущенные на старте mediamtx/ffmpeg в группу не попадали — оставались
+    // висеть после закрытия.
+    internal static ChildProcessJob? ServerJob;
+
     private static async Task<Process?> EnsureServer(string runtimeDirectory)
     {
         var existingVersion = await GetServerVersion();
@@ -321,6 +329,12 @@ internal static class Program
             // Путь к своему EXE нужен серверу, чтобы поставить обновление.
             startInfo.EnvironmentVariables["VRCAST_EXE"] = Environment.ProcessPath ?? Application.ExecutablePath;
             server = Process.Start(startInfo);
+            // Привязываем к группе процессов немедленно — до того, как node
+            // успеет породить mediamtx и ffmpeg. Тогда и они попадут в группу.
+            if (server is not null)
+            {
+                try { ServerJob = ChildProcessJob.Attach(server); } catch { }
+            }
             // Вывод сервера пишем в файл: если он не поднимется, причина видна,
             // а не теряется вместе с невидимым окном консоли.
             if (server is not null)
@@ -373,13 +387,16 @@ internal static class Program
         // mediamtx может стоять у человека и сам по себе — убиваем только тот,
         // что лежит в нашей папке компонентов.
         var наша = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge");
-        foreach (var name in new[] { "VRCast.AudioCapture", "VRCast.WindowCapture", "mediamtx" })
+        // mediamtx и ffmpeg человек может держать и для своих дел — трогаем
+        // только те, что запущены из нашей папки компонентов. Свои капчур-хелперы
+        // уникальны по имени, их можно снимать без проверки пути.
+        foreach (var name in new[] { "VRCast.AudioCapture", "VRCast.WindowCapture", "mediamtx", "ffmpeg" })
         {
             foreach (var process in Process.GetProcessesByName(name))
             {
                 var путь = string.Empty;
                 try { путь = process.MainModule?.FileName ?? string.Empty; } catch { }
-                if (name == "mediamtx" && !путь.StartsWith(наша, StringComparison.OrdinalIgnoreCase)) { process.Dispose(); continue; }
+                if ((name == "mediamtx" || name == "ffmpeg") && !путь.StartsWith(наша, StringComparison.OrdinalIgnoreCase)) { process.Dispose(); continue; }
                 try { process.Kill(true); process.WaitForExit(1500); }
                 catch { }
                 finally { process.Dispose(); }
@@ -904,7 +921,10 @@ internal sealed class MainWindow : Form
     // окна — вместе с жёлтой рамкой на чужом окне.
     private async Task AttachServerJob()
     {
-        if (_job is not null || _serverTask is null) return;
+        // Обычно сервер уже в группе — её привязывают сразу при запуске node.
+        // Этот путь остаётся страховкой на случай, если ранняя привязка не
+        // удалась (процесс мог быть уже в чужой группе).
+        if (_job is not null || Program.ServerJob is not null || _serverTask is null) return;
         try
         {
             var процесс = await _serverTask;

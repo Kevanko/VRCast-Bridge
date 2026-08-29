@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.53.1';
+const APP_VERSION = '0.53.2';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -2637,6 +2637,15 @@ function mediaFailure(itemId) {
 const cacheDeclined = new Map();
 const CACHE_BACKOFF = [5 * 60000, 30 * 60000, Infinity];
 
+// Убрали трек из очереди — стираем и всё, что о нём помнили. Эти карты
+// чистились лениво, только при обращении: за долгий сеанс с кучей
+// добавлений-удалений в них копились записи по ушедшим трекам.
+function forgetItemState(id) {
+  resolvedMedia.delete(id);
+  mediaFailures.delete(id);
+  cacheDeclined.delete(id);
+}
+
 function declineCache(itemId, reason) {
   const было = cacheDeclined.get(itemId)?.tries || 0;
   const tries = было + 1;
@@ -3449,6 +3458,7 @@ function parseMediaInfo(stdout) {
 // запускался свой ffmpeg: папка из восьмидесяти роликов — восемьдесят
 // процессов одновременно, и идущий эфир от этого рвался гарантированно.
 const очередьПревью = [];
+const previewChildren = new Set();
 let занятоПревью = 0;
 
 function generateThumbnail(item) {
@@ -3471,7 +3481,8 @@ function качатьПревью() {
       : ['-hide_banner', '-loglevel', 'error', '-i', item.sourceUrl,
          '-an', '-map', 'disp:attached_pic', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination];
     const child = spawn('ffmpeg', args, { windowsHide: true, stdio: 'ignore' });
-    const дальше = () => { занятоПревью--; качатьПревью(); };
+    previewChildren.add(child);
+    const дальше = () => { previewChildren.delete(child); занятоПревью--; качатьПревью(); };
     child.on('close', code => {
       if (code === 0 && queue.some(entry => entry.id === item.id)) {
         item.thumbnail = `/thumbs/${item.id}.jpg?v=${Date.now()}`;
@@ -4002,7 +4013,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'DELETE' && url.pathname.startsWith('/api/queue/')) {
       const id = decodeURIComponent(url.pathname.split('/').pop());
       const removedIndex = queue.findIndex(item => item.id === id);
-      queue = queue.filter(item => item.id !== id); resolvedMedia.delete(id); saveQueue();
+      queue = queue.filter(item => item.id !== id); forgetItemState(id); saveQueue();
       // Удаление играющего трека раньше оставляло висячий currentId и сбитый
       // queueIndex: UI показывал «эфир не запущен», а очередь после трека вставала.
       if (activeKind === 'queue' && removedIndex >= 0) {
@@ -4014,7 +4025,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, status());
     }
     if (req.method === 'DELETE' && url.pathname === '/api/queue') {
-      if (activeKind === 'queue') stopActive(); queue = []; resolvedMedia.clear(); saveQueue(); return json(res, 200, status());
+      if (activeKind === 'queue') stopActive(); queue = []; resolvedMedia.clear(); mediaFailures.clear(); cacheDeclined.clear(); saveQueue(); return json(res, 200, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/config') {
       const body = await readBody(req);
@@ -4238,5 +4249,16 @@ process.on('unhandledRejection', reason => {
   logDetail(`Необработанный промис: ${reason?.stack || reason}`);
 });
 
-process.on('SIGINT', () => { shuttingDown = true; if (hlsHealthTimer) clearInterval(hlsHealthTimer); stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); });
-process.on('SIGTERM', () => { shuttingDown = true; if (hlsHealthTimer) clearInterval(hlsHealthTimer); stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); });
+// Последний рубеж: перед выходом синхронно валим все дочерние процессы, кого
+// ещё видим. Оболочка держит их в группе процессов Windows и добьёт даже при
+// снятии через диспетчер, но при обычном выходе node гасим сами и сразу — без
+// этого relay/ffmpeg успевали пережить закрытие на секунды и жрали процессор.
+function killAllChildren() {
+  const дети = [activeProcess, activeAuxProcess, activeWindowProcess, relayProcess, standbyProcess,
+    pauseFrameProcess, mediaMtxProcess, tunnelProcess, unityBuildProcess, previewProcess, windowWatcher,
+    ...rtspPushProcesses.values(), ...mediaCacheProcesses.values(), ...tunnelCandidates, ...previewChildren];
+  for (const child of дети) { try { child?.kill('SIGKILL'); } catch {} }
+}
+process.on('exit', killAllChildren);
+process.on('SIGINT', () => { shuttingDown = true; if (hlsHealthTimer) clearInterval(hlsHealthTimer); stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); killAllChildren(); server.close(() => process.exit(0)); });
+process.on('SIGTERM', () => { shuttingDown = true; if (hlsHealthTimer) clearInterval(hlsHealthTimer); stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); killAllChildren(); server.close(() => process.exit(0)); });
