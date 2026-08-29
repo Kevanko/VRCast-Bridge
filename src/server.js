@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.0';
+const APP_VERSION = '0.54.1';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -269,10 +269,16 @@ const YTDLP_BUNDLED = join(ROOT, 'tools', 'yt-dlp.exe');
 const YTDLP_UPDATED = join(DATA_DIR, 'tools', 'yt-dlp.exe');
 const SERVER_RTSP_PORT = 8554;
 const PINGGY_DATA_DIR = join(DATA_DIR, 'pinggy-runtime');
+// Версии на старте не спрашиваем запуском самих утилит: yt-dlp (PyInstaller)
+// распаковывается ~1 с на каждый запуск, cloudflared и pinggy добавляют ещё
+// столько же — это секунды простоя при каждом открытии программы. Достаточно,
+// что файл на месте; действительно ли он рабочий, без спешки уточнит фоновая
+// проверка. ffmpeg оставляем — его запуск дёшев (~30 мс) и точность тут важна.
 let tools = {
-  ffmpeg: toolAvailable('ffmpeg', ['-version']), ytdlp: toolAvailable(ytdlpPath()),
-  cloudflared: Boolean(CLOUDFLARED()) && toolAvailable(CLOUDFLARED()),
-  pinggy: Boolean(PINGGY()) && toolAvailable(PINGGY()),
+  ffmpeg: toolAvailable('ffmpeg', ['-version']),
+  ytdlp: existsSync(YTDLP_UPDATED) || existsSync(join(DATA_DIR, 'tools', 'yt-dlp.exe')) || existsSync(YTDLP_BUNDLED),
+  cloudflared: Boolean(CLOUDFLARED()),
+  pinggy: Boolean(PINGGY()),
   mediamtx: Boolean(MEDIAMTX()),
   plink: Boolean(PLINK()),
 };
@@ -1286,7 +1292,9 @@ function findFile(directory, name) {
 async function refreshToolsAsync() {
   const проба = async (name, args) => (await spawnCollect(name, args, 5000).catch(() => null))?.status === 0;
   tools.ffmpeg = await проба('ffmpeg', ['-version']);
-  tools.ytdlp = Boolean(ytdlpPath());
+  // ytdlpPath() в конце возвращает 'yt-dlp' — оно всегда истинно, поэтому
+  // проверяем именно наличие файла, а не путь.
+  tools.ytdlp = existsSync(YTDLP_UPDATED) || existsSync(join(DATA_DIR, 'tools', 'yt-dlp.exe')) || existsSync(YTDLP_BUNDLED);
   tools.cloudflared = Boolean(CLOUDFLARED());
   tools.pinggy = Boolean(PINGGY());
   tools.mediamtx = Boolean(MEDIAMTX());
@@ -1325,7 +1333,13 @@ function importLocalTools() {
 
 async function ensureTools() {
   importLocalTools();
-  refreshTools();
+  // Свою папку с ffmpeg добавляем в PATH сразу — это не требует запуска утилит.
+  // А сами проверки версий делаем без блокировки event loop: sync-вариант
+  // тормозил старт на секунду (yt-dlp распаковывается ~1 с на запуск).
+  if (existsSync(join(TOOL_DIR, 'ffmpeg.exe')) && !process.env.PATH.includes(TOOL_DIR)) {
+    process.env.PATH = `${TOOL_DIR};${process.env.PATH}`;
+  }
+  await refreshToolsAsync();
   const нужно = [];
   if (!existsSync(join(TOOL_DIR, 'yt-dlp.exe')) && !existsSync(YTDLP_UPDATED)) нужно.push('yt-dlp.exe');
   if (!tools.mediamtx) нужно.push('mediamtx.exe');
@@ -1333,7 +1347,7 @@ async function ensureTools() {
   if (!tools.cloudflared) нужно.push('cloudflared.exe');
   for (const name of нужно) await downloadTool(name);
   if (нужно.length) {
-    refreshTools();
+    await refreshToolsAsync();
     if (tools.mediamtx && !mediaMtxProcess) startMediaMtx();
     if (tools.ffmpeg && !relayProcess) { try { ensureRelay(streamProfile('queue')); } catch {} }
   }
@@ -2257,7 +2271,9 @@ function probeRtspServer(host, port) {
     let ответ = '';
     const socket = netConnect({ host, port });
     const конец = ок => { try { socket.destroy(); } catch {} resolve(ок); };
-    socket.setTimeout(4000);
+    // 3 секунды: выключенный сервер (TCP за VPN проходит, а RTSP молчит)
+    // краснеет быстрее, но живому серверу подальше хватает времени ответить.
+    socket.setTimeout(3000);
     socket.on('timeout', () => конец(false));
     socket.on('error', () => конец(false));
     const разрыв = String.fromCharCode(13, 10);
