@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.53.3';
+const APP_VERSION = '0.53.4';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -920,7 +920,11 @@ function editServer(id, body) {
   }
   saveConfig({ servers: savedServers().map(item => item.id === next.id ? next : item) });
   if (config.outputMode === 'remote' && config.activeServerId === next.id) {
-    remoteReachable = null;
+    // Сбрасываем и старую пометку об отказе канала: после смены адреса или
+    // режима ссылки подключаемся заново с чистого листа, без залежавшегося
+    // «сервер настроен по-старому».
+    remoteReachable = null; remoteChannelRejected = false;
+    probeAllServers();
     stopRtspPush();
     if (relayProcess) startRtspPush();
   }
