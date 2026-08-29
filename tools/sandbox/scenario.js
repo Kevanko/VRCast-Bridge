@@ -98,6 +98,43 @@ try {
   await послать('/api/config', { outputMode: 'local' });
 } catch (ошибка) { шаг('публичная ссылка выдаётся', false, String(ошибка.message).slice(0, 120)); }
 
+// 7b. Свой сервер: подключение по адресу и ключу, постоянная и временная ссылки.
+// Ключ лежит рядом в общей папке (nix.key) и в репозиторий не попадает; нет
+// файла — шаг пропускаем, чтобы прогон не зависел от секретов.
+try {
+  const ключФайл = join(ОБЩАЯ, 'nix.key');
+  if (!existsSync(ключФайл)) {
+    шаг('свой сервер: подключение по ключу', true, 'пропущено — нет nix.key');
+  } else {
+    const { readFileSync } = await import('node:fs');
+    const ключ = readFileSync(ключФайл, 'utf8').trim();
+    await послать('/api/stop', {});
+    const добавлен = await послать('/api/servers/attach', { host: '217.60.1.131', rtspPort: 8554, key: ключ, name: 'Проверка' });
+    const id = добавлен.server?.id;
+    шаг('свой сервер: добавляется по адресу и ключу', Boolean(id));
+    [ок, s] = await ждать(d => (d.config.servers || []).find(x => x.id === id)?.reachable === true, 40);
+    шаг('свой сервер: отвечает (RTSP)', ок);
+    await послать(`/api/servers/${id}/activate`, {});
+    [ок, s] = await ждать(d => d.rtsp?.remote?.live === true, 40);
+    шаг('свой сервер: постоянная ссылка играет', ок, s?.rtsp?.remote ? `канал ${s.rtsp.remote.channel}` : '');
+    await послать(`/api/servers/${id}/linkmode`, { permanent: false, regenerate: true });
+    [ок, s] = await ждать(d => d.rtsp?.remote?.live === true && !d.rtsp?.remote?.channelRejected, 40);
+    шаг('свой сервер: временная ссылка принимается', ок, s?.rtsp?.remote ? `канал ${s.rtsp.remote.channel}` : '');
+    await послать('/api/stop', {});
+    await послать(`/api/servers/${id}/remove`, { password: '' });
+    await послать('/api/config', { outputMode: 'local' });
+    шаг('свой сервер: убирается из списка', true);
+  }
+} catch (ошибка) { шаг('свой сервер: подключение по ключу', false, String(ошибка.message).slice(0, 140)); }
+
+// 7c. Выбор кодировщика (авто/процессор) сохраняется и применяется.
+try {
+  let r = await послать('/api/config', { encoderMode: 'cpu' });
+  const наCPU = r.status?.performance?.encoderMode === 'cpu' || r.performance?.encoderMode === 'cpu';
+  r = await послать('/api/config', { encoderMode: 'auto' });
+  шаг('выбор кодировщика переключается', наCPU);
+} catch (ошибка) { шаг('выбор кодировщика переключается', false, String(ошибка.message).slice(0, 100)); }
+
 // 8. Минута эфира без просадок
 try {
   await послать('/api/start/queue', {});
