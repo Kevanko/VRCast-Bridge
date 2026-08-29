@@ -102,6 +102,9 @@ details.rail-card[open]>summary .chevron{transform:rotate(180deg)}
 .stop-live:hover{background:#442528}
 /* Режимов вещания стало три — раскладываем в один ряд */
 .broadcast-mode{grid-template-columns:repeat(3,1fr)}
+/* Обводка фокуса — внутрь кнопки, иначе на крайней «Свой сервер» она вылезала
+   за правый край коробки. Так рамка ровная у всех трёх, с одинаковым отступом. */
+.broadcast-mode button:focus-visible,.seg button:focus-visible{outline-offset:-2px}
 /* Хранилище */
 .storage-box{margin-top:8px;padding:10px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface)}
 .storage-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:9px;color:var(--muted)}

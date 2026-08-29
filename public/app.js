@@ -414,18 +414,18 @@ function render(state) {
   else if(state.config.outputMode==='remote'){
     const remote=state.rtsp?.remote||{};
     shownUrl=remote.configured?remote.url:'';
-    hint=remote.channelRejected?'Нажмите «Настроить сервер» — на нём стоит старая настройка.'
+    hint=remote.channelRejected?'Этот сервер принимает только постоянную ссылку. Откройте «···» рядом с ним и включите «Постоянная ссылка».'
       :remote.reachable===false?'Сервер не отвечает. Проверьте, что машина включена и запущена трансляция.':'';
     // «Подключаюсь…» — только когда эфир реально идёт и ждём канал. Просто
     // выбрали живой сервер и не вещаем — это «Сервер на связи», а не вечное
     // подключение. Не отвечает — честная ошибка, а не зелёная лампа.
     linkText=!remote.configured?'Выберите сервер'
       :remote.reachable===false?'Сервер не отвечает'
-      :remote.channelRejected?'Сервер настроен по-старому'
+      :remote.channelRejected?'Нужна постоянная ссылка'
       :remote.live?'Через ваш сервер'
       :state.running?'Подключаюсь…':'Сервер на связи';
     linkGood=Boolean(remote.live);
-    linkError=Boolean(remote.configured&&(remote.reachable===false||(!remote.live&&state.running)));
+    linkError=Boolean(remote.configured&&(remote.reachable===false||remote.channelRejected||(!remote.live&&state.running)));
   }
   else {
     // «Готово» теперь означает, что канал реально отвечает плееру, а не что
