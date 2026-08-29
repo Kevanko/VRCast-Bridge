@@ -208,9 +208,9 @@ function renderServers(state) {
     список.innerHTML=servers.length?servers.map(item=>{
       const выбран=item.id===active&&state.config.outputMode==='remote';
       const лампа=!выбран?'':remote.live?'live':remote.reachable===false?'down':'wait';
-      // Слово появляется только если что-то не так: зелёная лампа и без него
-      // говорит «идёт», а лишняя подпись на каждой карточке — шум.
-      const состояние=!выбран?'':remote.reachable===false?'Не отвечает':remote.live?'':'Подключаюсь';
+      // Лампа говорит всё сама: зелёная — идёт, серая — подключаемся. Слово
+      // оставляем только на явной поломке, «Подключаюсь» на карточке — шум.
+      const состояние=выбран&&remote.reachable===false?'Не отвечает':'';
       return `<li class="server-card${выбран?' on':''}" data-id="${escapeHtml(item.id)}">
         <button class="card-pick" type="button" aria-pressed="${выбран}" title="Вещать через этот сервер">
           <i class="lamp ${лампа}"></i>
@@ -228,6 +228,43 @@ function renderServers(state) {
     :state.config.outputMode!=='remote'?'Выберите сервер, чтобы вещать через него.'
     :'';
 }
+
+// «Этот ПК»: по каким адресам эту машину видно. Ссылки локальной сети идут
+// друзьям в той же сети; белый IP — через интернет, если открыт порт.
+function renderLocalOutput(state){
+  const прямые=state.rtsp?.direct||[];
+  const список=$('#directList');
+  const поле=$('#whiteIp');
+  const подпись=JSON.stringify([directKey(прямые),state.config.whiteIp]);
+  if(список.dataset.signature!==подпись){
+    список.dataset.signature=подпись;
+    список.innerHTML=прямые.map(d=>`<li class="direct-card${d.white?' white':''}">
+      <button class="direct-copy" type="button" data-url="${escapeHtml(d.url)}" title="Скопировать ссылку">
+        <span class="direct-badge">${d.white?'через интернет':'своя сеть'}</span>
+        <code>${escapeHtml(d.url)}</code>
+        <svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg>
+      </button></li>`).join('')
+      ||'<li class="direct-empty">Сетевых адресов не видно — доступна только ссылка на этом ПК.</li>';
+  }
+  if(document.activeElement!==поле) поле.value=state.config.whiteIp||'';
+  const естьБелый=прямые.some(d=>d.white);
+  $('#localHint').textContent=естьБелый
+    ?'Ссылка «через интернет» откроется у друзей, если на роутере проброшен порт 8554.'
+    :'Друзьям в вашей сети подойдёт ссылка «своя сеть». Есть белый IP — впишите его, дам ссылку для интернета.';
+}
+function directKey(list){ return list.map(d=>d.url+d.white).join('|'); }
+
+// Прямая ссылка на этот ПК — по клику копируем.
+$('#directList').addEventListener('click',async event=>{
+  const кнопка=event.target.closest('.direct-copy'); if(!кнопка)return;
+  try{ await navigator.clipboard.writeText(кнопка.dataset.url); toast('Ссылка скопирована'); }
+  catch{ toast('Не удалось скопировать',true); }
+});
+// Белый IP: сохраняем, как только человек закончил вводить.
+$('#whiteIp').addEventListener('change',async()=>{
+  try{ render(await saveConfig(false)); toast($('#whiteIp').value.trim()?'Белый IP сохранён':'Белый IP убран'); }
+  catch(error){ toast(error.message,true); }
+});
 
 // Карточка целиком — переключатель: нажали, значит вещаем через этот сервер.
 $('#serverList').addEventListener('click',async event=>{
@@ -251,6 +288,8 @@ async function openServerDialog(id){
   $('#serverDialogTitle').textContent=сервер.name;
   $('#serverRename').value=сервер.name;
   $('#serverAddress').value=сервер.host;
+  $('#serverPermanent').checked=сервер.permanentLink!==false;
+  рисоватьРежимСсылки();
   $('#wipeConfirm').hidden=true;
   $('#wipePassword').value='';
   показатьОшибку($('#serverDialogError'),'');
@@ -277,6 +316,23 @@ function рисоватьКлюч(){
   $('#copyServerKey').hidden=!есть;
 }
 
+function рисоватьРежимСсылки(){
+  const постоянная=$('#serverPermanent').checked;
+  $('#permanentNote').textContent=постоянная
+    ?'Один адрес навсегда — раздайте его раз и не меняйте.'
+    :'Случайный адрес. Можно сменить в любой момент — старая ссылка перестанет открываться.';
+  $('#serverNewLink').hidden=постоянная;
+}
+$('#serverPermanent').addEventListener('change',рисоватьРежимСсылки);
+$('#serverNewLink').addEventListener('click',async()=>{
+  const кнопка=$('#serverNewLink'); кнопка.disabled=true;
+  try{
+    render(await api(`/api/servers/${encodeURIComponent(правимСервер)}/linkmode`,{method:'POST',body:JSON.stringify({permanent:false,regenerate:true})}));
+    toast('Новый адрес готов — старая ссылка больше не работает');
+  }catch(error){ показатьОшибку($('#serverDialogError'),error.message); }
+  finally{ кнопка.disabled=false; }
+});
+
 function закрытьДиалогСервера(){
   // Только close(): removeAttribute('open') оставляло модальное окно в
   // половинчатом состоянии — логически закрыто, а на экране висит.
@@ -301,7 +357,7 @@ $('#saveServer').addEventListener('click',async()=>{
   const кнопка=$('#saveServer'); кнопка.disabled=true;
   try{
     const результат=await api(`/api/servers/${encodeURIComponent(правимСервер)}/edit`,{method:'POST',
-      body:JSON.stringify({name:$('#serverRename').value,host:$('#serverAddress').value})});
+      body:JSON.stringify({name:$('#serverRename').value,host:$('#serverAddress').value,permanentLink:$('#serverPermanent').checked})});
     // Окно закрываем первым: если перерисовка споткнётся, это не должно
     // оставлять человека в открытом окне с уже сохранёнными изменениями.
     закрытьДиалогСервера(); toast('Сохранено'); render(результат.status);
@@ -448,7 +504,7 @@ function render(state) {
   const screenSource=ui.source==='screen';
   $('#menuMediaQuality').hidden=screenSource; $('#menuMediaFps').hidden=screenSource;
   $('#menuScreenQuality').hidden=!screenSource; $('#menuScreenFps').hidden=!screenSource;
-  renderNowPlaying(state); renderProgress(); renderTemplates(state); renderServers(state); renderStorage(state); startPreview(state);
+  renderNowPlaying(state); renderProgress(); renderTemplates(state); renderServers(state); renderLocalOutput(state); renderStorage(state); startPreview(state);
   // Пуск и остановка — отдельная явная кнопка, и её название прямо говорит,
   // что именно начнётся или прекратится. Раньше кнопка пуска была спрятана
   // всегда, и запустить эфир экрана можно было только через «Показать экран
@@ -474,7 +530,7 @@ function chooseSource(source) {
   if (source==='screen'){refreshWindows().catch(()=>{});if(!ui.status?.running)refreshCapturePreview().catch(()=>{});}
   if(ui.status)render(ui.status);
 }
-function chooseOutput(output) { ui.output=output; $$('.broadcast-mode button').forEach(button=>button.classList.toggle('active',button.dataset.output===output)); $('#remoteOutput').hidden=output!=='remote'; }
+function chooseOutput(output) { ui.output=output; $$('.broadcast-mode button').forEach(button=>button.classList.toggle('active',button.dataset.output===output)); $('#remoteOutput').hidden=output!=='remote'; $('#localOutput').hidden=output!=='local'; }
 function chooseCaptureMode(mode) { $('#monitorFields').hidden=mode!=='monitor'; $('#windowFields').hidden=mode!=='window'&&$('#audioMode').value!=='process'; $('#regionFields').hidden=mode!=='region'; if(mode==='window'&&$('#audioMode').value==='system'){$('#audioMode').value='process';chooseAudioMode('process');} }
 function chooseAudioMode(mode) {
   // Звук процесса привязан к выбранному окну — селектор окна нужен даже при захвате монитора/области.
@@ -555,7 +611,7 @@ async function refreshWindows() {
 
 function configPayload() {
   const selectedWindow=ui.sources.windows.find(item=>item.handle===$('#windowSource').value);
-  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100 };
+  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim() };
 }
 async function saveConfig(applyLive = false) { return api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),applyLive})}); }
 

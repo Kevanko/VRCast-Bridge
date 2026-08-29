@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.52.1';
+const APP_VERSION = '0.53.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -86,6 +86,7 @@ const defaults = {
   autoQuality: true,
   cacheLimitGb: 0,
   encoderMode: 'auto',
+  whiteIp: '',
 };
 
 function loadConfig() {
@@ -878,6 +879,11 @@ function editServer(id, body) {
     if (!/^[a-z0-9.-]+$/i.test(адрес)) throw new Error('Адрес сервера: только буквы, цифры, точки и дефис.');
     next.host = адрес;
   }
+  if (body.permanentLink !== undefined) {
+    next.permanentLink = Boolean(body.permanentLink);
+    if (next.permanentLink) next.channel = 'live';
+    else if (!next.channel || next.channel === 'live') next.channel = randomChannel();
+  }
   saveConfig({ servers: savedServers().map(item => item.id === next.id ? next : item) });
   if (config.outputMode === 'remote' && config.activeServerId === next.id) {
     remoteReachable = null;
@@ -910,6 +916,7 @@ async function attachServer(body) {
     name: String(body.name || прежний?.name || '').trim().slice(0, 60) || randomServerName(),
     host: адрес, sshPort: прежний?.sshPort || 22, user: прежний?.user || 'root', hostKey: прежний?.hostKey || '',
     channel: канал, publicIp: адрес, rtspPort: порт, hlsPort: прежний?.hlsPort || 0, publishKey: ключ,
+    permanentLink: прежний?.permanentLink ?? true,
     addedAt: прежний?.addedAt || new Date().toISOString(),
   };
   saveConfig({ servers: [...savedServers().filter(item => item.id !== entry.id), entry].slice(0, 20), activeServerId: entry.id });
@@ -943,6 +950,7 @@ async function deployServer(body) {
     host: hostName, sshPort: server.sshPort, user: server.user, hostKey: server.hostKey,
     channel: String(body.channel || existing?.channel || 'live').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'live',
     publicIp: result[1], rtspPort: Number(result[2]), hlsPort: Number(result[3]), publishKey: result[4],
+    permanentLink: existing?.permanentLink ?? true,
     addedAt: existing?.addedAt || new Date().toISOString(),
   };
   const servers = savedServers().filter(item => item.id !== entry.id);
@@ -978,6 +986,69 @@ function savedServers() {
 
 function activeServer() {
   return savedServers().find(item => item.id === config.activeServerId) || null;
+}
+
+// Случайный путь для «временной» ссылки: буква впереди, чтобы путь RTSP был
+// заведомо корректным. Такой адрес не угадать, и его можно сменить в любой миг.
+function randomChannel() {
+  return 's' + crypto.randomBytes(5).toString('hex');
+}
+
+// Меняем режим ссылки у сервера. Постоянная — путь всегда «live», раздал один
+// раз и забыл. Временная — случайный путь, который хозяин может сбросить кнопкой.
+function setServerLinkMode(id, { permanent, regenerate = false } = {}) {
+  const server = savedServers().find(item => item.id === String(id));
+  if (!server) throw new Error('Сервер не найден.');
+  const next = { ...server };
+  if (permanent !== undefined) next.permanentLink = Boolean(permanent);
+  if (next.permanentLink === false) {
+    if (regenerate || !next.channel || next.channel === 'live') next.channel = randomChannel();
+  } else {
+    next.channel = 'live';
+  }
+  saveConfig({ servers: savedServers().map(item => item.id === next.id ? next : item) });
+  if (config.outputMode === 'remote' && config.activeServerId === next.id) {
+    remoteReachable = null; remoteChannelRejected = false;
+    stopRtspPush();
+    if (relayProcess) startRtspPush();
+  }
+  log(`Сервер «${next.name}»: ссылка ${next.permanentLink === false ? 'временная' : 'постоянная'}`);
+  return next;
+}
+
+// «Белым» считаем только адрес, по которому машину реально видно из интернета.
+// Кроме RFC1918 отсекаем и то, что наружу не выходит: CGNAT провайдера,
+// тестовые диапазоны (в них часто сидят адаптеры VPN — тот же Koala Clash),
+// multicast и прочее зарезервированное. Иначе адрес VPN выдавался бы за белый.
+function isPrivateIp(ip) {
+  const p = ip.split('.').map(Number);
+  if (p.length !== 4 || p.some(n => Number.isNaN(n) || n < 0 || n > 255)) return true;
+  const [a, b] = p;
+  if (a === 10 || a === 127 || a === 0) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT провайдера
+  if (a === 198 && (b === 18 || b === 19)) return true; // тестовый диапазон / VPN
+  if (a >= 224) return true; // multicast и зарезервированное
+  return false;
+}
+
+// Прямые ссылки на локальный канал: по каким адресам эту машину видно. Белый
+// IP (если он есть на сетевой карте или задан вручную) работает через интернет.
+function directLinks() {
+  const канал = 'live';
+  const ips = getLanAddresses();
+  const свои = [...new Set(ips)];
+  const ручной = String(config.whiteIp || '').trim();
+  if (ручной && !свои.includes(ручной)) свои.push(ручной);
+  // Порядок по пользе: белый IP (интернет) → домашняя сеть 192.168/10 →
+  // 172.x (чаще виртуальные адаптеры WSL/Hyper-V, другу от них толку мало).
+  const ранг = ip => (!isPrivateIp(ip) || ip === ручной) ? 0 : /^(192\.168\.|10\.)/.test(ip) ? 1 : 2;
+  return свои
+    .filter(ip => /^[a-z0-9.:-]+$/i.test(ip))
+    .map(ip => ({ ip, white: !isPrivateIp(ip) || ip === ручной, url: `rtspt://${ip}:${RTSP_PORT}/${канал}` }))
+    .sort((a, b) => ранг(a.ip) - ранг(b.ip));
 }
 
 // «Свой сервер»: тот же мгновенный RTSP, но на машине с белым IP — ссылка
@@ -1350,6 +1421,7 @@ function status() {
     linkReady: config.outputMode === 'remote' ? remoteChannelLive : channelLive,
     rtsp: { available: Boolean(mediaMtxProcess && rtspPushProcesses.has('local')), live: channelLive, url: rtspAddress(),
       lanUrls: getLanAddresses().map(ip => `rtspt://${ip}:${RTSP_PORT}/live`),
+      direct: directLinks(), whiteIp: config.whiteIp || '',
       remote: config.outputMode === 'remote'
         ? { configured: Boolean(remoteRtspTarget()), live: remoteChannelLive, pushing: rtspPushProcesses.has('remote'), reachable: remoteReachable,
             channel: remoteRtspTarget()?.channel || '', channelRejected: remoteChannelRejected,
@@ -1358,7 +1430,8 @@ function status() {
     tunnel: { state: tunnelState, ready: Boolean(tunnelUrl), provider: tunnelProvider, expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError },
     config: { ...config,
       servers: savedServers().map(item => ({ id: item.id, name: item.name, host: item.host,
-        rtspPort: item.rtspPort, addedAt: item.addedAt, publishKey: undefined })) },
+        rtspPort: item.rtspPort, addedAt: item.addedAt,
+        permanentLink: item.permanentLink !== false, channel: item.channel || 'live', publishKey: undefined })) },
     playbackUrl: publicAddress(),
     webrtcUrl: mediaMtxProcess ? `http://127.0.0.1:${WEBRTC_PORT}/live/whep` : '',
     localPlaybackUrl: `http://127.0.0.1:${PORT}/stream/live.m3u8`,
@@ -3858,6 +3931,12 @@ const server = http.createServer(async (req, res) => {
       log(`Свой сервер: канал ${channel}`);
       return json(res, 200, status());
     }
+    if (req.method === 'POST' && /^\/api\/servers\/[^/]+\/linkmode$/.test(url.pathname)) {
+      const id = decodeURIComponent(url.pathname.split('/')[3]);
+      const body = await readBody(req);
+      setServerLinkMode(id, { permanent: body.permanent, regenerate: Boolean(body.regenerate) });
+      return json(res, 200, status());
+    }
     if (req.method === 'POST' && /^\/api\/servers\/[^/]+\/remove$/.test(url.pathname)) {
       const id = decodeURIComponent(url.pathname.split('/')[3]);
       const body = await readBody(req);
@@ -3867,7 +3946,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && /^\/api\/servers\/[^/]+\/activate$/.test(url.pathname)) {
       const id = decodeURIComponent(url.pathname.split('/')[3]);
       if (!savedServers().some(item => item.id === id)) throw new Error('Сервер не найден.');
+      // Уже вещаем через этот же сервер — не дёргаем пушер заново. Раньше
+      // быстрые повторные тычки по карточке рвали и поднимали RTSP по кругу,
+      // и переключение будто зависало.
+      if (config.outputMode === 'remote' && config.activeServerId === id) return json(res, 200, status());
       saveConfig({ activeServerId: id, outputMode: 'remote' });
+      remoteReachable = null; remoteChannelRejected = false;
       stopPublicTunnel();
       stopRtspPush();
       if (relayProcess) startRtspPush();
@@ -3921,6 +4005,7 @@ const server = http.createServer(async (req, res) => {
         videoBitrate: Math.max(0, Math.min(20000, Number(body.videoBitrate ?? config.videoBitrate ?? 0) || 0)),
         autoQuality: body.autoQuality === undefined ? config.autoQuality !== false : Boolean(body.autoQuality),
         encoderMode: ['auto', 'gpu', 'cpu'].includes(body.encoderMode) ? body.encoderMode : (config.encoderMode || 'auto'),
+        whiteIp: body.whiteIp === undefined ? (config.whiteIp || '') : String(body.whiteIp).trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0].slice(0, 60).replace(/[^a-z0-9.:-]/gi, ''),
         cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),

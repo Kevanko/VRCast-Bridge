@@ -75,8 +75,17 @@
 
 
         <details class="rail-card" id="cardOutput" open>
-          <summary class="rail-card-head"><svg class="ic" aria-hidden="true"><use href="#i-broadcast"/></svg><span>Кто увидит</span><svg class="ic chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
-          <div class="broadcast-mode"><button class="active" data-output="local" title="Ссылка работает только на этом компьютере">Только я</button><button data-output="remote" title="Через ваш сервер — ссылка не меняется">Мой сервер</button><button data-output="tunnel" title="Бесплатный туннель, задержка около трёх секунд">Друзья</button></div>
+          <summary class="rail-card-head"><svg class="ic" aria-hidden="true"><use href="#i-broadcast"/></svg><span>Куда идёт ссылка</span><svg class="ic chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+          <div class="broadcast-mode"><button class="active" data-output="local" title="Ссылка открывается только на этом компьютере — для проверки">Этот ПК</button><button data-output="tunnel" title="Бесплатная ссылка через интернет, задержка около трёх секунд">Быстрая ссылка</button><button data-output="remote" title="Через ваш сервер — стабильный адрес, задержки почти нет">Свой сервер</button></div>
+
+          <section class="output-panel" id="localOutput" hidden>
+            <ul class="direct-list" id="directList"></ul>
+            <label class="white-ip-field">Белый IP, если есть
+              <input id="whiteIp" type="text" inputmode="decimal" placeholder="например, 91.210.44.7" autocomplete="off">
+            </label>
+            <p class="field-help" id="localHint"></p>
+          </section>
+
           <section class="output-panel" id="remoteOutput" hidden>
             <ul class="server-list" id="serverList"></ul>
             <button class="btn" id="addServerToggle" type="button" aria-expanded="false" aria-controls="addServerForm">
@@ -279,7 +288,15 @@
     <div class="dialog-head"><b id="serverDialogTitle">Сервер</b><button id="serverDialogClose" type="button" aria-label="Закрыть">×</button></div>
     <label>Название<input id="serverRename" type="text" maxlength="60" autocomplete="off"></label>
     <label>Адрес<input id="serverAddress" type="text" placeholder="123.45.67.89" autocomplete="off"></label>
-    
+
+    <div class="link-mode">
+      <label class="switch-row">
+        <input type="checkbox" id="serverPermanent" checked>
+        <span class="switch-copy"><b>Постоянная ссылка</b><small id="permanentNote">Один адрес навсегда — раздайте его раз и не меняйте.</small></span>
+      </label>
+      <button class="btn ghost" id="serverNewLink" type="button" hidden>Сменить адрес</button>
+    </div>
+
     <div class="key-field">
       <span class="key-label">Ключ для друзей</span>
       <div class="key-row">
