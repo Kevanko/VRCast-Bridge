@@ -101,7 +101,10 @@ details.rail-card[open]>summary .chevron{transform:rotate(180deg)}
 .stop-live{border-color:#7a3a3d;background:#382022;color:#e19a9d}
 .stop-live:hover{background:#442528}
 /* Режимов вещания стало три — раскладываем в один ряд */
-.broadcast-mode{grid-template-columns:repeat(3,1fr)}
+.broadcast-mode{grid-template-columns:repeat(3,1fr);overflow:hidden}
+/* Подсветка выбранной кнопки не должна вылезать за коробку. Колонки под текст
+   разной длины дают долю пикселя переполнения у крайней «Свой сервер» —
+   overflow:hidden обрезает её ровно по скруглённому краю. */
 /* Обводка фокуса — внутрь кнопки, иначе на крайней «Свой сервер» она вылезала
    за правый край коробки. Так рамка ровная у всех трёх, с одинаковым отступом. */
 .broadcast-mode button:focus-visible,.seg button:focus-visible{outline-offset:-2px}
