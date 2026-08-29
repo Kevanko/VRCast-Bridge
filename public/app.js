@@ -54,7 +54,7 @@ function renderNowPlaying(state) {
   const item=currentItem(state), cover=$('#nowCover');
   if (item) {
     $('#nowTitle').textContent=item.title; $('#nowSource').textContent=item.local?'Файл с компьютера':'Медиа по ссылке';
-    cover.innerHTML=item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="">`:`<span>${icon('note')}</span>`;
+    cover.innerHTML=item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{innerHTML:'${icon('note').replace(/'/g,"\\'")}'}))">`:`<span>${icon('note')}</span>`;
   } else if (state.running && state.activeKind==='screen') {
     $('#nowTitle').textContent=captureLabel(); $('#nowSource').textContent=audioLabel(); cover.innerHTML=`<span>${icon('display')}</span>`;
   } else { $('#nowTitle').textContent='Эфир не запущен'; $('#nowSource').textContent=ui.source==='queue'?'Добавьте видео справа':'Выберите экран или окно справа'; cover.innerHTML=`<span>${icon('note')}</span>`; }
@@ -444,7 +444,7 @@ function render(state) {
   monitor.classList.toggle('tally-cue',Boolean(state.running&&!streamReady));
   const list=$('#queueList');
   const queueSignature=JSON.stringify([state.currentId,ui.unitySelectedId,$('#playerMode').value,state.queue.map(item=>[item.id,item.title,item.thumbnail,item.duration,item.unavailable])]);
-  if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>`<div class="queue-item ${state.currentId===item.id?'playing':''} ${item.unavailable?'unavailable':''} ${$('#playerMode').value==='unity'&&ui.unitySelectedId===item.id?'unity-selected':''}" data-id="${item.id}" ${item.unavailable?'data-unavailable="1"':''} role="button" tabindex="0" title="${$('#playerMode').value==='unity'?'Выбрать для подготовки Unity':'Включить этот трек'}"><span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="">`:String(index+1).padStart(2,'0')}</span><span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small>${item.unavailable?'⚠ недоступен — пропускается':`${item.local?'Локальный файл · ':''}${item.duration?formatTime(item.duration):'длительность неизвестна'}`}</small></span><button class="remove-item" aria-label="Удалить из очереди" title="Удалить">×</button></div>`).join(''):'<div class="empty-state">Очередь пуста</div>';}
+  if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>`<div class="queue-item ${state.currentId===item.id?'playing':''} ${item.unavailable?'unavailable':''} ${$('#playerMode').value==='unity'&&ui.unitySelectedId===item.id?'unity-selected':''}" data-id="${item.id}" ${item.unavailable?'data-unavailable="1"':''} role="button" tabindex="0" title="${$('#playerMode').value==='unity'?'Выбрать для подготовки Unity':'Включить этот трек'}"><span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="" onerror="this.replaceWith('${String(index+1).padStart(2,'0')}')">`:String(index+1).padStart(2,'0')}</span><span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small>${item.unavailable?'⚠ недоступен — пропускается':`${item.local?'Локальный файл · ':''}${item.duration?formatTime(item.duration):'длительность неизвестна'}`}</small></span><button class="remove-item" aria-label="Удалить из очереди" title="Удалить">×</button></div>`).join(''):'<div class="empty-state">Очередь пуста</div>';}
   const screenSource=ui.source==='screen';
   $('#menuMediaQuality').hidden=screenSource; $('#menuMediaFps').hidden=screenSource;
   $('#menuScreenQuality').hidden=!screenSource; $('#menuScreenFps').hidden=!screenSource;
@@ -938,7 +938,10 @@ async function startWebrtcPreview(url, video, monitor, key){
     const поток=new MediaStream();
     rtc.ontrack=event=>{ поток.addTrack(event.track); video.srcObject=поток; monitor.classList.add('previewing'); video.play().catch(()=>{}); };
     rtc.onconnectionstatechange=()=>{
-      if(['failed','disconnected'].includes(rtc.connectionState)&&ui.rtc===rtc){
+      // Только 'failed' — это конец. 'disconnected' WebRTC часто чинит сам за
+      // пару секунд; если рвать и пересобирать предпросмотр на каждом таком
+      // мигании, картинка как раз и дёргается. Не починится — станет 'failed'.
+      if(rtc.connectionState==='failed'&&ui.rtc===rtc){
         ui.rtc=null; ui.previewUrl='';
         if(ui.status?.running)setTimeout(()=>startPreview(ui.status),1500);
       }
