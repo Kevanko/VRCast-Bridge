@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.53.2';
+const APP_VERSION = '0.53.3';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -556,6 +556,15 @@ function activatePublicTunnel(child, provider, url) {
   log(`Публичная ссылка готова · ${provider} — её можно отправить друзьям`);
 }
 
+// Сообщение о неудаче с учётом выбора: если человек сам указал провайдера,
+// честно называем его — «в вашей сети он недоступен», а не общая фраза.
+function tunnelFailMessage() {
+  const имя = { cloudflare: 'Cloudflare', pinggy: 'Pinggy', localhostrun: 'localhost.run' }[config.tunnelProvider];
+  return имя
+    ? `«${имя}» не отвечает — в вашей сети он, похоже, недоступен. Выберите «Авто» или другой туннель.`
+    : 'Не удалось подключить ни один публичный канал. Отключите VPN/фильтр или выберите другой туннель.';
+}
+
 function trackTunnelChild(child, provider) {
   tunnelCandidates.add(child);
   child.on('error', error => {
@@ -565,7 +574,7 @@ function trackTunnelChild(child, provider) {
   child.on('close', code => {
     tunnelCandidates.delete(child);
     if (tunnelProcess !== child) {
-      if (!tunnelUrl && !tunnelCandidates.size && !stopping && !tunnelFallbackTimer) { tunnelState = 'error'; tunnelError = 'Не удалось подключить ни один публичный канал.'; }
+      if (!tunnelUrl && !tunnelCandidates.size && !stopping && !tunnelFallbackTimer) { tunnelState = 'error'; tunnelError = tunnelFailMessage(); }
       return;
     }
     const stoppedProvider = tunnelProvider;
@@ -648,17 +657,21 @@ function startPublicTunnel() {
   let провайдер = config.tunnelProvider || 'auto';
   if (провайдер === 'cloudflare' && !tools.cloudflared) провайдер = 'auto';
   if (провайдер === 'pinggy' && !tools.pinggy) провайдер = 'auto';
+  if (провайдер === 'localhostrun' && !PLINK()) провайдер = 'auto';
   if (tools.cloudflared && (провайдер === 'auto' || провайдер === 'cloudflare')) startCloudflareCandidate();
   if (tools.pinggy && (провайдер === 'auto' || провайдер === 'pinggy')) startPinggyCandidate();
-  if (провайдер === 'auto') startSshTunnelCandidate().catch(error => logDetail(`SSH-туннель: ${error.message}`));
+  if (провайдер === 'auto' || провайдер === 'localhostrun') startSshTunnelCandidate().catch(error => logDetail(`SSH-туннель: ${error.message}`));
+  // Один выбранный туннель ждём меньше: если он не отозвался за 18 секунд, он в
+  // этой сети недоступен. «Авто» гоняет несколько сразу, ему даём больше.
+  const дедлайн = провайдер === 'auto' ? 35000 : 18000;
   tunnelDeadlineTimer = setTimeout(() => {
     if (tunnelUrl || tunnelState !== 'starting') return;
     for (const child of tunnelCandidates) child.kill('SIGTERM');
     stopPinggyDaemon();
     tunnelCandidates = new Set(); tunnelState = 'error';
-    tunnelError = 'Сеть блокирует публичные туннели. Отключите VPN/фильтр или разрешите исходящие HTTPS-соединения.';
+    tunnelError = tunnelFailMessage();
     log(tunnelError);
-  }, 35000);
+  }, дедлайн);
 }
 
 // Транспорт выбирается по адресу назначения, а не настройкой.
@@ -859,7 +872,9 @@ async function probeAllServers() {
     const результат = {};
     await Promise.all(servers.map(async s => {
       const порт = Number(s.rtspPort) || SERVER_RTSP_PORT;
-      результат[s.id] = await probeServer(s.host, порт);
+      // Спрашиваем именно RTSP (OPTIONS), а не голый TCP: за VPN коннект
+      // проходит даже к выключенному серверу, и тот ложно горел зелёным.
+      результат[s.id] = await probeRtspServer(s.host, порт);
     }));
     serverReach = результат; // пересборка заодно выкидывает удалённые
     remoteReachable = config.outputMode === 'remote' ? (результат[config.activeServerId] ?? null) : null;
@@ -2218,6 +2233,27 @@ function startMediaMtx() {
 // человек вставлял ссылку в те несколько секунд, когда она ещё не играла.
 let channelLive = false;
 let channelProbeBusy = false;
+
+// Живой ли RTSP-сервер вообще. Голый TCP-коннект тут врёт: за VPN (Koala Clash)
+// хендшейк проходит даже к мёртвому серверу. OPTIONS честнее — на него отвечает
+// только настоящий RTSP, и выключенный сервер перестаёт гореть зелёным.
+function probeRtspServer(host, port) {
+  return new Promise(resolve => {
+    let ответ = '';
+    const socket = netConnect({ host, port });
+    const конец = ок => { try { socket.destroy(); } catch {} resolve(ок); };
+    socket.setTimeout(4000);
+    socket.on('timeout', () => конец(false));
+    socket.on('error', () => конец(false));
+    const разрыв = String.fromCharCode(13, 10);
+    const запрос = ['OPTIONS rtsp://' + host + ':' + port + '/ RTSP/1.0', 'CSeq: 1', '', ''].join(разрыв);
+    socket.on('connect', () => socket.write(запрос));
+    socket.on('data', chunk => {
+      ответ += chunk;
+      if (ответ.includes(разрыв + разрыв)) конец(/^RTSP\/1\.0/.test(ответ));
+    });
+  });
+}
 
 function probeRtsp(host, port, channel) {
   return new Promise(resolve => {
@@ -4036,7 +4072,7 @@ const server = http.createServer(async (req, res) => {
         autoQuality: body.autoQuality === undefined ? config.autoQuality !== false : Boolean(body.autoQuality),
         encoderMode: ['auto', 'gpu', 'cpu'].includes(body.encoderMode) ? body.encoderMode : (config.encoderMode || 'auto'),
         whiteIp: body.whiteIp === undefined ? (config.whiteIp || '') : String(body.whiteIp).trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0].slice(0, 60).replace(/[^a-z0-9.:-]/gi, ''),
-        tunnelProvider: ['auto', 'cloudflare', 'pinggy'].includes(body.tunnelProvider) ? body.tunnelProvider : (config.tunnelProvider || 'auto'),
+        tunnelProvider: ['auto', 'cloudflare', 'pinggy', 'localhostrun'].includes(body.tunnelProvider) ? body.tunnelProvider : (config.tunnelProvider || 'auto'),
         cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),

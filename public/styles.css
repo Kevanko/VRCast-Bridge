@@ -349,8 +349,11 @@ option{background:var(--dusk);color:var(--text)}
 /* Сегменты: значение видно всегда, выбор — одно нажатие */
 .seg{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--edge);border-radius:8px;background:var(--night)}
 .seg.wide{display:grid;grid-template-columns:1fr 1fr}
-.seg.wide[data-for="tunnelProviderSelect"]{grid-template-columns:repeat(3,1fr)}
-.seg.wide[data-for="tunnelProviderSelect"] button{padding:0 3px;font-size:9px}
+.seg.wide[data-for="tunnelProviderSelect"]{grid-template-columns:repeat(2,1fr);gap:2px}
+.seg.wide[data-for="tunnelProviderSelect"] button{padding:0 4px;font-size:9px}
+#tunnelOutput .direct-caption{margin:2px 0 8px}
+#tunnelOutput .seg.wide{margin-bottom:4px}
+#tunnelOutput .field-help{margin-top:9px}
 .seg button{min-height:26px;padding:0 10px;border:0;border-radius:6px;background:transparent;
   color:var(--muted);font:500 10px/1 "Golos Text",system-ui,sans-serif;white-space:nowrap;transition:.15s var(--ease)}
 .seg button:hover{color:var(--text)}

@@ -104,8 +104,9 @@
               <option value="auto" data-short="Авто">Авто</option>
               <option value="cloudflare" data-short="Cloudflare">Cloudflare</option>
               <option value="pinggy" data-short="Pinggy">Pinggy</option>
+              <option value="localhostrun" data-short="localhost.run">localhost.run</option>
             </select>
-            <p class="field-help">Бесплатная ссылка через чужой туннель — раздать можно за секунды, ничего не настраивая. Но задержка ~3&nbsp;секунды, тяжёлый поток рвётся, а адрес живёт только до закрытия программы. «Свой сервер» стабильнее и почти без задержки, зато нужен свой VPS. «Авто» берёт туннель, что поднимется первым; Cloudflare быстрее, Pinggy выручает там, где Cloudflare режут.</p>
+            <p class="field-help">Бесплатная ссылка через чужой туннель — раздать можно за секунды, ничего не настраивая. Но задержка ~3&nbsp;секунды, тяжёлый поток рвётся, а адрес живёт только до закрытия программы. «Свой сервер» стабильнее и почти без задержки, зато нужен свой VPS.<br><br>«Авто» поднимает несколько туннелей сразу и берёт тот, что отзовётся первым. Cloudflare быстрее, но в строгих сетях и за VPN часто не подключается — тогда выручают Pinggy и localhost.run.</p>
           </section>
 
           <section class="output-panel" id="remoteOutput" hidden>
