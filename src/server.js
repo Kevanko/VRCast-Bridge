@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.53.6';
+const APP_VERSION = '0.53.7';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -244,7 +244,10 @@ const TOOL_SOURCES = {
   'yt-dlp.exe': { label: 'загрузчик видео', url: 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' },
   'cloudflared.exe': { label: 'публичные ссылки', url: 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' },
   'mediamtx.exe': { label: 'мгновенный канал', github: 'bluenviron/mediamtx', asset: /windows_amd64\.zip$/i, unpack: ['mediamtx.exe'] },
-  'ffmpeg.exe': { label: 'кодировщик', url: 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip', unpack: ['ffmpeg.exe', 'ffprobe.exe'] },
+  // ffmpeg тянем с GitHub, а не с gyan.dev: за VPN gyan отдаёт свои 100+ МБ по
+  // 0.2 МБ/с (минуты и таймаут), а GitHub-зеркало — 8 МБ/с. Нужна сборка gpl:
+  // в ней есть libx264, на который откатывается кодирование на процессоре.
+  'ffmpeg.exe': { label: 'кодировщик', github: 'BtbN/FFmpeg-Builds', tag: 'latest', asset: /win64-gpl\.zip$/i, unpack: ['ffmpeg.exe', 'ffprobe.exe'] },
 };
 let toolDownloads = {};
 
@@ -1225,7 +1228,12 @@ async function downloadTool(name) {
   try {
     let url = source.url;
     if (source.github) {
-      const release = await fetch(`https://api.github.com/repos/${source.github}/releases/latest`,
+      // tag задаёт конкретный релиз (у BtbN сборки лежат в катящемся теге
+      // «latest»); без него берём тот, что помечен последним.
+      const relApi = source.tag
+        ? `https://api.github.com/repos/${source.github}/releases/tags/${source.tag}`
+        : `https://api.github.com/repos/${source.github}/releases/latest`;
+      const release = await fetch(relApi,
         { headers: { 'User-Agent': 'VRCast-Bridge' }, signal: AbortSignal.timeout(20000) }).then(r => r.json());
       url = (release.assets || []).find(item => source.asset.test(item.name))?.browser_download_url;
       if (!url) throw new Error('нет подходящего файла в релизе');
