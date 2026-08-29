@@ -488,3 +488,23 @@ test('принимает прямые ссылки на медиа без раз
   assert.match((await file.json()).error, /не открыва|ссылк/i, 'сообщение объясняет, что ссылка не открылась');
   await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
 });
+
+test('белый IP даёт другу прямую ссылку через интернет', async () => {
+  const ответ = await fetch(`http://127.0.0.1:${port}/api/config`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ whiteIp: '91.210.44.7' }),
+  });
+  const состояние = await ответ.json();
+  const прямые = состояние.rtsp.direct || [];
+  const белый = прямые.find(d => d.ip === '91.210.44.7');
+  assert.ok(белый, 'заданный белый IP попадает в прямые ссылки');
+  assert.equal(белый.white, true, 'белый IP помечен как интернет-адрес');
+  assert.match(белый.url, /^rtspt:\/\/91\.210\.44\.7:\d+\/live$/, 'ссылка ведёт на локальный канал');
+  // Приватные и служебные адреса интернет-адресом не считаются.
+  const приват = прямые.find(d => /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|198\.18\.)/.test(d.ip));
+  if (приват) assert.equal(приват.white, false, `${приват.ip} не должен считаться белым`);
+  await fetch(`http://127.0.0.1:${port}/api/config`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ whiteIp: '' }),
+  });
+});

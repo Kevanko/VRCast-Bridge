@@ -422,3 +422,33 @@ dialog::backdrop{background:rgba(3,5,10,.66)}
 .queue-item.unavailable .queue-art{opacity:.5}
 .queue-item.unavailable .queue-title small{color:#e08f95}
 .queue-item.unavailable::before{background:var(--air)!important}
+
+/* ─── «Этот ПК»: прямые ссылки и белый IP ─────────────────────────────────── */
+.direct-list{margin:0 0 10px;padding:0;display:grid;gap:6px;list-style:none}
+.direct-card{border:1px solid var(--edge);border-radius:var(--r);background:var(--night);overflow:hidden}
+.direct-card.white{border-color:rgba(79,170,136,.5);background:rgba(79,170,136,.07)}
+.direct-copy{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:9px;padding:8px 10px;border:0;background:transparent;color:var(--text);text-align:left}
+.direct-copy:hover{background:var(--haze)}
+.direct-badge{padding:2px 7px;border-radius:99px;background:var(--haze);color:var(--muted);font:600 8px "JetBrains Mono",ui-monospace,monospace;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
+.direct-card.white .direct-badge{background:rgba(79,170,136,.16);color:var(--ok)}
+.direct-copy code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:11px "JetBrains Mono",ui-monospace,monospace;color:var(--text)}
+.direct-copy .ic{width:14px;height:14px;color:var(--muted)}
+.direct-copy:hover .ic{color:var(--iris)}
+.direct-empty{padding:12px;border:1px dashed var(--edge);border-radius:10px;color:var(--muted);font-size:10px;line-height:1.5;text-align:center}
+.white-ip-field{display:block;margin:0 0 6px;color:var(--text);font-size:11px;font-weight:600}
+#localOutput .field-help{margin-top:2px}
+#localHint:empty{display:none}
+
+/* ─── Постоянная / временная ссылка ───────────────────────────────────────── */
+.link-mode{margin:2px 0 12px;padding:11px;border:1px solid var(--edge);border-radius:var(--r);background:var(--night)}
+.switch-row{display:grid!important;grid-template-columns:34px minmax(0,1fr);gap:11px;align-items:start;cursor:pointer;margin:0!important;font-weight:400!important}
+.switch-row input[type=checkbox]{appearance:none;width:34px!important;height:20px;margin:1px 0 0!important;min-height:0!important;padding:0!important;border:0!important;border-radius:99px;background:var(--edge)!important;position:relative;cursor:pointer;transition:.18s var(--ease);flex:none}
+.switch-row input[type=checkbox]:checked{background:var(--iris)!important}
+.switch-row input[type=checkbox]::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.18s var(--ease)}
+.switch-row input[type=checkbox]:checked::after{transform:translateX(14px)}
+.switch-row input[type=checkbox]:focus-visible{outline:2px solid var(--iris-soft);outline-offset:2px}
+.switch-copy b{display:block;font-size:11px}
+.switch-copy small{display:block;margin-top:3px;color:var(--muted);font-size:10px;line-height:1.5}
+.link-mode .btn.ghost{margin-top:10px;width:100%;min-height:32px}
+.btn.ghost{border-style:dashed;background:transparent;color:var(--muted)}
+.btn.ghost:hover:not(:disabled){color:var(--text);border-color:var(--iris)}
