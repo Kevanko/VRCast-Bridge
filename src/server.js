@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.52.0';
+const APP_VERSION = '0.52.1';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -351,6 +351,29 @@ function saveConfig(next) {
 // Дочитывает то, чего не хватает, не блокируя работу: длительность, кодеки,
 // пригодность для Unity. Идёт по одному файлу за раз, чтобы не устраивать
 // толпу ffprobe на большом списке.
+// Превью хранится как /thumbs/<id>.jpg. Файл мог пропасть: сборщик мусора
+// удаляет картинки, чей id больше не совпадает ни с одним треком (так бывало
+// после смены id при загрузке шаблона). Тогда в списке висел битый значок.
+function thumbFileMissing(item) {
+  const m = /^\/thumbs\/([^/?]+)/.exec(item.thumbnail || '');
+  return m ? !existsSync(join(THUMB_DIR, decodeURIComponent(m[1]))) : false;
+}
+
+// После перезапуска приводим библиотеку в порядок: пропавшие превью создаём
+// заново, а битые локальные файлы перепроверяем — fillMissingInfo пометит их
+// недоступными. Здоровые треки (есть длительность и превью) не трогаем.
+async function repairLibrary() {
+  let changed = false;
+  for (const item of queue) {
+    if (item.local && thumbFileMissing(item)) { item.thumbnail = ''; changed = true; }
+  }
+  const надоПроверить = queue.filter(item =>
+    item.local && (item.unavailable || !item.duration || !item.thumbnail));
+  for (const item of надоПроверить) item.probed = false;
+  if (changed) saveQueue();
+  if (надоПроверить.length) await fillMissingInfo(надоПроверить);
+}
+
 async function fillMissingInfo(items) {
   for (const item of items) {
     if (!item.local || item.probed) continue;
@@ -360,10 +383,15 @@ async function fillMissingInfo(items) {
         duration: item.duration || сведения.duration || null,
         hasVideo: сведения.hasVideo, hasAudio: сведения.hasAudio,
         videoCodec: сведения.videoCodec, audioCodec: сведения.audioCodec,
-        unityCompatible: Boolean(сведения.unityCompatible), probed: true,
+        unityCompatible: Boolean(сведения.unityCompatible), probed: true, unavailable: false,
       });
-      if (сведения.hasVideo && !item.thumbnail) generateThumbnail(item);
-    } catch { item.probed = true; }
+      if ((сведения.hasVideo || сведения.hasAudio) && !item.thumbnail) generateThumbnail(item);
+    } catch {
+      // ffprobe не прочитал файл — он битый или в неподдерживаемом формате.
+      // Помечаем недоступным, чтобы трек краснел в списке и пропускался, а не
+      // срывал эфир, когда очередь до него дойдёт.
+      item.probed = true; item.unavailable = true;
+    }
   }
   saveQueue();
 }
@@ -3369,9 +3397,19 @@ async function addLocalFiles(paths) {
   for (const rawPath of paths.slice(0, 100)) {
     const filePath = resolve(String(rawPath));
     if (!existsSync(filePath) || !statSync(filePath).isFile() || !MEDIA_EXTENSIONS.has(extname(filePath).toLowerCase())) continue;
-    const info = await mediaInfoAsync(filePath);
+    let info;
+    try { info = await mediaInfoAsync(filePath); }
+    catch {
+      // ffprobe не прочитал файл — он битый или в неподдерживаемом формате.
+      // Кладём в список помеченным недоступным, чтобы он краснел и его было
+      // видно, а не молча срывал добавление всей пачки из-за одного файла.
+      const item = { id: crypto.randomUUID(), title: basename(filePath), sourceUrl: filePath,
+        thumbnail: '', local: true, probed: true, unavailable: true, hasVideo: false, hasAudio: false };
+      queue.push(item); added.push(item);
+      continue;
+    }
     if (!info.hasVideo && !info.hasAudio) continue;
-    const item = { id: crypto.randomUUID(), title: basename(filePath), sourceUrl: filePath, thumbnail: '', local: true, probed: true, ...info };
+    const item = { id: crypto.randomUUID(), title: basename(filePath), sourceUrl: filePath, thumbnail: '', local: true, probed: true, unavailable: false, ...info };
     queue.push(item); added.push(item); generateThumbnail(item);
   }
   if (!added.length) throw new Error('Не найдено поддерживаемых видео или аудиофайлов.');
@@ -4068,6 +4106,8 @@ server.listen(PORT, HOST, () => {
   // Первые ролики списка держим наготове с самого запуска: переход «экран →
   // видео» и первый запуск тогда идут из готового файла, без ожидания сети.
   setTimeout(() => { prefetchQueue(0).catch(() => {}); }, 5000);
+  // Чиним библиотеку в фоне: пропавшие превью и пометки битых файлов.
+  setTimeout(() => { repairLibrary().catch(() => {}); }, 1500);
   // Проверяем не сразу: пусть эфир поднимется первым, обновление подождёт.
   setTimeout(() => { checkForUpdate(); }, 8000);
   if (tools.mediamtx) { startMediaMtx(); log(`Мгновенный канал RTSP: rtspt://127.0.0.1:${RTSP_PORT}/live`); }

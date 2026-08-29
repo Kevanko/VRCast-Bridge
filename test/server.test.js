@@ -83,7 +83,7 @@ test('отдаёт интерфейс и отклоняет неправильн
   assert.match(html, /id="audioOutput"/);
   assert.match(html, /id="mediaVolume"/);
   assert.match(html, /id="captureVolume"/);
-  assert.match(html, /id="previewDelay"/);
+  assert.match(html, /id="encoderMode"/);
   assert.match(html, /id="applyCapture"/);
   assert.match(html, /id="templateSelect"/);
   assert.match(html, /data-output="tunnel"/);
@@ -477,13 +477,14 @@ test('принимает прямые ссылки на медиа без раз
   assert.equal(item.direct, true, 'такая ссылка не должна идти через разбор страницы');
   assert.equal(item.live, true, 'плейлист .m3u8 считается потоком и не кешируется');
 
+  // Прямую ссылку на файл (не поток) программа сразу открывает и проверяет:
+  // мёртвую отклоняет с понятным сообщением, а не кладёт вслепую в список,
+  // где человек узнал бы о поломке, только когда очередь до неё дойдёт.
   const file = await fetch(`http://127.0.0.1:${port}/api/queue`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url: 'https://example.invalid/clip.mp4' }),
   });
-  assert.equal(file.status, 201, 'прямая ссылка на файл принимается без обращения к сети');
-  const fileItem = (await file.json()).status.queue.at(-1);
-  assert.equal(fileItem.direct, true);
-  assert.equal(fileItem.live, false, 'обычный файл кешируется, а не считается эфиром');
+  assert.equal(file.status, 400, 'недоступная прямая ссылка на файл отклоняется, а не добавляется молча');
+  assert.match((await file.json()).error, /не открыва|ссылк/i, 'сообщение объясняет, что ссылка не открылась');
   await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
 });
