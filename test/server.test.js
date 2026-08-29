@@ -495,14 +495,10 @@ test('белый IP даёт другу прямую ссылку через и�
     body: JSON.stringify({ whiteIp: '91.210.44.7' }),
   });
   const состояние = await ответ.json();
-  const прямые = состояние.rtsp.direct || [];
-  const белый = прямые.find(d => d.ip === '91.210.44.7');
-  assert.ok(белый, 'заданный белый IP попадает в прямые ссылки');
-  assert.equal(белый.white, true, 'белый IP помечен как интернет-адрес');
-  assert.match(белый.url, /^rtspt:\/\/91\.210\.44\.7:\d+\/live$/, 'ссылка ведёт на локальный канал');
-  // Приватные и служебные адреса интернет-адресом не считаются.
-  const приват = прямые.find(d => /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|198\.18\.)/.test(d.ip));
-  if (приват) assert.equal(приват.white, false, `${приват.ip} не должен считаться белым`);
+  const прямые = состояние.rtsp.direct || {};
+  assert.match(прямые.white, /^rtspt:\/\/91\.210\.44\.7:\d+\/live$/, 'белый IP даёт ссылку через интернет');
+  // Локальная ссылка — одна и не на белый IP, а на адрес своей сети.
+  if (прямые.local) assert.doesNotMatch(прямые.local, /91\.210\.44\.7/, 'локальная ссылка отдельно от интернет-ссылки');
   await fetch(`http://127.0.0.1:${port}/api/config`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ whiteIp: '' }),

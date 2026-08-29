@@ -79,11 +79,33 @@
           <div class="broadcast-mode"><button class="active" data-output="local" title="Ссылка открывается только на этом компьютере — для проверки">Этот ПК</button><button data-output="tunnel" title="Бесплатная ссылка через интернет, задержка около трёх секунд">Быстрая ссылка</button><button data-output="remote" title="Через ваш сервер — стабильный адрес, задержки почти нет">Свой сервер</button></div>
 
           <section class="output-panel" id="localOutput" hidden>
-            <ul class="direct-list" id="directList"></ul>
+            <span class="direct-caption" id="localLinkCaption" hidden>Ссылка для своей сети</span>
+            <div class="direct-card" id="localLinkRow" hidden>
+              <button class="direct-copy" type="button" data-url="" title="Скопировать ссылку">
+                <code></code><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg>
+              </button>
+            </div>
             <label class="white-ip-field">Белый IP, если есть
               <input id="whiteIp" type="text" inputmode="decimal" placeholder="например, 91.210.44.7" autocomplete="off">
             </label>
+            <span class="direct-caption" id="whiteLinkCaption" hidden>Ссылка через интернет</span>
+            <div class="direct-card white" id="whiteLinkRow" hidden>
+              <button class="direct-copy" type="button" data-url="" title="Скопировать ссылку для интернета">
+                <code></code><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg>
+              </button>
+            </div>
             <p class="field-help" id="localHint"></p>
+          </section>
+
+          <section class="output-panel" id="tunnelOutput" hidden>
+            <span class="direct-caption">Через что</span>
+            <div class="seg wide" data-for="tunnelProviderSelect" role="radiogroup" aria-label="Провайдер быстрой ссылки"></div>
+            <select id="tunnelProviderSelect" hidden>
+              <option value="auto" data-short="Авто">Авто</option>
+              <option value="cloudflare" data-short="Cloudflare">Cloudflare</option>
+              <option value="pinggy" data-short="Pinggy">Pinggy</option>
+            </select>
+            <p class="field-help">Бесплатная ссылка через чужой туннель — раздать можно за секунды, ничего не настраивая. Но задержка ~3&nbsp;секунды, тяжёлый поток рвётся, а адрес живёт только до закрытия программы. «Свой сервер» стабильнее и почти без задержки, зато нужен свой VPS. «Авто» берёт туннель, что поднимется первым; Cloudflare быстрее, Pinggy выручает там, где Cloudflare режут.</p>
           </section>
 
           <section class="output-panel" id="remoteOutput" hidden>
