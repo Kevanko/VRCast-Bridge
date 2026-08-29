@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.53.0';
+const APP_VERSION = '0.53.1';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -87,6 +87,7 @@ const defaults = {
   cacheLimitGb: 0,
   encoderMode: 'auto',
   whiteIp: '',
+  tunnelProvider: 'auto',
 };
 
 function loadConfig() {
@@ -640,12 +641,16 @@ function startPublicTunnel() {
   if (config.outputMode !== 'tunnel' || tunnelProcess || tunnelCandidates.size) return;
   if (!tools.cloudflared && !tools.pinggy && !PLINK()) throw new Error('Компоненты публичной ссылки не найдены.');
   tunnelUrl = ''; tunnelProvider = ''; tunnelState = 'starting'; tunnelError = '';
-  // Оба туннеля поднимаются одновременно, побеждает тот, кто первым отдал адрес.
-  // Раньше Pinggy ждал Cloudflare 12 секунд, а в сетях с фильтром Cloudflare
-  // не подключается никогда — ссылка появлялась через минуту и с ошибкой посередине.
-  if (tools.cloudflared) startCloudflareCandidate();
-  if (tools.pinggy) startPinggyCandidate();
-  startSshTunnelCandidate().catch(error => logDetail(`SSH-туннель: ${error.message}`));
+  // Провайдер можно выбрать; «Авто» поднимает всех сразу — побеждает тот, кто
+  // первым отдал адрес. Раньше Pinggy ждал Cloudflare 12 секунд, а в сетях с
+  // фильтром Cloudflare не подключается никогда — ссылка появлялась через
+  // минуту и с ошибкой. Если выбранного провайдера нет — откатываемся к авто.
+  let провайдер = config.tunnelProvider || 'auto';
+  if (провайдер === 'cloudflare' && !tools.cloudflared) провайдер = 'auto';
+  if (провайдер === 'pinggy' && !tools.pinggy) провайдер = 'auto';
+  if (tools.cloudflared && (провайдер === 'auto' || провайдер === 'cloudflare')) startCloudflareCandidate();
+  if (tools.pinggy && (провайдер === 'auto' || провайдер === 'pinggy')) startPinggyCandidate();
+  if (провайдер === 'auto') startSshTunnelCandidate().catch(error => logDetail(`SSH-туннель: ${error.message}`));
   tunnelDeadlineTimer = setTimeout(() => {
     if (tunnelUrl || tunnelState !== 'starting') return;
     for (const child of tunnelCandidates) child.kill('SIGTERM');
@@ -841,14 +846,28 @@ let remoteReachable = null;
 let remoteChannelRejected = false;
 let outputSwitchTimer = null;
 let tunnelSwitchTimer = null;
+// Доступность каждого сохранённого сервера: {id: true|false}. Проверяем все, а
+// не только активный — тогда в списке недоступный сервер сразу краснеет, а не
+// висит с вечным «подключаюсь».
+let serverReach = {};
+let serverProbeBusy = false;
+async function probeAllServers() {
+  if (serverProbeBusy) return;
+  serverProbeBusy = true;
+  try {
+    const servers = savedServers();
+    const результат = {};
+    await Promise.all(servers.map(async s => {
+      const порт = Number(s.rtspPort) || SERVER_RTSP_PORT;
+      результат[s.id] = await probeServer(s.host, порт);
+    }));
+    serverReach = результат; // пересборка заодно выкидывает удалённые
+    remoteReachable = config.outputMode === 'remote' ? (результат[config.activeServerId] ?? null) : null;
+  } finally { serverProbeBusy = false; }
+}
 function watchRemoteServer() {
-  const проверить = async () => {
-    const target = remoteRtspTarget();
-    if (!target) { remoteReachable = null; return; }
-    remoteReachable = await probeServer(target.host, target.port);
-  };
-  проверить();
-  setInterval(проверить, 20000).unref();
+  probeAllServers();
+  setInterval(probeAllServers, 15000).unref();
 }
 
 // Безымянный сервер раньше подписывался собственным адресом — и в списке
@@ -1034,21 +1053,20 @@ function isPrivateIp(ip) {
   return false;
 }
 
-// Прямые ссылки на локальный канал: по каким адресам эту машину видно. Белый
-// IP (если он есть на сетевой карте или задан вручную) работает через интернет.
+// Прямые ссылки на локальный канал. Достаточно одной ссылки для своей сети —
+// берём домашний адрес (192.168/10), а не виртуальные адаптеры WSL/Hyper-V.
+// Белый IP (задан вручную или реальный публичный на карте) даёт ссылку через
+// интернет — она нужна не всем, поэтому появляется только когда есть.
 function directLinks() {
-  const канал = 'live';
-  const ips = getLanAddresses();
-  const свои = [...new Set(ips)];
+  const ips = [...new Set(getLanAddresses())].filter(ip => /^[a-z0-9.:-]+$/i.test(ip));
   const ручной = String(config.whiteIp || '').trim();
-  if (ручной && !свои.includes(ручной)) свои.push(ручной);
-  // Порядок по пользе: белый IP (интернет) → домашняя сеть 192.168/10 →
-  // 172.x (чаще виртуальные адаптеры WSL/Hyper-V, другу от них толку мало).
-  const ранг = ip => (!isPrivateIp(ip) || ip === ручной) ? 0 : /^(192\.168\.|10\.)/.test(ip) ? 1 : 2;
-  return свои
-    .filter(ip => /^[a-z0-9.:-]+$/i.test(ip))
-    .map(ip => ({ ip, white: !isPrivateIp(ip) || ip === ручной, url: `rtspt://${ip}:${RTSP_PORT}/${канал}` }))
-    .sort((a, b) => ранг(a.ip) - ранг(b.ip));
+  const локальные = ips.filter(ip => isPrivateIp(ip) && ip !== ручной);
+  const домашний = локальные.find(ip => /^(192\.168\.|10\.)/.test(ip)) || локальные[0] || '';
+  const белыйIp = ручной || ips.find(ip => !isPrivateIp(ip)) || '';
+  return {
+    local: домашний ? `rtspt://${домашний}:${RTSP_PORT}/live` : '',
+    white: белыйIp ? `rtspt://${белыйIp}:${RTSP_PORT}/live` : '',
+  };
 }
 
 // «Свой сервер»: тот же мгновенный RTSP, но на машине с белым IP — ссылка
@@ -1430,7 +1448,7 @@ function status() {
     tunnel: { state: tunnelState, ready: Boolean(tunnelUrl), provider: tunnelProvider, expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError },
     config: { ...config,
       servers: savedServers().map(item => ({ id: item.id, name: item.name, host: item.host,
-        rtspPort: item.rtspPort, addedAt: item.addedAt,
+        rtspPort: item.rtspPort, addedAt: item.addedAt, reachable: serverReach[item.id] ?? null,
         permanentLink: item.permanentLink !== false, channel: item.channel || 'live', publishKey: undefined })) },
     playbackUrl: publicAddress(),
     webrtcUrl: mediaMtxProcess ? `http://127.0.0.1:${WEBRTC_PORT}/live/whep` : '',
@@ -3952,6 +3970,7 @@ const server = http.createServer(async (req, res) => {
       if (config.outputMode === 'remote' && config.activeServerId === id) return json(res, 200, status());
       saveConfig({ activeServerId: id, outputMode: 'remote' });
       remoteReachable = null; remoteChannelRejected = false;
+      probeAllServers();
       stopPublicTunnel();
       stopRtspPush();
       if (relayProcess) startRtspPush();
@@ -4006,6 +4025,7 @@ const server = http.createServer(async (req, res) => {
         autoQuality: body.autoQuality === undefined ? config.autoQuality !== false : Boolean(body.autoQuality),
         encoderMode: ['auto', 'gpu', 'cpu'].includes(body.encoderMode) ? body.encoderMode : (config.encoderMode || 'auto'),
         whiteIp: body.whiteIp === undefined ? (config.whiteIp || '') : String(body.whiteIp).trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0].slice(0, 60).replace(/[^a-z0-9.:-]/gi, ''),
+        tunnelProvider: ['auto', 'cloudflare', 'pinggy'].includes(body.tunnelProvider) ? body.tunnelProvider : (config.tunnelProvider || 'auto'),
         cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),
@@ -4034,6 +4054,7 @@ const server = http.createServer(async (req, res) => {
       const previousOutput = config.outputMode;
       const previousRemoteTarget = remoteRtspTarget();
       const previousEncoderMode = config.encoderMode;
+      const previousTunnelProvider = config.tunnelProvider;
       const applyLive = Boolean(body.applyLive);
       // Смена диска для кеша: проверяем, что папка создаётся и туда можно писать,
       // и только потом сохраняем — иначе загрузки молча перестанут работать.
@@ -4068,14 +4089,16 @@ const server = http.createServer(async (req, res) => {
       // Состояние сервера проверяем сразу при смене, а не ждём общий цикл:
       // иначе первые двадцать секунд в интерфейсе висит неизвестность.
       if (previousOutput !== config.outputMode || previousRemote !== (remoteRtspTarget()?.publishUrl || '')) {
-        const цель = remoteRtspTarget();
         remoteReachable = null;
-        if (цель) probeServer(цель.host, цель.port).then(ответил => { remoteReachable = ответил; });
+        probeAllServers();
       }
-      if (previousOutput !== config.outputMode) {
+      // Сменили провайдера прямо в режиме «Быстрая ссылка» — поднимаем туннель
+      // заново уже через выбранного, старый гасим.
+      const провайдерСменился = previousTunnelProvider !== config.tunnelProvider && config.outputMode === 'tunnel';
+      if (previousOutput !== config.outputMode || провайдерСменился) {
         clearTimeout(tunnelSwitchTimer);
         tunnelSwitchTimer = setTimeout(() => {
-          if (config.outputMode === 'tunnel') startPublicTunnel();
+          if (config.outputMode === 'tunnel') { stopPublicTunnel(); startPublicTunnel(); }
           else { stopPublicTunnel(); tunnelError = ''; tunnelState = 'idle'; }
         }, 600);
       }

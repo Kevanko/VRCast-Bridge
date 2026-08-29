@@ -313,8 +313,9 @@ option{background:var(--dusk);color:var(--text)}
 .card-more:hover{background:var(--haze);color:var(--text)}
 .lamp{width:8px;height:8px;border-radius:50%;background:var(--edge)}
 .lamp.live{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.lamp.ok{background:var(--ok);opacity:.55}
 .lamp.wait{background:var(--cue)}
-.lamp.down{background:var(--air)}
+.lamp.down{background:var(--air);box-shadow:0 0 8px var(--air)}
 .server-empty{padding:14px;border:1px dashed var(--edge);border-radius:10px;
   color:var(--muted);font-size:10px;line-height:1.55;text-align:center}
 
@@ -348,6 +349,8 @@ option{background:var(--dusk);color:var(--text)}
 /* Сегменты: значение видно всегда, выбор — одно нажатие */
 .seg{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--edge);border-radius:8px;background:var(--night)}
 .seg.wide{display:grid;grid-template-columns:1fr 1fr}
+.seg.wide[data-for="tunnelProviderSelect"]{grid-template-columns:repeat(3,1fr)}
+.seg.wide[data-for="tunnelProviderSelect"] button{padding:0 3px;font-size:9px}
 .seg button{min-height:26px;padding:0 10px;border:0;border-radius:6px;background:transparent;
   color:var(--muted);font:500 10px/1 "Golos Text",system-ui,sans-serif;white-space:nowrap;transition:.15s var(--ease)}
 .seg button:hover{color:var(--text)}
@@ -424,8 +427,9 @@ dialog::backdrop{background:rgba(3,5,10,.66)}
 .queue-item.unavailable::before{background:var(--air)!important}
 
 /* ─── «Этот ПК»: прямые ссылки и белый IP ─────────────────────────────────── */
-.direct-list{margin:0 0 10px;padding:0;display:grid;gap:6px;list-style:none}
-.direct-card{border:1px solid var(--edge);border-radius:var(--r);background:var(--night);overflow:hidden}
+.direct-caption{display:block;margin:2px 0 5px;color:var(--muted);font-size:10px;font-weight:600}
+.direct-card.white+.field-help,.direct-caption+.direct-card{margin-top:0}
+.direct-card{margin:0 0 10px;border:1px solid var(--edge);border-radius:var(--r);background:var(--night);overflow:hidden}
 .direct-card.white{border-color:rgba(79,170,136,.5);background:rgba(79,170,136,.07)}
 .direct-copy{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:9px;padding:8px 10px;border:0;background:transparent;color:var(--text);text-align:left}
 .direct-copy:hover{background:var(--haze)}

@@ -202,15 +202,16 @@ function renderServers(state) {
   const servers=state.config.servers||[], active=state.config.activeServerId||'';
   const remote=state.rtsp?.remote||{};
   const список=$('#serverList');
-  const подпись=JSON.stringify([servers.map(item=>[item.id,item.name,item.host]),active,remote.live,remote.reachable,state.config.outputMode]);
+  const подпись=JSON.stringify([servers.map(item=>[item.id,item.name,item.host,item.reachable]),active,remote.live,state.config.outputMode]);
   if(список.dataset.signature!==подпись){
     список.dataset.signature=подпись;
     список.innerHTML=servers.length?servers.map(item=>{
       const выбран=item.id===active&&state.config.outputMode==='remote';
-      const лампа=!выбран?'':remote.live?'live':remote.reachable===false?'down':'wait';
-      // Лампа говорит всё сама: зелёная — идёт, серая — подключаемся. Слово
-      // оставляем только на явной поломке, «Подключаюсь» на карточке — шум.
-      const состояние=выбран&&remote.reachable===false?'Не отвечает':'';
+      // Лампа у каждой карточки: красная — сервер не отвечает, зелёная-пульс —
+      // через него сейчас идёт эфир, спокойная зелёная — на связи, серая —
+      // ещё проверяем. Недоступный сервер краснеет, а не висит в «подключаюсь».
+      const лампа=item.reachable===false?'down':(выбран&&remote.live)?'live':item.reachable===true?'ok':'wait';
+      const состояние=item.reachable===false?'Не отвечает':'';
       return `<li class="server-card${выбран?' on':''}" data-id="${escapeHtml(item.id)}">
         <button class="card-pick" type="button" aria-pressed="${выбран}" title="Вещать через этот сервер">
           <i class="lamp ${лампа}"></i>
@@ -229,33 +230,28 @@ function renderServers(state) {
     :'';
 }
 
-// «Этот ПК»: по каким адресам эту машину видно. Ссылки локальной сети идут
-// друзьям в той же сети; белый IP — через интернет, если открыт порт.
-function renderLocalOutput(state){
-  const прямые=state.rtsp?.direct||[];
-  const список=$('#directList');
-  const поле=$('#whiteIp');
-  const подпись=JSON.stringify([directKey(прямые),state.config.whiteIp]);
-  if(список.dataset.signature!==подпись){
-    список.dataset.signature=подпись;
-    список.innerHTML=прямые.map(d=>`<li class="direct-card${d.white?' white':''}">
-      <button class="direct-copy" type="button" data-url="${escapeHtml(d.url)}" title="Скопировать ссылку">
-        <span class="direct-badge">${d.white?'через интернет':'своя сеть'}</span>
-        <code>${escapeHtml(d.url)}</code>
-        <svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg>
-      </button></li>`).join('')
-      ||'<li class="direct-empty">Сетевых адресов не видно — доступна только ссылка на этом ПК.</li>';
-  }
-  if(document.activeElement!==поле) поле.value=state.config.whiteIp||'';
-  const естьБелый=прямые.some(d=>d.white);
-  $('#localHint').textContent=естьБелый
-    ?'Ссылка «через интернет» откроется у друзей, если на роутере проброшен порт 8554.'
-    :'Друзьям в вашей сети подойдёт ссылка «своя сеть». Есть белый IP — впишите его, дам ссылку для интернета.';
+// «Этот ПК»: одна ссылка для своей сети (друзьям рядом) и, если есть белый IP,
+// ссылка через интернет. Подпись над ссылкой, в самой ссылке — только адрес.
+function заполнитьСсылку(строкаId, подписьId, url){
+  const строка=$(строкаId), подпись=$(подписьId);
+  строка.hidden=!url; подпись.hidden=!url;
+  if(url){ строка.querySelector('code').textContent=url; строка.querySelector('.direct-copy').dataset.url=url; }
 }
-function directKey(list){ return list.map(d=>d.url+d.white).join('|'); }
+function renderLocalOutput(state){
+  const d=state.rtsp?.direct||{};
+  заполнитьСсылку('#localLinkRow','#localLinkCaption',d.local||'');
+  заполнитьСсылку('#whiteLinkRow','#whiteLinkCaption',d.white||'');
+  const поле=$('#whiteIp');
+  if(document.activeElement!==поле) поле.value=state.config.whiteIp||'';
+  $('#localHint').textContent=d.white
+    ?'Ссылка через интернет откроется у друзей, если на роутере открыт порт 8554.'
+    :d.local
+      ?'Эту ссылку открывают друзья в одной сети с вами. Есть белый IP — впишите, дам ссылку для интернета.'
+      :'Пока видно только этот ПК. Друзьям рядом — впишите адрес своей сети, из интернета — белый IP.';
+}
 
-// Прямая ссылка на этот ПК — по клику копируем.
-$('#directList').addEventListener('click',async event=>{
+// Прямая ссылка — по клику копируем.
+$('#localOutput').addEventListener('click',async event=>{
   const кнопка=event.target.closest('.direct-copy'); if(!кнопка)return;
   try{ await navigator.clipboard.writeText(кнопка.dataset.url); toast('Ссылка скопирована'); }
   catch{ toast('Не удалось скопировать',true); }
@@ -530,7 +526,7 @@ function chooseSource(source) {
   if (source==='screen'){refreshWindows().catch(()=>{});if(!ui.status?.running)refreshCapturePreview().catch(()=>{});}
   if(ui.status)render(ui.status);
 }
-function chooseOutput(output) { ui.output=output; $$('.broadcast-mode button').forEach(button=>button.classList.toggle('active',button.dataset.output===output)); $('#remoteOutput').hidden=output!=='remote'; $('#localOutput').hidden=output!=='local'; }
+function chooseOutput(output) { ui.output=output; $$('.broadcast-mode button').forEach(button=>button.classList.toggle('active',button.dataset.output===output)); $('#remoteOutput').hidden=output!=='remote'; $('#localOutput').hidden=output!=='local'; $('#tunnelOutput').hidden=output!=='tunnel'; }
 function chooseCaptureMode(mode) { $('#monitorFields').hidden=mode!=='monitor'; $('#windowFields').hidden=mode!=='window'&&$('#audioMode').value!=='process'; $('#regionFields').hidden=mode!=='region'; if(mode==='window'&&$('#audioMode').value==='system'){$('#audioMode').value='process';chooseAudioMode('process');} }
 function chooseAudioMode(mode) {
   // Звук процесса привязан к выбранному окну — селектор окна нужен даже при захвате монитора/области.
@@ -611,7 +607,7 @@ async function refreshWindows() {
 
 function configPayload() {
   const selectedWindow=ui.sources.windows.find(item=>item.handle===$('#windowSource').value);
-  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim() };
+  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim(),tunnelProvider:$('#tunnelProviderSelect').value };
 }
 async function saveConfig(applyLive = false) { return api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),applyLive})}); }
 
@@ -797,6 +793,7 @@ $('#quality').addEventListener('change',()=>applyQualityLive('screen'));$('#fps'
 // в настройках до следующего запуска, и казалось, что регулятор ничего не делает.
 $('#videoBitrate').addEventListener('change',()=>applyQualityLive(ui.status?.activeKind||'screen','Битрейт'));
 $('#encoderMode').addEventListener('change',()=>applyQualityLive(ui.status?.activeKind||'screen','Кодировщик'));
+$('#tunnelProviderSelect').addEventListener('change',async()=>{try{render(await saveConfig(false));toast('Быстрая ссылка переподключается');}catch(error){toast(error.message,true);}});
 $('#mediaQuality').addEventListener('change',()=>applyQualityLive('queue'));$('#mediaFps').addEventListener('change',()=>applyQualityLive('queue'));
 $('#speedSelect').addEventListener('click',async()=>{const current=Number($('#speedSelect').dataset.value)||1;
   const next=SPEED_STEPS[(SPEED_STEPS.indexOf(current)+1)%SPEED_STEPS.length];
@@ -852,7 +849,7 @@ $('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast:/
 $('#appSoundSettings').addEventListener('click',()=>{window.location.href='vrcast://app-sound';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
 async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);// Снимок источника обновляем только когда открыта вкладка «Экран», окно видно и эфир не идёт: раньше программа бесконечно порождала ffmpeg каждые две секунды даже на простое.
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);// Снимок источника обновляем только когда открыта вкладка «Экран», окно видно и эфир не идёт: раньше программа бесконечно порождала ffmpeg каждые две секунды даже на простое.
 // Пока открыта вкладка «Экран» и эфир не идёт, сервер держит живой поток
 // картинки — забираем её пятнадцать раз в секунду. Раз в две секунды просим
 // сервер поддержать поток: без этого он гаснет сам через пять секунд.
