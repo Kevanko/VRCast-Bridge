@@ -101,11 +101,20 @@ details.rail-card[open]>summary .chevron{transform:rotate(180deg)}
 .stop-live{border-color:#7a3a3d;background:#382022;color:#e19a9d}
 .stop-live:hover{background:#442528}
 /* Режимов вещания стало три — раскладываем в один ряд */
-/* minmax(0,1fr) — колонки строго равные и не растягиваются под длину текста.
-   Без него самый длинный ярлык распирал свою колонку за пределы коробки, и
-   подсветка крайней «Свой сервер» съедала правый отступ. Теперь у всех трёх
-   кнопок одинаковый зазор до края; overflow:hidden оставлен как страховка. */
-.broadcast-mode{grid-template-columns:repeat(3,minmax(0,1fr));overflow:hidden}
+/* Три режима стоят столбиком, а не в ряд. Русские ярлыки («Быстрая ссылка»)
+   не влезали в треть узкой колонки и сжимались; вертикально каждый получает
+   всю ширину — текст целиком при любом размере окна, ничего не режется. */
+.broadcast-mode{grid-template-columns:1fr;gap:2px;overflow:hidden}
+.broadcast-mode button{display:flex;align-items:center;gap:9px;min-height:32px;padding:0 11px;
+  text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Точка слева говорит «выбери одно»: пустая у невыбранных, залитая у активного. */
+.broadcast-mode button::before{content:"";flex:none;width:7px;height:7px;border-radius:50%;
+  border:1px solid var(--edge);background:transparent;transition:.15s var(--ease)}
+.broadcast-mode button.active{background:var(--surface2);color:var(--text)}
+.broadcast-mode button.active::before{border-color:var(--iris);background:var(--iris);
+  box-shadow:0 0 7px rgba(122,120,207,.6)}
+.broadcast-mode button:hover:not(.active){color:var(--text)}
+.broadcast-mode button:hover:not(.active)::before{border-color:var(--iris-soft)}
 /* Обводка фокуса — внутрь кнопки, иначе на крайней «Свой сервер» она вылезала
    за правый край коробки. Так рамка ровная у всех трёх, с одинаковым отступом. */
 .broadcast-mode button:focus-visible,.seg button:focus-visible{outline-offset:-2px}
