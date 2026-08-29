@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.53.9';
+const APP_VERSION = '0.54.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1608,11 +1608,14 @@ function startHlsHealthMonitor() {
   // в сутки на чужую машину.
   let последняяПроверка = 0;
   const канал = setInterval(() => {
-    const пауза = channelLive ? 5000 : 1000;
+    // Пока канал поднимается — спрашиваем каждые полсекунды, чтобы «готово»
+    // загоралось сразу, как сервер принял поток. Поднялся — раз в 5 секунд,
+    // иначе это тысячи лишних запросов в сутки на чужую машину.
+    const пауза = channelLive ? 5000 : 500;
     if (Date.now() - последняяПроверка < пауза) return;
     последняяПроверка = Date.now();
     watchChannel().catch(() => {});
-  }, 500);
+  }, 250);
   канал.unref?.();
 }
 
@@ -2315,6 +2318,25 @@ function rtspTargets() {
 }
 
 const rtspPushFailures = new Map();
+const rtspPushUrls = new Map();
+
+// Переключение получателя без лишнего простоя: локальный пушер, который уже
+// работает, не трогаем — рвётся только то, что реально изменилось (новый свой
+// сервер, другой канал, уход в «этот ПК»). Раньше при каждой смене глушились
+// все пушеры разом, и локальный канал с предпросмотром моргал на пару секунд.
+function syncRtspPush() {
+  if (!mediaMtxProcess || !relayProcess) { stopRtspPush(); return; }
+  const нужные = new Map(rtspTargets().map(t => [t.id, t.url]));
+  for (const [id, child] of [...rtspPushProcesses]) {
+    if (нужные.get(id) === rtspPushUrls.get(id)) continue; // адрес не менялся — оставляем
+    const timer = rtspPushTimers.get(id); if (timer) { clearTimeout(timer); rtspPushTimers.delete(id); }
+    child.kill('SIGTERM'); rtspPushProcesses.delete(id); rtspPushUrls.delete(id);
+  }
+  startRtspPush();
+  // Сразу спрашиваем канал, не дожидаясь тика опроса: «готово» загорается,
+  // как только сервер реально принял поток, а не спустя лишнюю секунду.
+  watchChannel().catch(() => {});
+}
 
 function startRtspPush() {
   if (!mediaMtxProcess) return;
@@ -2331,13 +2353,14 @@ function startRtspPush() {
       // «dimensions not set», падение, перезапуск по кругу. Теперь он спокойно
       // ждёт появления видео и звука. RTSP-муксеру нужны оба параметра до
       // первого пакета, иначе header не пишется вовсе.
-      '-probesize', '2000000', '-analyzeduration', '2000000', '-f', 'mpegts', '-i', 'pipe:0',
+      '-probesize', '2000000', '-analyzeduration', '1000000', '-f', 'mpegts', '-i', 'pipe:0',
       '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
       // Пакеты уходят сразу, без придержки в муксере: каждая такая задержка
       // складывается с буфером плеера и в VRChat видна как отставание.
       '-muxdelay', '0', '-muxpreload', '0', '-flush_packets', '1', '-max_delay', '0',
       '-f', 'rtsp', '-rtsp_transport', 'tcp', '-rw_timeout', '5000000', target.url], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
     rtspPushProcesses.set(target.id, child);
+    rtspPushUrls.set(target.id, target.url);
     child.stdin.on('error', () => {});
     if (target.id === 'remote') {
       // Ошибки публикации на свой сервер пишем целиком: без этого причина
@@ -2392,6 +2415,7 @@ function stopRtspPush() {
   rtspPushTimers.clear();
   for (const child of rtspPushProcesses.values()) child.kill('SIGTERM');
   rtspPushProcesses.clear();
+  rtspPushUrls.clear();
 }
 
 // Единая точка подключения продюсера: HLS-релей через pipe (с backpressure),
@@ -4031,8 +4055,7 @@ const server = http.createServer(async (req, res) => {
       remoteReachable = null; remoteChannelRejected = false;
       probeAllServers();
       stopPublicTunnel();
-      stopRtspPush();
-      if (relayProcess) startRtspPush();
+      syncRtspPush();
       log(`Эфир переключён на свой сервер: ${activeServer()?.name || id}`);
       return json(res, 200, status());
     }
@@ -4161,14 +4184,11 @@ const server = http.createServer(async (req, res) => {
           else { stopPublicTunnel(); tunnelError = ''; tunnelState = 'idle'; }
         }, 600);
       }
-      // Смена адреса своего сервера подхватывается на лету: пушеры
-      // пересоздаются, HLS и локальный RTSP при этом не прерываются.
+      // Смена адреса своего сервера подхватывается на лету: пересоздаётся
+      // только изменившийся пушер, локальный канал и предпросмотр не рвутся.
       if (previousOutput !== config.outputMode || previousRemote !== (remoteRtspTarget()?.publishUrl || '')) {
         clearTimeout(outputSwitchTimer);
-        outputSwitchTimer = setTimeout(() => {
-          stopRtspPush();
-          if (relayProcess) startRtspPush();
-        }, 600);
+        outputSwitchTimer = setTimeout(syncRtspPush, 250);
       }
       if (applyLive && activeKind) {
         const desired = streamProfile(activeKind);
