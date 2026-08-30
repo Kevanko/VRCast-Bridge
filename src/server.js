@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.1';
+const APP_VERSION = '0.54.2';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -466,7 +466,7 @@ function loadTemplates() {
       settings: {
         loopMode: ['once', 'one', 'all'].includes(item.settings?.loopMode) ? item.settings.loopMode : 'once',
         playbackSpeed: [0.5, 0.75, 1, 1.25, 1.5, 2].includes(Number(item.settings?.playbackSpeed)) ? Number(item.settings.playbackSpeed) : 1,
-        mediaVolume: Math.max(0, Math.min(2, Number(item.settings?.mediaVolume ?? 1))),
+        mediaVolume: Math.max(0, Math.min(4, Number(item.settings?.mediaVolume ?? 1))),
       },
     })).slice(0, 100);
   } catch { return []; }
@@ -2186,7 +2186,7 @@ async function startScreenInner() {
   const captureVolume = Math.max(0, Math.min(6, Number(config.captureVolume) || 0));
   // Кадр от Desktop Duplication лежит в памяти видеокарты — забираем его перед фильтрами.
   const fromGpu = ddagrabOutput === null ? '' : 'hwdownload,format=bgra,';
-  args.push('-vf', `${fromGpu}scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
+  args.push('-vf', `${fromGpu}scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
     '-af', `aresample=async=1:first_pts=0:min_hard_comp=0.100,volume=${captureVolume.toFixed(2)},alimiter=limit=0.97:level=disabled`,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile));
   runScreenProcess(args, audioHelperArgs, windowHelperArgs);
@@ -2511,7 +2511,7 @@ function preparePausedFrame(media, position, preferredBroadcastFrame = null, pre
     const frameFile = join(DATA_DIR, 'pause-frame.png');
     rmSync(frameFile, { force: true });
     const seekArgs = broadcastFrameSource ? [] : ['-ss', Math.max(0, Number(position) || 0).toFixed(3)];
-    const frameFilter = `${broadcastFrameSource ? 'reverse,' : ''}scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+    const frameFilter = `${broadcastFrameSource ? 'reverse,' : ''}scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
     const extractor = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', ...seekArgs, '-i', source,
       '-frames:v', '1', '-vf', frameFilter,
       '-c:v', 'png', '-threads', '1', '-update', '1', '-y', frameFile],
@@ -2579,7 +2579,7 @@ function startStandby(profile = sessionProfile()) {
     : ['-re', '-f', 'lavfi', '-i', `color=c=0x17121f:s=${width}x${height}:r=${profile.fps}`];
   const args = ['-hide_banner', '-loglevel', 'warning', ...videoInput,
     '-re', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0',
-    '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
+    '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile)];
   const child = spawn('ffmpeg', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   standbyProcess = child;
@@ -2959,9 +2959,9 @@ function unityNormalizeArgs(media, output, profile) {
   if (videoIndex === null) { args.push('-f', 'lavfi', '-i', `color=c=0x080611:s=${width}x${height}:r=${profile.fps}`); videoIndex = inputIndex++; }
   if (audioIndex === null) { args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000'); audioIndex = inputIndex++; }
   const speed = Math.max(0.5, Math.min(2, Number(config.playbackSpeed) || 1));
-  const volume = Math.max(0, Math.min(2, Number(config.mediaVolume) || 0));
+  const volume = Math.max(0, Math.min(4, Number(config.mediaVolume) || 0));
   args.push('-map', `${videoIndex}:v:0`, '-map', `${audioIndex}:a:0`, '-shortest',
-    '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=bicubic,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setpts=PTS/${speed}`,
+    '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=bicubic,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setpts=PTS/${speed}`,
     '-af', `atempo=${speed},volume=${volume.toFixed(2)},aresample=async=1:first_pts=0`, '-r', String(profile.fps), '-fps_mode', 'cfr',
     ...unityVideoEncodeArgs(profile), '-c:a', 'aac', '-b:a', '160k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '-y', output);
   return args;
@@ -3159,7 +3159,7 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   // вместе с главами и метаданными файла.
   args.push('-map', `${videoIndex}:V:0`, '-map', `${audioIndex}:a:0`,
     '-sn', '-dn', '-map_chapters', '-1', '-map_metadata', '-1', '-shortest',
-    '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS/${speed}`,
+    '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS/${speed}`,
     '-af', `atempo=${speed},volume=${mediaVolume.toFixed(2)},alimiter=limit=0.97:level=disabled,aresample=async=1000:first_pts=0`,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...producerEncodeArgs(profile), '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
     '-max_muxing_queue_size', '4096',
@@ -3390,7 +3390,10 @@ function playbackCommand(body) {
     }
   } else if (action === 'volume') {
     const position = activeKind === 'queue' ? currentSourcePosition() : 0;
-    const volume = Math.max(0, Math.min(2, Number(body.volume) || 0));
+    // До 4× — как и ползунок в настройках (400%). Раньше здесь стоял предел 2,
+    // и усиление выше 200% при живом эфире молча срезалось: ползунок ехал, а
+    // громче не становилось.
+    const volume = Math.max(0, Math.min(4, Number(body.volume) || 0));
     saveConfig({ mediaVolume: volume });
     if (activeKind === 'queue') {
       if (queuePaused) pausedPosition = position;
