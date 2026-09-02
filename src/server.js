@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.3';
+const APP_VERSION = '0.54.4';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -2376,7 +2376,7 @@ function startRtspPush() {
       // «dimensions not set», падение, перезапуск по кругу. Теперь он спокойно
       // ждёт появления видео и звука. RTSP-муксеру нужны оба параметра до
       // первого пакета, иначе header не пишется вовсе.
-      '-probesize', '2000000', '-analyzeduration', '1000000', '-f', 'mpegts', '-i', 'pipe:0',
+      '-probesize', '2000000', '-analyzeduration', '700000', '-f', 'mpegts', '-i', 'pipe:0',
       '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
       // Пакеты уходят сразу, без придержки в муксере: каждая такая задержка
       // складывается с буфером плеера и в VRChat видна как отставание.
@@ -3879,12 +3879,15 @@ const mime = {
 // смотреть чужой экран, пока идёт трансляция.
 function общийДоступ(public_) { return public_ ? { 'Access-Control-Allow-Origin': '*' } : {}; }
 
-function serveFile(res, base, relative, cache = false, public_ = false) {
+function serveFile(res, base, relative, cache = false, public_ = false, head = false) {
   const safe = normalize(relative).replace(/^(\.\.(\\|\/|$))+/, '');
   const file = join(base, safe);
   if ((!file.startsWith(base + sep) && file !== base) || !existsSync(file)) return false;
   res.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream',
     'Cache-Control': cache ? 'public, max-age=3600' : 'no-store', ...общийДоступ(public_) });
+  // HEAD: только заголовки, без тела. Плееры (AVPro в VRChat) проверяют ссылку
+  // запросом HEAD перед проигрыванием — без ответа на него ссылка «ломалась».
+  if (head) { res.end(); return true; }
   createReadStream(file).pipe(res); return true;
 }
 
@@ -4257,7 +4260,8 @@ const server = http.createServer(async (req, res) => {
       if (unityCaptureProcess) { try { unityCaptureProcess.stdin.write('q\n'); } catch {} }
       stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); json(res, 200, { ok: true }); setTimeout(() => server.close(() => process.exit(0)), 100); return;
     }
-    if (req.method === 'GET' && url.pathname.startsWith('/stream/')) {
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/stream/')) {
+      const head = req.method === 'HEAD';
       if ((url.pathname === '/stream/live.m3u8' || url.pathname === '/stream/preview.m3u8') && existsSync(join(HLS_DIR, 'live.m3u8'))) {
         const preview = url.pathname === '/stream/preview.m3u8';
         // ponytail: локальное окно 4×1с — минимальная задержка для AVPro на этом
@@ -4268,9 +4272,9 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': mime['.m3u8'], 'Cache-Control': 'no-cache, no-store, must-revalidate',
           'CDN-Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': 'no-store', 'Surrogate-Control': 'no-store',
           'Pragma': 'no-cache', 'Expires': '0', ...общийДоступ(publicTunnelHost) });
-        res.end(playlist); return;
+        res.end(head ? undefined : playlist); return;
       }
-      if (serveFile(res, HLS_DIR, url.pathname.slice(8), false, publicTunnelHost)) return; return json(res, 404, { error: 'Поток ещё запускается.' });
+      if (serveFile(res, HLS_DIR, url.pathname.slice(8), false, publicTunnelHost, head)) return; return json(res, 404, { error: 'Поток ещё запускается.' });
     }
     if ((req.method === 'GET' || req.method === 'HEAD') && /^\/media\/[^/]+\.mp4$/.test(url.pathname)) {
       const id = decodeURIComponent(url.pathname.slice('/media/'.length, -'.mp4'.length));
