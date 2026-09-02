@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.2';
+const APP_VERSION = '0.54.3';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1452,7 +1452,14 @@ function applyUpdate() {
     `del "%~f0"`,
     '',
   ].join('\r\n'), 'utf8');
-  spawn('cmd.exe', ['/c', script], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
+  // Запускаем не как дочерний процесс, а через WMI: обычный spawn попадает в
+  // группу процессов приложения (она гасит всех при закрытии оболочки), и
+  // скрипт умирал ровно в момент подмены exe — обновление «не работало».
+  // Процесс, созданный WmiPrvSE, в эту группу не входит и переживает закрытие.
+  const командная = `cmd /c "${script}"`.replace(/'/g, "''");
+  const ps = `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='${командная}'} | Out-Null`;
+  spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps],
+    { windowsHide: true, stdio: 'ignore' }).unref();
   log(`Устанавливаю версию ${updateState.version} и перезапускаюсь`);
 }
 
