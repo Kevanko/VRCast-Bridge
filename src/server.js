@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.4';
+const APP_VERSION = '0.54.5';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -88,6 +88,8 @@ const defaults = {
   encoderMode: 'auto',
   whiteIp: '',
   tunnelProvider: 'auto',
+  cookiesBrowser: '',
+  cookiesFile: '',
 };
 
 function loadConfig() {
@@ -181,6 +183,19 @@ function saveUnityBuildState() {
 // YouTube регулярно ломает старые версии yt-dlp: ошибка выглядит как
 // «HTTP Error 403: Forbidden» на каждом треке. Поэтому носим свою копию и
 // обновляем её сами, а системную используем только как запасной вариант.
+// Cookies обходят проверку «подтвердите, что вы не бот» у YouTube: за VPN его
+// общий IP часто в чёрном списке, и без входа в аккаунт скачивание не идёт.
+// Файл cookies.txt надёжнее браузера напрямую — Chrome и Edge с недавних пор
+// шифруют базу так, что yt-dlp её не читает, а из выгруженного файла куки
+// берутся от любого браузера.
+function ytdlpCookieArgs() {
+  const файл = String(config.cookiesFile || '').trim();
+  if (файл && existsSync(файл)) return ['--cookies', файл];
+  const браузер = String(config.cookiesBrowser || '').trim();
+  if (браузер) return ['--cookies-from-browser', браузер];
+  return [];
+}
+
 function ytdlpPath() {
   if (existsSync(YTDLP_UPDATED)) return YTDLP_UPDATED;
   const own = join(DATA_DIR, 'tools', 'yt-dlp.exe');
@@ -2663,7 +2678,7 @@ async function resolveRemoteMedia(entryUrl) {
     'best[height<=1080]',
     'best',
   ].join('/');
-  const data = await spawnJson(ytdlpPath(), ['--no-warnings', '--no-playlist', '--dump-single-json',
+  const data = await spawnJson(ytdlpPath(), ['--no-warnings', ...ytdlpCookieArgs(), '--no-playlist', '--dump-single-json',
     '-f', preferred, entryUrl], 70000);
   const formats = Array.isArray(data.requested_formats) ? data.requested_formats : [];
   const video = formats.find(format => format.vcodec && format.vcodec !== 'none');
@@ -2861,7 +2876,7 @@ function startCacheDownload(item) {
     // Во время эфира качаем бережно: четыре потока на полной скорости забивают
     // канал, и картинка у зрителя начинает отставать, хотя сам поток исправен.
     const эфирИдёт = Boolean(activeKind);
-    const args = ['--no-warnings', '--no-playlist', '--newline', '--retries', '8', '--fragment-retries', '8',
+    const args = ['--no-warnings', ...ytdlpCookieArgs(), '--no-playlist', '--newline', '--retries', '8', '--fragment-retries', '8',
       '--concurrent-fragments', эфирИдёт ? '1' : '4', ...(эфирИдёт ? ['--limit-rate', '4M'] : []),
       '--socket-timeout', '20', '-f',
       'bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/best[height<=1080]',
@@ -3481,14 +3496,17 @@ async function addUrl(rawUrl) {
   // отдельного разборщика нет.
   let flat;
   try {
-    flat = await spawnJson(ytdlpPath(), ['--no-warnings', '--flat-playlist', '--dump-single-json', rawUrl], 70000);
+    flat = await spawnJson(ytdlpPath(), ['--no-warnings', ...ytdlpCookieArgs(), '--flat-playlist', '--dump-single-json', rawUrl], 70000);
   } catch (error) {
     log(`Пробую разобрать страницу целиком: ${host}`);
     logDetail(`Обычный разбор не удался для ${rawUrl}: ${error.message}`);
     try {
-      flat = await spawnJson(ytdlpPath(), ['--no-warnings', '--force-generic-extractor', '--dump-single-json', rawUrl], 90000);
+      flat = await spawnJson(ytdlpPath(), ['--no-warnings', ...ytdlpCookieArgs(), '--force-generic-extractor', '--dump-single-json', rawUrl], 90000);
     } catch (generic) {
       logDetail(`Общий разбор тоже не удался для ${rawUrl}: ${generic.message}`);
+      if (/confirm you.?re not a bot|Sign in to confirm|not a bot/i.test(error.message + generic.message)) {
+        throw new Error('YouTube просит войти (проверка «вы не бот» — за VPN его IP часто в чёрном списке). В настройках укажите файл cookies.txt: выгрузите его из браузера, где вы вошли в YouTube (расширение вроде «Get cookies.txt LOCALLY»), или выберите браузер с входом в YouTube.');
+      }
       throw new Error(`${error.message}. Попробуйте вставить прямую ссылку на видео (…mp4 или …m3u8) — её страница обычно отдаёт в плеере.`);
     }
   }
@@ -4137,6 +4155,8 @@ const server = http.createServer(async (req, res) => {
         encoderMode: ['auto', 'gpu', 'cpu'].includes(body.encoderMode) ? body.encoderMode : (config.encoderMode || 'auto'),
         whiteIp: body.whiteIp === undefined ? (config.whiteIp || '') : String(body.whiteIp).trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0].slice(0, 60).replace(/[^a-z0-9.:-]/gi, ''),
         tunnelProvider: ['auto', 'cloudflare', 'pinggy', 'localhostrun'].includes(body.tunnelProvider) ? body.tunnelProvider : (config.tunnelProvider || 'auto'),
+        cookiesBrowser: ['', 'firefox', 'chrome', 'edge', 'brave', 'chromium', 'opera', 'vivaldi'].includes(body.cookiesBrowser) ? body.cookiesBrowser : (config.cookiesBrowser || ''),
+        cookiesFile: body.cookiesFile === undefined ? (config.cookiesFile || '') : String(body.cookiesFile).trim().replace(/^["']|["']$/g, '').slice(0, 400),
         cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),

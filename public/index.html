@@ -238,6 +238,20 @@
             <p class="field-help" id="cacheHint"></p>
             <button id="clearCache" type="button">Удалить скачанное</button>
           </div>
+          <div class="storage-box">
+            <div class="storage-head"><span><b>Cookies для YouTube</b></span></div>
+            <label>Из браузера<select id="cookiesBrowser">
+              <option value="">не использовать</option>
+              <option value="firefox">Firefox</option>
+              <option value="chrome">Chrome</option>
+              <option value="edge">Edge</option>
+              <option value="brave">Brave</option>
+              <option value="opera">Opera</option>
+              <option value="vivaldi">Vivaldi</option>
+            </select></label>
+            <label>Или файл cookies.txt<input id="cookiesFile" type="text" placeholder="путь к cookies.txt (необязательно)" autocomplete="off"></label>
+            <p class="field-help">YouTube просит вход («вы не бот») — особенно за VPN. Войдите в YouTube в браузере и выберите его здесь, либо выгрузите cookies.txt расширением и укажите файл. Файл надёжнее: Chrome и Edge шифруют куки, из файла берётся у любого браузера.</p>
+          </div>
           <div class="template-box">
             <div class="template-head"><span><b>Наборы</b></span><span id="templateCount">0</span></div>
             <select id="templateSelect" aria-label="Сохранённый набор"><option value="">Новый набор…</option></select>
