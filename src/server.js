@@ -88,8 +88,6 @@ const defaults = {
   encoderMode: 'auto',
   whiteIp: '',
   tunnelProvider: 'auto',
-  cookiesBrowser: '',
-  cookiesFile: '',
 };
 
 function loadConfig() {
@@ -147,6 +145,17 @@ let playbackRevision = 0;
 let playbackBusy = false;
 let hlsHealth = { ready: false, realtimeRatio: 0, segmentAge: null, segmentCount: 0, latest: '', updatedAt: 0 };
 let hlsHealthTimer = null;
+// Телеметрия качества эфира. liveLatency — насколько живой край потока убежал
+// вперёд от настенных часов: это и есть та задержка, что накапливалась до 22с.
+// streamEvents — журнал фризов и просадок с местом (какой трек, секунда).
+let liveLatency = 0;
+let maxLiveLatency = 0;
+let streamEvents = [];
+let freezeState = null;      // текущий фриз: { startedAt, itemId, position, latency }
+let driftCorrectedAt = 0;
+let streamSessionStart = 0;
+let streamWasReady = false;  // канал хоть раз вышел на режим — только тогда ловим фризы
+const qualityStats = { freezes: 0, freezeSeconds: 0, driftCorrections: 0, slowSpells: 0, worstRatio: 1 };
 let windowWatchTimer = null;
 let windowCaptureState = null;
 let audioLevelDb = -96;
@@ -183,18 +192,6 @@ function saveUnityBuildState() {
 // YouTube регулярно ломает старые версии yt-dlp: ошибка выглядит как
 // «HTTP Error 403: Forbidden» на каждом треке. Поэтому носим свою копию и
 // обновляем её сами, а системную используем только как запасной вариант.
-// Cookies обходят проверку «подтвердите, что вы не бот» у YouTube: за VPN его
-// общий IP часто в чёрном списке, и без входа в аккаунт скачивание не идёт.
-// Файл cookies.txt надёжнее браузера напрямую — Chrome и Edge с недавних пор
-// шифруют базу так, что yt-dlp её не читает, а из выгруженного файла куки
-// берутся от любого браузера.
-function ytdlpCookieArgs() {
-  const файл = String(config.cookiesFile || '').trim();
-  if (файл && existsSync(файл)) return ['--cookies', файл];
-  const браузер = String(config.cookiesBrowser || '').trim();
-  if (браузер) return ['--cookies-from-browser', браузер];
-  return [];
-}
 
 function ytdlpPath() {
   if (existsSync(YTDLP_UPDATED)) return YTDLP_UPDATED;
@@ -554,6 +551,28 @@ function log(message) {
   logLines = [...logLines.slice(-99), line];
   console.log(line);
   try { appendFileSync(LOG_FILE, `${new Date().toISOString()}  ${message}\n`, 'utf8'); } catch {}
+}
+
+// Что сейчас в эфире и на какой секунде — чтобы у фриза было «место».
+function streamContext() {
+  const item = queue.find(entry => entry.id === currentId);
+  return {
+    kind: activeKind || 'idle',
+    itemId: currentId || '',
+    title: item ? item.title : (activeKind === 'screen' ? 'Захват экрана' : ''),
+    position: activeKind === 'queue' ? Number(currentSourcePosition().toFixed(1)) : null,
+  };
+}
+
+// Событие качества эфира (фриз, просадка, коррекция задержки): кладём в
+// кольцевой журнал для интерфейса и подробно пишем в файл ошибок с местом.
+function recordStreamEvent(kind, detail, extra = {}, contextOverride = null) {
+  const context = contextOverride || streamContext();
+  const event = { at: Date.now(), kind, detail, ...context, ...extra };
+  streamEvents = [...streamEvents.slice(-59), event];
+  const место = context.position !== null ? ` · ${context.title || 'трек'} на ${context.position}с` : context.title ? ` · ${context.title}` : '';
+  const хвост = Object.entries(extra).map(([k, v]) => `${k}=${v}`).join(' ');
+  logDetail(`[эфир] ${kind}: ${detail}${место}${хвост ? ` · ${хвост}` : ''}`);
 }
 
 function stopPublicTunnel() {
@@ -1494,7 +1513,13 @@ function status() {
     performance: { encoder: encoder.label, hardware: encoder.hardware, continuousQueue: true, outputProfile: relayProfile,
       encoderMode: config.encoderMode || 'auto', gpuLabel: hardwareEncoder ? hardwareEncoder.label : '',
       streamClock: Number(streamTimestamp().toFixed(3)),
-      realtimeRatio: Number(hlsHealth.realtimeRatio.toFixed(2)), segmentAge: hlsHealth.segmentAge === null ? null : Number(hlsHealth.segmentAge.toFixed(1)) },
+      realtimeRatio: Number(hlsHealth.realtimeRatio.toFixed(2)), segmentAge: hlsHealth.segmentAge === null ? null : Number(hlsHealth.segmentAge.toFixed(1)),
+      // Задержка живого края (та, что раньше росла до 22с) и журнал качества:
+      // фризы с местом, просадки, автоматические сбросы задержки.
+      liveLatencySec: Number((liveLatency || 0).toFixed(1)),
+      maxLiveLatencySec: Number((maxLiveLatency || 0).toFixed(1)),
+      quality: { ...qualityStats, currentFreezeSec: freezeState ? Number(((Date.now() - freezeState.startedAt) / 1000).toFixed(1)) : 0 },
+      events: streamEvents.slice(-12) },
     stream: { ready: hlsHealth.ready, segmentCount: hlsHealth.segmentCount,
       state: !relayProcess ? 'offline' : hlsHealth.ready ? 'ready' : hlsHealth.segmentAge !== null && hlsHealth.segmentAge >= 4 ? 'stalled' : 'starting' },
     compatibility: { unity: unityCompatibility() },
@@ -1543,6 +1568,10 @@ function getLanAddresses() {
 
 function cleanHls() {
   hlsHealth = { ready: false, realtimeRatio: 0, segmentAge: null, segmentCount: 0, latest: '', updatedAt: 0 };
+  // Канал начинается заново — фризы не ловим, пока он не выйдет на режим, иначе
+  // сам разгон в начале засчитывался как фриз.
+  streamWasReady = false;
+  freezeState = null;
   rmSync(HLS_DIR, { recursive: true, force: true });
   mkdirSync(HLS_DIR, { recursive: true });
 }
@@ -1571,12 +1600,77 @@ function inspectHlsHealth() {
     hlsHealth.segmentAge = segmentAge;
     hlsHealth.segmentCount = uris.length;
     hlsHealth.ready = uris.length >= 3 && segmentAge < 4 && (hlsHealth.realtimeRatio === 0 || hlsHealth.realtimeRatio >= 0.72);
+    if (hlsHealth.ready) streamWasReady = true;
+    trackStreamQuality(segmentAge);
     autoReduceQuality(hlsHealth);
     watchStalledStream(hlsHealth);
   } catch {
     hlsHealth.ready = false;
     hlsHealth.segmentAge = null;
+    // Плейлиста нет, а эфир идёт — это тоже фриз (край мёртв).
+    if (activeKind) trackStreamQuality(null);
   }
+}
+
+// ── Телеметрия качества и синхронизация задержки ────────────────────────────
+const FREEZE_START = 2.5;   // сегмент не обновлялся столько секунд — считаем фризом
+const FREEZE_CLEAR = 1.5;   // край снова живой — фриз закончился
+const DRIFT_LIMIT = 5;      // накопленная задержка, после которой пересобираем канал
+
+function trackStreamQuality(segmentAge) {
+  const now = Date.now();
+  // Задержка живого края: PTS последнего отданного кадра минус настенные часы.
+  // Именно она незаметно росла до 22с — теперь мы её видим и правим.
+  if (relayProcess && relayStartedAt && lastRelayPts > 0) {
+    const измерено = lastRelayPts - streamTimestamp();
+    liveLatency = Number.isFinite(liveLatency) && liveLatency ? liveLatency * 0.7 + измерено * 0.3 : измерено;
+    if (activeKind && liveLatency > maxLiveLatency) maxLiveLatency = liveLatency;
+  } else {
+    liveLatency = 0;
+  }
+  if (!activeKind) { freezeState = null; return; }
+
+  const ratio = Number(hlsHealth.realtimeRatio) || 1;
+  if (ratio && ratio < qualityStats.worstRatio) qualityStats.worstRatio = Number(ratio.toFixed(2));
+
+  // Фриз: живой край перестал обновляться. Запоминаем начало с местом (какой
+  // трек, секунда, задержка), в конце — длительность.
+  const мёртв = segmentAge === null || segmentAge >= FREEZE_START;
+  if (мёртв && streamWasReady && !freezeState && !queuePaused && !playbackBusy) {
+    freezeState = { startedAt: now, context: streamContext(), latency: Number(liveLatency.toFixed(1)) };
+  } else if (freezeState && segmentAge !== null && segmentAge < FREEZE_CLEAR) {
+    const durationSec = Number(((now - freezeState.startedAt) / 1000).toFixed(1));
+    if (durationSec >= 0.4) {
+      qualityStats.freezes++;
+      qualityStats.freezeSeconds = Number((qualityStats.freezeSeconds + durationSec).toFixed(1));
+      recordStreamEvent('freeze', `фриз ${durationSec}с`, { durationSec, latencySec: freezeState.latency }, freezeState.context);
+    }
+    freezeState = null;
+  }
+
+  correctDrift();
+}
+
+// Синхронизация: когда живой край убежал вперёд, возвращаем задержку к нулю,
+// пересобрав канал с привязкой к «сейчас». Редкая пересборка (порог 5с, не чаще
+// раза в 45с) вместо бесконечного роста до десятков секунд.
+function correctDrift() {
+  if (!activeKind || queuePaused || playbackBusy) return;
+  if (!Number.isFinite(liveLatency) || liveLatency < DRIFT_LIMIT) return;
+  if (Date.now() - driftCorrectedAt < 45000) return;
+  driftCorrectedAt = Date.now();
+  qualityStats.driftCorrections++;
+  recordStreamEvent('drift', `задержка выросла до ${liveLatency.toFixed(1)}с — пересобираю канал и возвращаю к нулю`,
+    { latencySec: Number(liveLatency.toFixed(1)) });
+  liveLatency = 0; maxLiveLatency = 0;
+  try { reanchorRelay(); } catch (error) { log(`Сброс задержки: ${error.message}`); }
+}
+
+function resetQualityTelemetry() {
+  liveLatency = 0; maxLiveLatency = 0; freezeState = null; streamEvents = [];
+  driftCorrectedAt = 0; streamSessionStart = Date.now();
+  qualityStats.freezes = 0; qualityStats.freezeSeconds = 0; qualityStats.driftCorrections = 0;
+  qualityStats.slowSpells = 0; qualityStats.worstRatio = 1;
 }
 
 // Когда машина не тянет заданное качество (нет аппаратного кодировщика или
@@ -1731,6 +1825,31 @@ function restartRelaySession(profile) {
   else if (вид === 'queue' && currentId) transitionQueue('seek', позиция);
 }
 
+// Пересборка канала с полным сбросом часов потока: живой край снова привязан к
+// «сейчас», накопленная задержка возвращается к нулю. В отличие от
+// restartRelaySession, здесь relayStartedAt и lastRelayPts обнуляются — ценой
+// одного resync у плеера, но зато задержка не растёт бесконечно.
+function reanchorRelay() {
+  const вид = activeKind;
+  const позиция = вид === 'queue' ? currentSourcePosition() : 0;
+  const profile = streamProfile(вид);
+  stopStandby();
+  stopRtspPush();
+  const relay = relayProcess;
+  relayProcess = null;
+  stopProducer(activeProcess);
+  activeProcess = null;
+  relay?.kill('SIGTERM');
+  cleanHls();
+  producerClock = null;
+  lastRelayPts = 0;
+  relayStartedAt = Date.now();
+  startRelay(profile);
+  startStandby(profile);
+  if (вид === 'screen') startScreen().catch(error => log(`Пересборка канала: ${error.message}`));
+  else if (вид === 'queue' && currentId) transitionQueue('seek', позиция);
+}
+
 // Битрейт задаёт человек, а «авто» подбирается по качеству. Через интернет
 // (свой сервер или туннель) поток ужимается: домашний канал отдачи редко тянет
 // больше 6 Мбит/с, а на переполнении канала появляются те самые фризы.
@@ -1836,16 +1955,15 @@ function streamTimestamp() {
 let producerClock = null;
 function nextProducerTimestamp() {
   const base = streamTimestamp();
-  const previousNow = producerClock
-    ? producerClock.startTs + (Date.now() - producerClock.startWall) / 1000
-    : 0;
-  // Раньше точка стыка угадывалась по настенным часам с запасом 0,15 с. Уходящий
-  // ffmpeg успевает выбросить в эфир до секунды вперёд, и следующий ролик
-  // начинался ЗА уже отданными кадрами: плеер отматывался назад, показывал
-  // старое и мигал. Теперь берём фактические часы потока — PCR последнего
-  // отданного пакета — и продолжаем строго после них.
-  // Запас — один кадр: метка кадра точна, гадать больше не нужно.
-  return Math.max(base, previousNow, lastRelayPts + 0.04);
+  // Точка стыка = настенные часы. lastRelayPts — только нижняя граница
+  // монотонности (нельзя начать ЗА уже отданными кадрами, иначе AVPro ловит
+  // non-monotonic DTS и рвётся). Запас — один кадр, минимально возможный.
+  // Раньше здесь была ещё проекция previousNow и запас 0,04с: её «излишек»
+  // копился на КАЖДОМ стыке (loop, смена трека), и за час живой край убегал
+  // от настенных часов на те самые десятки секунд задержки. Теперь стык
+  // добавляет ровно один кадр, а накопление добивает коррекция дрейфа.
+  const frame = 1 / (sessionProfile().fps || 30);
+  return Math.max(base, lastRelayPts + frame);
 }
 
 // Время последнего кадра, ушедшего в эфир. Сначала читалось из PCR — служебных
@@ -2458,6 +2576,23 @@ function stopRtspPush() {
 
 // Единая точка подключения продюсера: HLS-релей через pipe (с backpressure),
 // RTSP-пушер — вторым потребителем тех же чанков (без него поток не тормозится).
+// Свой сервер не успевает принимать поток = аплинк не тянет текущий битрейт.
+// Раньше лишние чанки просто молча отбрасывались, и у зрителя «прерывалась
+// картинка» без единого слова в журнале. Теперь считаем сброшенные подряд
+// пакеты и, если их много, пишем понятное событие с советом снизить битрейт.
+let remoteDropStreak = 0;
+let remoteCongestionAt = 0;
+function noteRemoteCongestion() {
+  remoteDropStreak++;
+  if (remoteDropStreak < 40 || Date.now() - remoteCongestionAt < 20000) return;
+  remoteCongestionAt = Date.now();
+  remoteDropStreak = 0;
+  qualityStats.slowSpells++;
+  recordStreamEvent('remote-congestion',
+    'свой сервер не успевает принимать поток — аплинк не тянет битрейт; снизьте качество или битрейт в настройках',
+    { bitrateKbps: bitrateKbps(sessionProfile()) });
+}
+
 function pipeToRelay(child) {
   child.stdout.on('error', () => {});
   // Обработчик ошибок релея вешается один раз при его запуске: раньше он
@@ -2466,11 +2601,15 @@ function pipeToRelay(child) {
   child.stdout.pipe(relayProcess.stdin, { end: false });
   child.stdout.on('data', chunk => {
     trackRelayClock(chunk);
-    for (const pusher of rtspPushProcesses.values()) {
+    for (const [id, pusher] of rtspPushProcesses) {
       const sink = pusher.stdin;
+      if (!sink?.writable) continue;
       // Медленный получатель (свой сервер на слабом канале) не должен копить
-      // память и тормозить остальных — его чанки просто отбрасываются.
-      if (sink?.writable && sink.writableLength < 4 * 1024 * 1024) sink.write(chunk);
+      // память и тормозить остальных — его чанки отбрасываются, но не молча.
+      if (sink.writableLength < 4 * 1024 * 1024) {
+        sink.write(chunk);
+        if (id === 'remote') remoteDropStreak = 0;
+      } else if (id === 'remote') noteRemoteCongestion();
     }
   });
 }
@@ -2616,6 +2755,7 @@ function ensureRelay(profile = streamProfile()) {
     producerClock = null;
     lastRelayPts = 0;
     relayStartedAt = Date.now();
+    resetQualityTelemetry();
     try { startRelay(profile); }
     catch (error) { relayStartedAt = 0; relayProfile = null; throw error; }
   }
@@ -2678,7 +2818,7 @@ async function resolveRemoteMedia(entryUrl) {
     'best[height<=1080]',
     'best',
   ].join('/');
-  const data = await spawnJson(ytdlpPath(), ['--no-warnings', ...ytdlpCookieArgs(), '--no-playlist', '--dump-single-json',
+  const data = await spawnJson(ytdlpPath(), ['--no-warnings', '--no-playlist', '--dump-single-json',
     '-f', preferred, entryUrl], 70000);
   const formats = Array.isArray(data.requested_formats) ? data.requested_formats : [];
   const video = formats.find(format => format.vcodec && format.vcodec !== 'none');
@@ -2876,7 +3016,7 @@ function startCacheDownload(item) {
     // Во время эфира качаем бережно: четыре потока на полной скорости забивают
     // канал, и картинка у зрителя начинает отставать, хотя сам поток исправен.
     const эфирИдёт = Boolean(activeKind);
-    const args = ['--no-warnings', ...ytdlpCookieArgs(), '--no-playlist', '--newline', '--retries', '8', '--fragment-retries', '8',
+    const args = ['--no-warnings', '--no-playlist', '--newline', '--retries', '8', '--fragment-retries', '8',
       '--concurrent-fragments', эфирИдёт ? '1' : '4', ...(эфирИдёт ? ['--limit-rate', '4M'] : []),
       '--socket-timeout', '20', '-f',
       'bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/best[height<=1080]',
@@ -3496,16 +3636,16 @@ async function addUrl(rawUrl) {
   // отдельного разборщика нет.
   let flat;
   try {
-    flat = await spawnJson(ytdlpPath(), ['--no-warnings', ...ytdlpCookieArgs(), '--flat-playlist', '--dump-single-json', rawUrl], 70000);
+    flat = await spawnJson(ytdlpPath(), ['--no-warnings', '--flat-playlist', '--dump-single-json', rawUrl], 70000);
   } catch (error) {
     log(`Пробую разобрать страницу целиком: ${host}`);
     logDetail(`Обычный разбор не удался для ${rawUrl}: ${error.message}`);
     try {
-      flat = await spawnJson(ytdlpPath(), ['--no-warnings', ...ytdlpCookieArgs(), '--force-generic-extractor', '--dump-single-json', rawUrl], 90000);
+      flat = await spawnJson(ytdlpPath(), ['--no-warnings', '--force-generic-extractor', '--dump-single-json', rawUrl], 90000);
     } catch (generic) {
       logDetail(`Общий разбор тоже не удался для ${rawUrl}: ${generic.message}`);
       if (/confirm you.?re not a bot|Sign in to confirm|not a bot/i.test(error.message + generic.message)) {
-        throw new Error('YouTube просит войти (проверка «вы не бот» — за VPN его IP часто в чёрном списке). В настройках укажите файл cookies.txt: выгрузите его из браузера, где вы вошли в YouTube (расширение вроде «Get cookies.txt LOCALLY»), или выберите браузер с входом в YouTube.');
+        throw new Error('YouTube не отдаёт это видео (за VPN его общий IP часто в чёрном списке проверки «вы не бот»). Попробуйте другой ролик, отключите VPN или вставьте прямую ссылку на файл.');
       }
       throw new Error(`${error.message}. Попробуйте вставить прямую ссылку на видео (…mp4 или …m3u8) — её страница обычно отдаёт в плеере.`);
     }
@@ -4155,8 +4295,6 @@ const server = http.createServer(async (req, res) => {
         encoderMode: ['auto', 'gpu', 'cpu'].includes(body.encoderMode) ? body.encoderMode : (config.encoderMode || 'auto'),
         whiteIp: body.whiteIp === undefined ? (config.whiteIp || '') : String(body.whiteIp).trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0].slice(0, 60).replace(/[^a-z0-9.:-]/gi, ''),
         tunnelProvider: ['auto', 'cloudflare', 'pinggy', 'localhostrun'].includes(body.tunnelProvider) ? body.tunnelProvider : (config.tunnelProvider || 'auto'),
-        cookiesBrowser: ['', 'firefox', 'chrome', 'edge', 'brave', 'chromium', 'opera', 'vivaldi'].includes(body.cookiesBrowser) ? body.cookiesBrowser : (config.cookiesBrowser || ''),
-        cookiesFile: body.cookiesFile === undefined ? (config.cookiesFile || '') : String(body.cookiesFile).trim().replace(/^["']|["']$/g, '').slice(0, 400),
         cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),

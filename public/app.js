@@ -487,7 +487,22 @@ function render(state) {
     :(гпу?`Авто: сейчас ${гпу}. Программа сама берёт видеокарту, если она есть.`:'Авто: видеокарты не нашлось — считает процессор.');
   const слабый=state.performance&&state.performance.hardware===false;
   const тяжело=слабый&&(ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30));
-  const ratio=Number(state.performance?.realtimeRatio||0); $('#streamHealth').textContent=тяжело?'видеокарта не кодирует — поставьте 720p и 30 кадров':streamReady?(ratio&&ratio<0.97?`отстаёт на ${Math.round((1-ratio)*100)}%`:'идёт вовремя'):streamStalled?'не успевает — снизьте качество':'набирает буфер';
+  const ratio=Number(state.performance?.realtimeRatio||0);
+  const perf=state.performance||{}, q=perf.quality||{}, events=perf.events||[];
+  const lat=Number(perf.liveLatencySec||0);
+  const congested=events.some(e=>e.kind==='remote-congestion'&&Date.now()-e.at<15000);
+  let health=тяжело?'видеокарта не кодирует — поставьте 720p и 30 кадров':streamReady?(ratio&&ratio<0.97?`отстаёт на ${Math.round((1-ratio)*100)}%`:'идёт вовремя'):streamStalled?'не успевает — снизьте качество':'набирает буфер';
+  if(congested)health='свой сервер не тянет битрейт — снизьте качество';
+  else if(state.running&&streamReady){
+    if(lat>0.3)health+=` · задержка ${lat.toFixed(1)}с`;
+    if(q.freezes>0)health+=` · фризов ${q.freezes}`;
+    if(q.driftCorrections>0)health+=` · синхр. ${q.driftCorrections}`;
+  }
+  const last=events[events.length-1];
+  $('#streamHealth').textContent=health;
+  $('#streamHealth').title=state.running
+    ?`Задержка сейчас ${lat.toFixed(1)}с (пик ${Number(perf.maxLiveLatencySec||0).toFixed(1)}с)\nФризов ${q.freezes||0} на ${q.freezeSeconds||0}с всего\nСинхронизаций задержки ${q.driftCorrections||0}${last?`\nПоследнее: ${last.detail}${last.position!=null?` (${last.title||'трек'} на ${last.position}с)`:''}`:''}`
+    :'';
   $('#queueCount').textContent=state.queue.length; $('#logs').textContent=state.logs.join('\n')||'Журнал пуст';
   // Показания выхода всегда на виду: что уходит в эфир, какая чёткость и
   // сколько кадров. Раньше это было спрятано под шестерёнкой, и автопонижение
@@ -620,7 +635,7 @@ async function refreshWindows() {
 
 function configPayload() {
   const selectedWindow=ui.sources.windows.find(item=>item.handle===$('#windowSource').value);
-  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim(),tunnelProvider:$('#tunnelProviderSelect').value,cookiesBrowser:$('#cookiesBrowser').value,cookiesFile:$('#cookiesFile').value.trim() };
+  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim(),tunnelProvider:$('#tunnelProviderSelect').value };
 }
 async function saveConfig(applyLive = false) { return api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),applyLive})}); }
 
@@ -862,7 +877,7 @@ $('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast:/
 $('#appSoundSettings').addEventListener('click',()=>{window.location.href='vrcast://app-sound';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
 async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#cookiesBrowser').value=state.config.cookiesBrowser||'';$('#cookiesFile').value=state.config.cookiesFile||'';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);// Снимок источника обновляем только когда открыта вкладка «Экран», окно видно и эфир не идёт: раньше программа бесконечно порождала ffmpeg каждые две секунды даже на простое.
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);// Снимок источника обновляем только когда открыта вкладка «Экран», окно видно и эфир не идёт: раньше программа бесконечно порождала ffmpeg каждые две секунды даже на простое.
 // Пока открыта вкладка «Экран» и эфир не идёт, сервер держит живой поток
 // картинки — забираем её пятнадцать раз в секунду. Раз в две секунды просим
 // сервер поддержать поток: без этого он гаснет сам через пять секунд.
@@ -1031,7 +1046,4 @@ $('#cacheLimit').addEventListener('change',async()=>{
     render(await api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),cacheLimitGb:Number($('#cacheLimit').value)})}));
     toast('Лимит сохранён');
   }catch(error){ toast(error.message,true); }
-});
-for(const id of ['cookiesBrowser','cookiesFile']) $('#'+id).addEventListener('change',async()=>{
-  try{ render(await saveConfig(false)); toast('Cookies для YouTube сохранены'); }catch(error){ toast(error.message,true); }
 });
