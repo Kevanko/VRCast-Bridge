@@ -202,3 +202,56 @@ test('после остановки эфир и мгновенный канал 
   assert.ok(await liveAgain(), 'RTSP-канал должен подняться и после остановки — флаг stopping не должен залипать');
   await post('/api/stop');
 });
+
+// ── Задержка не накапливается со временем ────────────────────────────────
+// Раньше через 20 минут задержка доходила до 22с. Гоняем короткий клип по
+// кругу (каждый цикл — стык producer'ов, главный подозреваемый в дрейфе) и
+// следим за перфом: живой край не должен уезжать вперёд от настенных часов, а
+// телеметрия обязана считать это (liveLatencySec) и не показывать ложных фризов.
+test('задержка живого края не растёт со временем на зацикленном эфире', async () => {
+  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  const source = join(dataDirectory, 'loop-drift.mp4');
+  makeHeavySource(source, 3, 30);
+  await post('/api/queue/local', { paths: [source] });
+  await post('/api/start/queue');
+  await post('/api/playback', { action: 'loop', mode: 'all' });
+  assert.ok(await waitUntilPlaying(), 'эфир должен играть');
+  assert.ok(await waitForPlaylist(), 'плейлист должен появиться');
+
+  const samples = [];
+  let sawTelemetry = false;
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const perf = (await status()).performance;
+    assert.ok(perf.quality && typeof perf.quality.freezes === 'number', 'телеметрия качества должна быть в статусе');
+    assert.ok(Array.isArray(perf.events), 'журнал событий эфира должен быть массивом');
+    if (typeof perf.liveLatencySec === 'number') { samples.push(perf.liveLatencySec); sawTelemetry = true; }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  const final = (await status()).performance;
+  await post('/api/stop');
+
+  assert.ok(sawTelemetry && samples.length >= 20, 'нужно достаточно замеров задержки');
+  const peak = Math.max(...samples);
+  // Живой край не должен уезжать вперёд: коррекция дрейфа держит его в узде.
+  assert.ok(peak < 4.0, `задержка живого края не должна расти (пик ${peak.toFixed(1)}с за 30с прокрутки по кругу)`);
+  // Тренд: последняя пятёрка не намного выше первой — накопления нет.
+  const avg = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+  const trend = avg(samples.slice(-5)) - avg(samples.slice(0, 5));
+  assert.ok(trend < 2.0, `задержка не должна ползти вверх (прирост ${trend.toFixed(1)}с за прокрутку)`);
+  // Синтетический источник не должен давать фризов на выходе на режим.
+  assert.ok(final.quality.freezes <= 1, `на чистом источнике не должно быть фризов (насчитано ${final.quality.freezes})`);
+  console.log(`  [дрейф] пик задержки ${peak.toFixed(1)}с, тренд ${trend >= 0 ? '+' : ''}${trend.toFixed(1)}с, фризов ${final.quality.freezes}, коррекций дрейфа ${final.quality.driftCorrections}`);
+});
+
+// YouTube-cookies убраны целиком: в конфиге не должно остаться их следов.
+test('настроек cookies для YouTube больше нет', async () => {
+  const config = (await status()).config;
+  assert.equal(config.cookiesBrowser, undefined, 'cookiesBrowser должен исчезнуть из конфига');
+  assert.equal(config.cookiesFile, undefined, 'cookiesFile должен исчезнуть из конфига');
+  // И сохранение конфига не должно их возвращать.
+  const saved = await post('/api/config', { outputMode: 'local', cookiesBrowser: 'chrome', cookiesFile: 'C:/x.txt' });
+  const back = (await saved.json()).config;
+  assert.equal(back.cookiesBrowser, undefined, 'сервер не должен принимать cookiesBrowser');
+  assert.equal(back.cookiesFile, undefined, 'сервер не должен принимать cookiesFile');
+});
