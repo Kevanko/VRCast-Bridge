@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.10';
+const APP_VERSION = '0.54.11';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1646,7 +1646,10 @@ function status() {
       realtimeRatio: Number(hlsHealth.realtimeRatio.toFixed(2)), segmentAge: hlsHealth.segmentAge === null ? null : Number(hlsHealth.segmentAge.toFixed(1)),
       // Задержка живого края (та, что раньше росла до 22с) и журнал качества:
       // фризы с местом, просадки, автоматические сбросы задержки.
-      liveLatencySec: Number((liveLatency || 0).toFixed(1)),
+      // Наружу отдаём величину, а не знак: отставание потока — такая же
+      // задержка, как убежавший вперёд край, а окно показывало её только со
+      // знаком «+» и молчало про самый частый случай — захват экрана.
+      liveLatencySec: Number(Math.abs(liveLatency || 0).toFixed(1)),
       maxLiveLatencySec: Number((maxLiveLatency || 0).toFixed(1)),
       quality: { ...qualityStats, currentFreezeSec: freezeState ? Number(((Date.now() - freezeState.startedAt) / 1000).toFixed(1)) : 0 },
       events: streamEvents.slice(-12) },
@@ -1756,7 +1759,7 @@ function trackStreamQuality(segmentAge) {
   if (relayProcess && relayStartedAt && lastRelayPts > 0) {
     const измерено = lastRelayPts - streamTimestamp();
     liveLatency = Number.isFinite(liveLatency) && liveLatency ? liveLatency * 0.7 + измерено * 0.3 : измерено;
-    if (activeKind && liveLatency > maxLiveLatency) maxLiveLatency = liveLatency;
+    if (activeKind && Math.abs(liveLatency) > maxLiveLatency) maxLiveLatency = Math.abs(liveLatency);
   } else {
     liveLatency = 0;
   }
@@ -1769,7 +1772,7 @@ function trackStreamQuality(segmentAge) {
   // трек, секунда, задержка), в конце — длительность.
   const мёртв = segmentAge === null || segmentAge >= FREEZE_START;
   if (мёртв && streamWasReady && !freezeState && !queuePaused && !playbackBusy) {
-    freezeState = { startedAt: now, context: streamContext(), latency: Number(liveLatency.toFixed(1)) };
+    freezeState = { startedAt: now, context: streamContext(), latency: Number(Math.abs(liveLatency).toFixed(1)) };
   } else if (freezeState && segmentAge !== null && segmentAge < FREEZE_CLEAR) {
     const durationSec = Number(((now - freezeState.startedAt) / 1000).toFixed(1));
     if (durationSec >= 0.4) {
@@ -1783,17 +1786,25 @@ function trackStreamQuality(segmentAge) {
   correctDrift();
 }
 
-// Синхронизация: когда живой край убежал вперёд, возвращаем задержку к нулю,
-// пересобрав канал с привязкой к «сейчас». Редкая пересборка (порог 5с, не чаще
-// раза в 45с) вместо бесконечного роста до десятков секунд.
+// Синхронизация: когда живой край разъехался с настенными часами, возвращаем
+// задержку к нулю, пересобрав канал с привязкой к «сейчас». Редкая пересборка
+// (порог 5с, не чаще раза в 45с) вместо бесконечного роста до десятков секунд.
+// Разъехаться он может в обе стороны, и обе — это задержка у зрителя:
+//  · вперёд (+) — кадры несут будущее время, плеер их придерживает;
+//  · назад (−) — кадры застревают в кодировщике и уходят позже, чем сняты.
+// Раньше проверялся только знак «+», и минус — тот самый случай захвата экрана,
+// где отставание копится час за часом, — не ловился вовсе: за всю историю
+// журнала коррекция не сработала ни разу, пока задержка росла до 20 секунд.
 function correctDrift() {
   if (!activeKind || queuePaused || playbackBusy) return;
-  if (!Number.isFinite(liveLatency) || liveLatency < DRIFT_LIMIT) return;
+  const отклонение = Math.abs(liveLatency);
+  if (!Number.isFinite(liveLatency) || отклонение < DRIFT_LIMIT) return;
   if (Date.now() - driftCorrectedAt < 45000) return;
+  const куда = liveLatency > 0 ? 'край убежал вперёд' : 'поток отстаёт';
   driftCorrectedAt = Date.now();
   qualityStats.driftCorrections++;
-  recordStreamEvent('drift', `задержка выросла до ${liveLatency.toFixed(1)}с — пересобираю канал и возвращаю к нулю`,
-    { latencySec: Number(liveLatency.toFixed(1)) });
+  recordStreamEvent('drift', `задержка выросла до ${отклонение.toFixed(1)}с (${куда}) — пересобираю канал и возвращаю к нулю`,
+    { latencySec: Number(отклонение.toFixed(1)) });
   liveLatency = 0; maxLiveLatency = 0;
   try { reanchorRelay(); } catch (error) { log(`Сброс задержки: ${error.message}`); }
 }
@@ -2047,7 +2058,12 @@ function producerEncodeArgs(profile = streamProfile()) {
   // где high-профиль берётся не всегда. Цена — несколько процентов лишнего
   // размера при том же качестве, и это дешевле, чем «у друга не открылось».
   const gop = ['-g', String(keyframes), '-keyint_min', String(keyframes)];
-  const proff = ['-profile:v', 'main', '-level:v', '4.1'];
+  // 4.1 не тянет 1080p60: его потолок — ровно 1080p30 (245760 макроблоков в
+  // секунду). nvenc на это отвечает «InitializeEncoder failed: Invalid Level»,
+  // захват падает сразу после старта, заставка падает следом — и так по кругу,
+  // пока автоснижение не уронит кадры до 30. Для 1080p60 берём 4.2.
+  const level = profileHeight(profile) > 720 && profile.fps > 30 ? '4.2' : '4.1';
+  const proff = ['-profile:v', 'main', '-level:v', level];
   if (encoder.family === 'nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p3', '-tune', 'll',
     ...proff, ...rateControlArgs(rate), '-rc-lookahead', '0', ...gop, '-bf', '0', '-pix_fmt', 'yuv420p'];
   if (encoder.family === 'amf') return ['-c:v', 'h264_amf', '-usage', 'lowlatency', '-quality', 'speed',
@@ -2726,6 +2742,13 @@ function noteRemoteCongestion() {
 }
 
 function pipeToRelay(child) {
+  // Сколько потока разрешено копить получателю, пока он не успевает. Раньше
+  // здесь стояли 4 МБ — на реальном битрейте это 5–10 секунд, и медленный свой
+  // сервер набирал их один раз при первой же просадке аплинка, а обратно они не
+  // рассасывались: до конца эфира зритель смотрел с этой форой. Держим примерно
+  // секунду потока: лишнее лучше отбросить (об этом скажет noteRemoteCongestion),
+  // чем возить его до вечера.
+  const допуск = Math.max(256 * 1024, bitrateKbps(sessionProfile()) * 125);
   child.stdout.on('error', () => {});
   // Обработчик ошибок релея вешается один раз при его запуске: раньше он
   // добавлялся на каждый новый ролик, и за длинный эфир их набирались десятки
@@ -2737,8 +2760,9 @@ function pipeToRelay(child) {
       const sink = pusher.stdin;
       if (!sink?.writable) continue;
       // Медленный получатель (свой сервер на слабом канале) не должен копить
-      // память и тормозить остальных — его чанки отбрасываются, но не молча.
-      if (sink.writableLength < 4 * 1024 * 1024) {
+      // память, задержку и тормозить остальных — его чанки отбрасываются, но
+      // не молча.
+      if (sink.writableLength < допуск) {
         sink.write(chunk);
         if (id === 'remote') remoteDropStreak = 0;
       } else if (id === 'remote') noteRemoteCongestion();
