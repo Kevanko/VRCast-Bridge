@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.9';
+const APP_VERSION = '0.54.10';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1524,10 +1524,28 @@ const ИЗДАТЕЛЬ = 'CN=VRCast Bridge, O=VRCast Bridge';
 async function проверитьПодпись(файл) {
   const скрипт = `(Get-AuthenticodeSignature -LiteralPath '${файл.replace(/'/g, "''")}') | `
     + 'ForEach-Object { $_.Status.ToString() + [char]124 + $_.SignerCertificate.Subject }';
-  const результат = await spawnCollect('powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', скрипт], 25000).catch(() => null);
-  const строка = String(результат?.stdout || '').trim();
-  if (!строка) return { ok: false, причина: 'не удалось проверить' };
+  // Powershell запускаем с чистым PSModulePath: у собранной программы он в
+  // унаследованном окружении бывал пустым/битым, и модуль Microsoft.PowerShell
+  // .Security не подгружался — Get-AuthenticodeSignature падал «команда найдена
+  // в модуле, но не может загрузиться», подпись «не проверялась», обновление
+  // срывалось. Системный путь к модулям всегда рабочий.
+  const модули = `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\Modules`;
+  const опции = { env: { ...process.env, PSModulePath: модули } };
+  // Свежескачанный 50-МБ exe Windows Defender сразу берёт на проверку и держит
+  // файл открытым — Get-AuthenticodeSignature в этот момент не может его
+  // прочитать и молча отдаёт пустоту («не удалось проверить»), из-за чего
+  // обновление срывалось. Поэтому повторяем несколько раз с паузой: как только
+  // антивирус отпускает файл, подпись читается.
+  let строка = '';
+  for (let попытка = 0; попытка < 6; попытка++) {
+    const результат = await spawnCollect('powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', скрипт], 25000, опции).catch(() => null);
+    строка = String(результат?.stdout || '').trim();
+    if (строка) break;
+    logDetail(`Проверка подписи (попытка ${попытка + 1}): status=${результат?.status} stderr=${String(результат?.stderr || '').slice(0, 200)}`);
+    await new Promise(resolve => setTimeout(resolve, 800));
+  }
+  if (!строка) return { ok: false, причина: 'не удалось проверить (файл занят антивирусом)' };
   const [состояние, издатель] = строка.split(String.fromCharCode(124));
   if (состояние === 'NotSigned') return { ok: false, причина: 'файл не подписан' };
   if (!String(издатель || '').includes('VRCast Bridge')) return { ok: false, причина: 'чужой издатель' };
