@@ -260,6 +260,19 @@ test('режим «Друзья» не роняет сервер и сообща
   await post('/api/config', { outputMode: 'local' });
 });
 
+// Обновление: запрос установки не должен ронять сервер, статус несёт поля
+// нового потока (installing). Загрузка теперь по кнопке, а не сама.
+test('запрос установки обновления не роняет сервер', async () => {
+  const s0 = await status();
+  assert.ok('installing' in s0.update, 'update.installing должно быть в статусе');
+  assert.equal(s0.update.installing, false, 'без нажатия установка не идёт');
+  const r = await post('/api/update/apply');
+  assert.equal(r.status, 202, 'запрос установки принимается');
+  await new Promise(resolve => setTimeout(resolve, 400));
+  const alive = await fetch(`http://127.0.0.1:${port}/api/status`);
+  assert.equal(alive.status, 200, 'сервер жив после запроса установки (нет VRCAST_EXE — просто ничего не ставится)');
+});
+
 // YouTube-cookies убраны целиком: в конфиге не должно остаться их следов.
 test('настроек cookies для YouTube больше нет', async () => {
   const config = (await status()).config;

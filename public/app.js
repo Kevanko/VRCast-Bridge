@@ -487,8 +487,8 @@ function render(state) {
   }
   offerUpdate(update);
   $('#updateButton').hidden=!update.available;
-  if(update.available)$('#updateButton').textContent=update.ready?`Обновить до ${update.version}`:`Скачиваю ${update.version} — ${Number(update.percent)||0}%`;
-  $('#updateButton').disabled=!update.ready;
+  if(update.available)$('#updateButton').textContent=update.installing?(update.ready?`Устанавливаю ${update.version}…`:`Скачиваю ${update.version} — ${Number(update.percent)||0}%`):`Обновить до ${update.version}`;
+  $('#updateButton').disabled=Boolean(update.installing);
   $('#encoderLabel').textContent=state.performance?.encoder||'неизвестно';
   const реж=state.performance?.encoderMode||'auto', гпу=state.performance?.gpuLabel||'';
   $('#encoderNote').textContent=
@@ -981,18 +981,20 @@ function updateBlocked(version){
 function paintUpdateDialog(update){
   $('#updateVersion').textContent=update.version||'';
   $('#updateNotes').textContent=(update.notes||'').replace(/^#{1,6}\s*/gm,'').replace(/\*\*(.+?)\*\*/g,'$1').replace(/`/g,'').trim()||'Исправления и улучшения.';
-  // Видно, что именно качается и сколько осталось: раньше здесь висело
-  // «Скачиваю…» без единой цифры на все пятьдесят мегабайт.
+  // Качаем и ставим по кнопке. Загрузка не начинается сама — только после
+  // нажатия «Обновить»; дальше видно проценты, потом установка и перезапуск.
   const процент=Number(update.percent)||0;
-  const строка=update.error?`Не удалось скачать: ${update.error}`
-    :update.ready?`Загружено, ${update.totalMb||0} МБ — можно устанавливать`
-    :update.totalMb?`Скачиваю VRCast Bridge ${update.version} — ${update.doneMb||0} МБ из ${update.totalMb} МБ`
-    :'Начинаю загрузку…';
+  const качается=update.installing&&!update.ready;
+  const ставится=update.installing&&update.ready;
+  const строка=update.error?`Не удалось: ${update.error}`
+    :ставится?'Устанавливаю, программа перезапустится…'
+    :качается?(update.totalMb?`Скачиваю ${update.version} — ${update.doneMb||0} из ${update.totalMb} МБ`:'Начинаю загрузку…')
+    :`Версия ${update.version} готова к установке. Нажмите «Обновить».`;
   $('#updateProgress').textContent=строка;
-  $('#updateBar').hidden=Boolean(update.ready||update.error);
-  $('#updateBar').firstElementChild.style.width=`${update.ready?100:процент}%`;
-  $('#updateNow').disabled=!update.ready;
-  $('#updateNow').textContent=update.ready?'Обновить':(процент?`Скачиваю ${процент}%`:'Скачиваю…');
+  $('#updateBar').hidden=!качается;
+  $('#updateBar').firstElementChild.style.width=`${качается?процент:0}%`;
+  $('#updateNow').disabled=Boolean(update.installing);
+  $('#updateNow').textContent=update.error?'Повторить':ставится?'Устанавливаю…':качается?`Скачиваю ${процент}%`:'Обновить';
 }
 function offerUpdate(update){
   if(!update?.available||!update.version)return;
@@ -1010,11 +1012,13 @@ $('#updateSkip').addEventListener('click',()=>{
   updateDialog.close(); toast('Эта версия пропущена');
 });
 $('#updateNow').addEventListener('click',async()=>{
-  $('#updateNow').disabled=true; $('#updateProgress').textContent='Устанавливаю, программа перезапустится…';
-  // Сервер закрывается сразу после ответа, поэтому оборванный запрос здесь
-  // означает «пошла установка», а не сбой.
-  try{ await api('/api/update/apply',{method:'POST'}); }
-  catch(error){ if(!/fetch|network|Failed/i.test(String(error.message))){ toast(error.message,true); $('#updateNow').disabled=false; } }
+  $('#updateNow').disabled=true;
+  // Запускаем скачивание+установку. Сервер отвечает сразу (202), прогресс
+  // приходит в статусе и рисуется в этом же окне; когда файл готов — сервер
+  // подменяет exe и перезапускается, поэтому под конец связь оборвётся, и это
+  // норма, а не сбой.
+  try{ render(await api('/api/update/apply',{method:'POST'})); }
+  catch(error){ if(!/fetch|network|Failed/i.test(String(error.message)))toast(error.message,true); }
 });
 
 // WHEP: браузер отправляет предложение, медиасервер отвечает — и картинка идёт
