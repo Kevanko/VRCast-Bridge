@@ -244,6 +244,22 @@ test('задержка живого края не растёт со времен
   console.log(`  [дрейф] пик задержки ${peak.toFixed(1)}с, тренд ${trend >= 0 ? '+' : ''}${trend.toFixed(1)}с, фризов ${final.quality.freezes}, коррекций дрейфа ${final.quality.driftCorrections}`);
 });
 
+// Режим «Друзья»: включение без компонентов туннеля не должно ронять сервер
+// (раньше throw в таймере смены режима убивал процесс), а статус обязан нести
+// новые поля проверки ссылки (serves/verifying).
+test('режим «Друзья» не роняет сервер и сообщает состояние ссылки', async () => {
+  const before = await post('/api/config', { outputMode: 'tunnel' });
+  assert.equal(before.status, 200);
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  const alive = await fetch(`http://127.0.0.1:${port}/api/status`);
+  assert.equal(alive.status, 200, 'сервер должен остаться живым в режиме туннеля');
+  const s = await alive.json();
+  assert.ok('serves' in s.tunnel, 'статус туннеля должен нести serves');
+  assert.ok('verifying' in s.tunnel, 'статус туннеля должен нести verifying');
+  assert.ok(['idle', 'starting', 'ready', 'error'].includes(s.tunnel.state), `неизвестное состояние туннеля: ${s.tunnel.state}`);
+  await post('/api/config', { outputMode: 'local' });
+});
+
 // YouTube-cookies убраны целиком: в конфиге не должно остаться их следов.
 test('настроек cookies для YouTube больше нет', async () => {
   const config = (await status()).config;
