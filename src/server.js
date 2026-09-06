@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.7';
+const APP_VERSION = '0.54.8';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -175,7 +175,8 @@ let unityBuildProcess = null;
 let unityBuildGeneration = 0;
 let unityBuild = loadUnityBuildState();
 let updateState = { checked: false, available: false, version: '', ready: false, notes: '', error: '',
-  percent: 0, doneMb: 0, totalMb: 0 };
+  percent: 0, doneMb: 0, totalMb: 0, assetUrl: '', assetSize: 0, installing: false };
+let installingUpdate = false;
 let unityCaptureProcess = null;
 let unityCaptureStartedAt = 0;
 let unityCapture = { state: existsSync(UNITY_CAPTURE_FILE) ? 'ready' : 'idle', message: existsSync(UNITY_CAPTURE_FILE) ? 'Клип готов' : 'Запись ещё не создана', updatedAt: 0 };
@@ -1464,9 +1465,12 @@ async function checkForUpdate() {
     if (!versionIsNewer(version, status().appVersion)) return;
     const asset = (release.assets || []).find(item => /\.exe$/i.test(item.name));
     if (!asset) return;
-    updateState = { ...updateState, available: true, version, notes: String(release.body || '').slice(0, 400) };
-    log(`Доступна новая версия ${version} — скачиваю в фоне`);
-    await downloadUpdate(asset.browser_download_url, Number(asset.size) || 0);
+    // Не качаем сразу: раньше загрузка стартовала сама, ещё до того как человек
+    // нажал «Обновить», — выглядело криво. Теперь запоминаем ссылку, а качаем
+    // и ставим по кнопке (см. startUpdateInstall).
+    updateState = { ...updateState, available: true, version, notes: String(release.body || '').slice(0, 400),
+      assetUrl: asset.browser_download_url, assetSize: Number(asset.size) || 0 };
+    log(`Доступна новая версия ${version} — нажмите «Обновить», чтобы скачать и поставить`);
   } catch (error) {
     updateState = { ...updateState, checked: true, error: error.message };
     logDetail(`Проверка обновления: ${error.message}`);
@@ -1536,26 +1540,73 @@ function applyUpdate() {
   if (!target) throw new Error('Обновление доступно только в собранной программе.');
   if (!updateState.ready || !existsSync(UPDATE_FILE)) throw new Error('Обновление ещё не скачано.');
   const script = join(UPDATE_DIR, 'apply-update.cmd');
+  const logFile = join(UPDATE_DIR, 'apply-update.log');
+  const имя = basename(target);
+  // Раньше скрипт ЖДАЛ, пока «VRCast Bridge.exe» закроется сам. Но при обновлении
+  // сервер (node) завершался, а окно-оболочка оставалось открытым — скрипт ждал
+  // его вечно и подмена не происходила («кнопка зависает»). А если оболочка
+  // всё же закрывалась, exe ещё был занят долю секунды, copy без повтора молча
+  // падал — программа перезапускалась старой («не обновилось»). Теперь: сами
+  // закрываем оболочку, копируем с повтором, пока файл не освободится, и всё
+  // пишем в лог — чтобы неудача больше не была немой.
   writeFileSync(script, [
     '@echo off',
-    'setlocal',
-    ':wait',
+    'setlocal EnableExtensions',
+    `set "LOG=${logFile}"`,
+    '> "%LOG%" echo [%date% %time%] запуск установки',
     'timeout /t 1 /nobreak >nul',
-    `tasklist /fi "imagename eq ${basename(target)}" | find /i "${basename(target)}" >nul && goto wait`,
-    `copy /y "${UPDATE_FILE}" "${target}" >nul`,
+    `taskkill /f /im "${имя}" >nul 2>&1`,
+    '>> "%LOG%" echo закрыл оболочку (код %errorlevel%)',
+    'set /a n=0',
+    ':copy',
+    'timeout /t 1 /nobreak >nul',
+    `copy /y "${UPDATE_FILE}" "${target}" >nul 2>&1`,
+    'if not errorlevel 1 goto done',
+    'set /a n+=1',
+    '>> "%LOG%" echo попытка %n%: файл занят, жду',
+    'if %n% lss 25 goto copy',
+    '>> "%LOG%" echo НЕ УДАЛОСЬ: файл так и не освободился',
+    'goto end',
+    ':done',
+    '>> "%LOG%" echo скопировано, запускаю новую версию',
     `start "" "${target}"`,
+    ':end',
     `del "%~f0"`,
     '',
   ].join('\r\n'), 'utf8');
   // Запускаем не как дочерний процесс, а через WMI: обычный spawn попадает в
   // группу процессов приложения (она гасит всех при закрытии оболочки), и
-  // скрипт умирал ровно в момент подмены exe — обновление «не работало».
-  // Процесс, созданный WmiPrvSE, в эту группу не входит и переживает закрытие.
+  // скрипт умирал ровно в момент подмены exe. Процесс от WmiPrvSE в группу не
+  // входит и переживает закрытие.
   const командная = `cmd /c "${script}"`.replace(/'/g, "''");
   const ps = `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='${командная}'} | Out-Null`;
   spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps],
     { windowsHide: true, stdio: 'ignore' }).unref();
   log(`Устанавливаю версию ${updateState.version} и перезапускаюсь`);
+}
+
+// Скачать (если ещё не скачано) и поставить — по кнопке «Обновить». Скачивание
+// идёт в фоне, прогресс виден в статусе; когда файл готов и подпись сошлась,
+// подменяем exe и перезапускаемся.
+async function startUpdateInstall() {
+  if (installingUpdate) return;
+  if (!process.env.VRCAST_EXE) throw new Error('Обновление доступно только в собранной программе.');
+  if (!updateState.available) throw new Error('Обновлений нет.');
+  installingUpdate = true;
+  updateState = { ...updateState, installing: true, error: '' };
+  try {
+    if (!updateState.ready) {
+      if (!updateState.assetUrl) throw new Error('Ссылка на обновление потерялась — проверьте обновления заново.');
+      await downloadUpdate(updateState.assetUrl, updateState.assetSize || 0);
+    }
+    if (!updateState.ready) { installingUpdate = false; updateState = { ...updateState, installing: false }; return; }
+    applyUpdate();
+    setTimeout(() => { stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); }, 400);
+  } catch (error) {
+    installingUpdate = false;
+    updateState = { ...updateState, installing: false, error: error.message };
+    log(`Установка обновления: ${error.message}`);
+  }
 }
 
 function status() {
@@ -4242,10 +4293,10 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/update/apply') {
-      applyUpdate();
-      json(res, 200, { ok: true });
-      setTimeout(() => { stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); }, 300);
-      return;
+      // Качаем и ставим по кнопке. Отвечаем сразу (202), прогресс — в статусе;
+      // когда файл готов, сервер сам подменит exe и перезапустится.
+      void startUpdateInstall().catch(error => log(`Установка обновления: ${error.message}`));
+      return json(res, 202, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/servers') {
       const body = await readBody(req);
