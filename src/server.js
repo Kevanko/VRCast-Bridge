@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.6';
+const APP_VERSION = '0.54.7';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -124,6 +124,12 @@ let tunnelProvider = '';
 let tunnelDeadlineTimer = null;
 let tunnelFallbackTimer = null;
 let pinggyStarted = false;
+// Реально ли публичная ссылка отдаёт поток. null — ещё проверяем, false —
+// отдаёт заглушку/ошибку (бесплатный Pinggy подменяет поток страницей, сеть
+// блокирует туннель), true — играет. Раньше «готово» ставилось по факту
+// получения адреса, и Pinggy рапортовал «работает», а в VRChat было пусто.
+let tunnelServes = null;
+let tunnelVerifyTimer = null;
 let lhrKnownKey = '';
 let activeKind = null;
 let currentId = null;
@@ -581,6 +587,8 @@ function stopPublicTunnel() {
   if (tunnelFallbackTimer) clearTimeout(tunnelFallbackTimer);
   tunnelDeadlineTimer = null;
   tunnelFallbackTimer = null;
+  if (tunnelVerifyTimer) clearInterval(tunnelVerifyTimer);
+  tunnelVerifyTimer = null; tunnelServes = null;
   tunnelProcess = null; tunnelCandidates = new Set(); tunnelUrl = ''; tunnelState = 'idle'; tunnelError = ''; tunnelProvider = '';
   for (const child of children) child.kill('SIGTERM');
   stopPinggyDaemon();
@@ -596,7 +604,46 @@ function activatePublicTunnel(child, provider, url) {
   for (const candidate of tunnelCandidates) if (candidate !== child) candidate.kill('SIGTERM');
   tunnelCandidates = new Set([child]);
   if (provider === 'Cloudflare') setTimeout(stopPinggyDaemon, 500);
-  log(`Публичная ссылка готова · ${provider} — её можно отправить друзьям`);
+  log(`Публичная ссылка · ${provider} — проверяю, что она реально отдаёт поток…`);
+  // Адрес получен, но это ещё не значит, что по нему играет: проверяем сами,
+  // как это делает плеер, и перепроверяем — заглушка может появиться и позже.
+  tunnelServes = null;
+  if (tunnelVerifyTimer) clearInterval(tunnelVerifyTimer);
+  setTimeout(verifyTunnelServes, 2500);
+  tunnelVerifyTimer = setInterval(verifyTunnelServes, 30000);
+  tunnelVerifyTimer.unref?.();
+}
+
+// Проверяем публичную ссылку так же, как её увидит плеер: тянем плейлист через
+// сам туннель. Настоящий поток начинается с #EXTM3U; страница-предупреждение
+// Pinggy или ошибка сети — это HTML или не-200, и тогда честно говорим, что
+// ссылка для VRChat не годится, вместо ложного «готово».
+async function verifyTunnelServes() {
+  const url = tunnelUrl, провайдер = tunnelProvider;
+  if (!url || config.outputMode !== 'tunnel') return;
+  try {
+    const ответ = await fetch(`${url}/stream/live.m3u8`, { redirect: 'follow',
+      signal: AbortSignal.timeout(9000), headers: { 'User-Agent': 'LibVLC/3.0 VRCast' } });
+    const текст = (await ответ.text()).slice(0, 400);
+    if (tunnelUrl !== url) return;
+    if (ответ.ok && /#EXTM3U/.test(текст)) {
+      if (tunnelServes !== true) log(`Публичная ссылка готова · ${провайдер} — реально отдаёт поток, можно отправлять друзьям`);
+      tunnelServes = true; tunnelError = '';
+      return;
+    }
+    const html = /<!doctype|<html/i.test(текст);
+    tunnelServes = false;
+    tunnelError = провайдер === 'Pinggy'
+      ? 'Pinggy показывает страницу-предупреждение вместо потока — в VRChat не заиграет. Выберите Cloudflare или свой сервер (его ссылка постоянная и без заглушек).'
+      : html ? `${провайдер} отдаёт страницу, а не поток — для VRChat не годится. Смените туннель или возьмите свой сервер.`
+      : `${провайдер}: ссылка не отдаёт поток (ответ ${ответ.status}). Смените туннель или возьмите свой сервер.`;
+    log(`Публичная ссылка не отдаёт поток · ${tunnelError}`);
+  } catch (error) {
+    if (tunnelUrl !== url) return;
+    tunnelServes = false;
+    tunnelError = `${провайдер}: публичная ссылка не открывается (${String(error.message || error).slice(0, 80)}). Сеть блокирует туннель — смените его или возьмите свой сервер.`;
+    log(`Публичная ссылка не открывается · ${tunnelError}`);
+  }
 }
 
 // Сообщение о неудаче с учётом выбора: если человек сам указал провайдера,
@@ -691,7 +738,13 @@ async function startSshTunnelCandidate() {
 
 function startPublicTunnel() {
   if (config.outputMode !== 'tunnel' || tunnelProcess || tunnelCandidates.size) return;
-  if (!tools.cloudflared && !tools.pinggy && !PLINK()) throw new Error('Компоненты публичной ссылки не найдены.');
+  // Не бросаем: функцию зовут и из таймеров (переподключение, смена режима),
+  // а необработанный throw в setTimeout ронял бы весь сервер. Просто честно
+  // ставим состояние ошибки.
+  if (!tools.cloudflared && !tools.pinggy && !PLINK()) {
+    tunnelState = 'error'; tunnelError = 'Компоненты публичной ссылки не найдены.';
+    return;
+  }
   tunnelUrl = ''; tunnelProvider = ''; tunnelState = 'starting'; tunnelError = '';
   // Провайдер можно выбрать; «Авто» поднимает всех сразу — побеждает тот, кто
   // первым отдал адрес. Раньше Pinggy ждал Cloudflare 12 секунд, а в сетях с
@@ -702,8 +755,16 @@ function startPublicTunnel() {
   if (провайдер === 'pinggy' && !tools.pinggy) провайдер = 'auto';
   if (провайдер === 'localhostrun' && !PLINK()) провайдер = 'auto';
   if (tools.cloudflared && (провайдер === 'auto' || провайдер === 'cloudflare')) startCloudflareCandidate();
-  if (tools.pinggy && (провайдер === 'auto' || провайдер === 'pinggy')) startPinggyCandidate();
   if (провайдер === 'auto' || провайдер === 'localhostrun') startSshTunnelCandidate().catch(error => logDetail(`SSH-туннель: ${error.message}`));
+  // Pinggy — крайний случай, а не гонщик наравне: бесплатный подменяет поток
+  // страницей-предупреждением, и в VRChat такая ссылка не играет (у друга
+  // Cloudflare был заблокирован, Pinggy выигрывал гонку — и «якобы работает,
+  // а в игре пусто»). Поэтому в «Авто» даём Cloudflare и localhost.run фору,
+  // а Pinggy поднимаем только если за 6 секунд никто не отозвался.
+  if (провайдер === 'pinggy' && tools.pinggy) startPinggyCandidate();
+  else if (провайдер === 'auto' && tools.pinggy) {
+    tunnelFallbackTimer = setTimeout(() => { if (!tunnelUrl && !stopping && config.outputMode === 'tunnel') startPinggyCandidate(); }, 6000);
+  }
   // Один выбранный туннель ждём меньше: если он не отозвался за 18 секунд, он в
   // этой сети недоступен. «Авто» гоняет несколько сразу, ему даём больше.
   const дедлайн = провайдер === 'auto' ? 35000 : 18000;
@@ -1533,7 +1594,9 @@ function status() {
             channel: remoteRtspTarget()?.channel || '', channelRejected: remoteChannelRejected,
             url: remoteRtspTarget()?.playUrl || '' }
         : null },
-    tunnel: { state: tunnelState, ready: Boolean(tunnelUrl), provider: tunnelProvider, expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError },
+    tunnel: { state: tunnelState, ready: Boolean(tunnelUrl) && tunnelServes !== false, provider: tunnelProvider,
+      serves: tunnelServes, verifying: Boolean(tunnelUrl) && tunnelServes === null,
+      expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError },
     config: { ...config,
       servers: savedServers().map(item => ({ id: item.id, name: item.name, host: item.host,
         rtspPort: item.rtspPort, addedAt: item.addedAt, reachable: serverReach[item.id] ?? null,

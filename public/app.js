@@ -409,6 +409,7 @@ function render(state) {
   $('#stateDot').className=`state-dot ${state.disk?.low||streamStalled?'error':state.running?'live':ready?'ready':''}`;
   $('#systemState').textContent=state.disk?.low?`Мало места на диске · ${Math.max(0,Math.round(state.disk.freeMb/1024*10)/10)} ГБ`:state.playback?.buffering?'Загружаю видео':streamStalled?'Не успевает':state.running&&streamReady?'В эфире':state.running?'Запускаю…':streamReady?'Готово':ready?'Готов к эфиру':'Нужен FFmpeg';
   const tunnelMode=state.config.outputMode==='tunnel', tunnelReady=tunnelMode&&state.tunnel?.ready, tunnelStarting=tunnelMode&&state.tunnel?.state==='starting';
+  const tunnelServes=tunnelMode&&state.tunnel?.serves===true, tunnelVerifying=tunnelMode&&state.tunnel?.verifying, tunnelBroken=tunnelMode&&state.tunnel?.serves===false;
   const unityMode=$('#playerMode').value==='unity', unity=state.compatibility?.unity||{};
   if(!ui.unitySelectedId||!state.queue.some(item=>item.id===ui.unitySelectedId))ui.unitySelectedId=unity.queue?.itemId||state.currentId||state.queue[0]?.id||'';
   const storedUnitySource=ui.source==='screen'?unity.capture||{}:unity.queue||{};
@@ -446,9 +447,18 @@ function render(state) {
       // зайдёт после перезапуска, получит нерабочую ссылку и будет думать,
       // что сломалась программа. Про это надо предупреждать заранее.
       hint+=' Ссылка живёт до закрытия программы, в следующий раз будет другой. Если в мир заходят новые люди — берите свой сервер, его адрес постоянный.';}
-    linkText=streamStalled?'Поток отстаёт':rtspLive?'Готово':tunnelMode&&tunnelReady?`Готово · ${state.tunnel.provider}`:tunnelStarting?'Получаю ссылку…':'Канал поднимается…';
-    linkGood=(tunnelMode?tunnelReady:rtspLive);
-    linkError=streamStalled||state.tunnel?.state==='error';
+    // Если ссылка проверена и не отдаёт поток (Pinggy-заглушка, блок сети) —
+    // показываем причину прямо здесь, а не ложное «готово».
+    if(tunnelBroken&&state.tunnel?.error)hint=state.tunnel.error;
+    linkText=streamStalled?'Поток отстаёт'
+      :rtspLive?'Готово'
+      :tunnelBroken?'Ссылка не отдаёт поток'
+      :tunnelServes?`Готово · ${state.tunnel.provider}`
+      :tunnelVerifying?`Проверяю ссылку · ${state.tunnel.provider||''}`
+      :tunnelStarting?'Получаю ссылку…'
+      :'Канал поднимается…';
+    linkGood=(tunnelMode?tunnelServes:rtspLive);
+    linkError=streamStalled||state.tunnel?.state==='error'||tunnelBroken;
   }
   $('#playbackUrl').textContent=shownUrl||(linkError?'Ссылка пока недоступна':'Подготовка ссылки…'); $('#trustHint').textContent=hint;
   $('#altLinkRow').hidden=true;
