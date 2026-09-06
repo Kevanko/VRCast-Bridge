@@ -225,7 +225,12 @@ test('задержка живого края не растёт со времен
     const perf = (await status()).performance;
     assert.ok(perf.quality && typeof perf.quality.freezes === 'number', 'телеметрия качества должна быть в статусе');
     assert.ok(Array.isArray(perf.events), 'журнал событий эфира должен быть массивом');
-    if (typeof perf.liveLatencySec === 'number') { samples.push(perf.liveLatencySec); sawTelemetry = true; }
+    if (typeof perf.liveLatencySec === 'number') {
+      // Задержка отдаётся величиной, а не знаком: отставание потока (минус)
+      // раньше проходило мимо и пика, и коррекции, и этой проверки.
+      assert.ok(perf.liveLatencySec >= 0, `задержка должна быть величиной, пришло ${perf.liveLatencySec}`);
+      samples.push(perf.liveLatencySec); sawTelemetry = true;
+    }
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
   const final = (await status()).performance;
@@ -233,7 +238,8 @@ test('задержка живого края не растёт со времен
 
   assert.ok(sawTelemetry && samples.length >= 20, 'нужно достаточно замеров задержки');
   const peak = Math.max(...samples);
-  // Живой край не должен уезжать вперёд: коррекция дрейфа держит его в узде.
+  // Живой край не должен разъезжаться с часами ни вперёд, ни назад: коррекция
+  // дрейфа теперь держит в узде обе стороны.
   assert.ok(peak < 4.0, `задержка живого края не должна расти (пик ${peak.toFixed(1)}с за 30с прокрутки по кругу)`);
   // Тренд: последняя пятёрка не намного выше первой — накопления нет.
   const avg = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
