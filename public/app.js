@@ -636,8 +636,13 @@ function render(state) {
   // всегда, и запустить эфир экрана можно было только через «Показать экран
   // в эфире» в настройках источника — это находили не сразу.
   const экран=ui.source==='screen';
-  setHidden($('#goLive'),state.running);
-  setText($('#goLive'),экран?'Начать эфир экрана':'Начать эфир видео');
+  // Эфир идёт с другой вкладки — кнопка переключает его сюда. Сервер меняет
+  // источник внутри того же сеанса, плеер в мире не переподключается. Раньше
+  // при идущем эфире кнопки пуска не было вовсе, и перейти с плейлиста на
+  // захват (или обратно) можно было только через остановку эфира.
+  const чужойЭфир=state.running&&state.activeKind!==(экран?'screen':'queue');
+  setHidden($('#goLive'),state.running&&!чужойЭфир);
+  setText($('#goLive'),чужойЭфир?(экран?'Переключить эфир на экран':'Переключить эфир на видео'):(экран?'Начать эфир экрана':'Начать эфир видео'));
   setHidden($('#stopLive'),!state.running);
   setText($('#stopLive'),state.activeKind==='screen'?'Остановить эфир экрана':'Остановить эфир');
   setHidden($('#skipTrack'),!(state.running&&state.activeKind==='queue'));
@@ -683,7 +688,10 @@ function chooseSource(source) {
   if(ui.status)render(ui.status);
 }
 function chooseOutput(output) { ui.output=output; $$('.broadcast-mode button').forEach(button=>button.classList.toggle('active',button.dataset.output===output)); $('#remoteOutput').hidden=output!=='remote'; $('#localOutput').hidden=output!=='local'; $('#tunnelOutput').hidden=output!=='tunnel'; }
-function chooseCaptureMode(mode) { $('#monitorFields').hidden=mode!=='monitor'; $('#windowFields').hidden=mode!=='window'&&$('#audioMode').value!=='process'; $('#regionFields').hidden=mode!=='region'; if(mode==='window'&&$('#audioMode').value==='system'){$('#audioMode').value='process';chooseAudioMode('process');} }
+// auto=false — при загрузке настроек: сохранённый режим звука не трогаем.
+// Раньше при каждом открытии программы с захватом окна звук молча менялся с
+// «Всё, что слышно в Windows» на «звук окна», а подпись оставалась от прежнего.
+function chooseCaptureMode(mode, auto=true) { $('#monitorFields').hidden=mode!=='monitor'; $('#windowFields').hidden=mode!=='window'&&$('#audioMode').value!=='process'; $('#regionFields').hidden=mode!=='region'; if(auto&&mode==='window'&&$('#audioMode').value==='system'){$('#audioMode').value='process';chooseAudioMode('process');} }
 function chooseAudioMode(mode) {
   // Звук процесса привязан к выбранному окну — селектор окна нужен даже при захвате монитора/области.
   $('#windowFields').hidden=$('#captureMode').value!=='window'&&mode!=='process';
@@ -753,6 +761,7 @@ async function loadCaptureSources() {
   fillWindowPicker(ui.sources.windows,saved.captureWindowHandle);
   fillSelect($('#audioOutput'),ui.sources.audioOutputs,saved.audioOutputId,'Выберите выход',item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`);
   fillSelect($('#audioDevice'),ui.sources.audioDevices,saved.captureAudioDevice,'Выберите вход',name=>`<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`);
+  ui.sourcesLoaded=true;
 }
 
 async function refreshWindows() {
@@ -762,8 +771,15 @@ async function refreshWindows() {
 }
 
 function configPayload() {
-  const selectedWindow=ui.sources.windows.find(item=>item.handle===$('#windowSource').value);
-  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:$('#monitorSource').value,captureWindowHandle:$('#windowSource').value,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:$('#audioOutput').value,audioProcessId:selectedWindow?.id||'',captureAudioDevice:$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim(),tunnelProvider:$('#tunnelProviderSelect').value };
+  // Пока списки окон и устройств не загрузились (PowerShell, пара секунд после
+  // открытия), поля пустые. Раньше пустота уходила на сервер и затирала
+  // сохранённое окно: «Начать эфир экрана» сразу после запуска падало с
+  // «Выберите окно», а звук окна терял процесс. Пока списков нет — шлём сохранённое.
+  const saved=ui.status?.config||{}, ждём=!ui.sourcesLoaded;
+  const handle=$('#windowSource').value||(ждём?saved.captureWindowHandle||'':'');
+  const selectedWindow=ui.sources.windows.find(item=>item.handle===handle);
+  const processId=selectedWindow?selectedWindow.id:(ждём&&handle===saved.captureWindowHandle?saved.audioProcessId||'':'');
+  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:ждём?saved.captureMonitorId||'':$('#monitorSource').value,captureWindowHandle:handle,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:ждём?saved.audioOutputId||'':$('#audioOutput').value,audioProcessId:processId,captureAudioDevice:ждём?saved.captureAudioDevice||'':$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim(),tunnelProvider:$('#tunnelProviderSelect').value };
 }
 async function saveConfig(applyLive = false) { return api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),applyLive})}); }
 
@@ -1101,7 +1117,7 @@ $('#capturePreview').addEventListener('error',()=>{
   ui.frameTimer=setTimeout(()=>{ if(captureFramesWanted())$('#capturePreview').src=`/api/capture-preview?time=${Date.now()}`; },1000);
 });
 
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode,false);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
   ui.windowHidden=document.hidden; document.documentElement.classList.toggle('window-hidden',document.hidden);
   render(state);
   // Опрос запускаем до списка источников: тот идёт через PowerShell и может
