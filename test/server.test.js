@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer as createHttpServer, request as httpRequest } from 'node:http';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -656,4 +656,24 @@ test('старт эфира не лишает прогреваемый роли�
     await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
     site.closeAllConnections?.(); site.close();
   }
+});
+
+test('испорченный файл на повторе не перезапускается без конца', async () => {
+  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  const file = join(dataDirectory, 'broken-later.wav');
+  const made = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '5', '-y', file], { windowsHide: true });
+  assert.equal(made.status, 0);
+  await api('/api/queue/local', { paths: [file] });
+  // Файл портится уже после добавления (перезаписан, диск отвалился).
+  writeFileSync(file, Buffer.alloc(4096, 7));
+  await api('/api/playback', { action: 'loop', mode: 'one' });
+  await api('/api/start/queue');
+  await new Promise(resolve => setTimeout(resolve, 6000));
+  const state = await currentStatus();
+  const attempts = state.logs.filter(line => /Подготовка: broken-later\.wav/.test(line)).length;
+  assert.ok(attempts <= 4, `трек не должен перезапускаться по кругу (попыток за 6 с: ${attempts})`);
+  assert.equal(state.running, false, 'эфир из одних неоткрывающихся треков должен остановиться');
+  await api('/api/playback', { action: 'loop', mode: 'once' }).catch(() => {});
+  await api('/api/config', { outputMode: 'local', loopMode: 'once' });
+  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
 });

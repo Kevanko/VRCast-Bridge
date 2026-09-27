@@ -3005,6 +3005,7 @@ function startQueue(initialIndex = 0) {
   pausedPosition = 0;
   queuePaused = false;
   manualTransition = null;
+  мгновенныхПадений = 0;
   playbackBusy = true;
   playbackRevision++;
   playGeneration++;
@@ -3590,6 +3591,8 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   return args;
 }
 
+let мгновенныхПадений = 0;
+
 async function startQueueItem(index, position = 0, generation = playGeneration, retry = 0) {
   if (stopping || generation !== playGeneration || preparingNext || activeProcess || queuePaused || !queue.length) return;
   preparingNext = true;
@@ -3680,6 +3683,16 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
         return setTimeout(() => startQueueItem(queueIndex, sourcePosition, generation, retry + 1), ПАУЗА_ПОВТОРА);
       }
       if (code && code !== 255) log(`Трек завершился с кодом ${code}`);
+      // Трек, который падает сразу (файл испорчен или пропал после добавления),
+      // при повторе «один трек» или в зацикленной очереди из таких файлов
+      // перезапускался без конца — несколько ffmpeg в секунду и журнал,
+      // забитый ошибками. Три мгновенных падения подряд — останавливаем эфир.
+      мгновенныхПадений = code && code !== 255 && ranFor < 2 ? мгновенныхПадений + 1 : 0;
+      if (мгновенныхПадений >= 3) {
+        мгновенныхПадений = 0;
+        log('Треки не открываются один за другим — эфир остановлен. Проверьте файлы в очереди.');
+        return stopActive();
+      }
       if (config.loopMode === 'one') return setTimeout(() => startQueueItem(queueIndex, 0, generation), ПАУЗА_ПЕРЕХОДА);
       const nextIndex = queueIndex + 1;
       if (nextIndex < queue.length) return setTimeout(() => startQueueItem(nextIndex, 0, generation), ПАУЗА_ПЕРЕХОДА);
