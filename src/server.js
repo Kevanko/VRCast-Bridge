@@ -1,12 +1,12 @@
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { networkInterfaces } from 'node:os';
+import { constants as osConstants, networkInterfaces, setPriority } from 'node:os';
 import { basename, dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
-import { statfs } from 'node:fs/promises';
+import { access, readFile, stat, statfs } from 'node:fs/promises';
 
 const APP_VERSION = '0.54.11';
 
@@ -226,6 +226,38 @@ function toolAvailable(name, versionArgs = ['--version']) {
   return !probe.error && probe.status === 0;
 }
 
+// ── Приоритеты процессов ────────────────────────────────────────────────────
+// Эфир идёт на той же машине, что и VRChat, браузер и антивирус. Стоит кому-то
+// из них занять все ядра — продюсер не успевает к реальному времени, и зритель
+// видит фриз. Поэтому всё, через что проходит поток (сам сервер: он
+// прокачивает поток через свой event loop; продюсеры, релей, RTSP-пушеры,
+// MediaMTX, туннель, помощники звука и окна), идёт на ступень выше обычного.
+// Именно ABOVE_NORMAL, а не HIGH: работа эфира ограничена темпом реального
+// времени (-re), лишнего он не берёт, и ступени выше NORMAL хватает, чтобы
+// игра, браузер и сканер его не вытесняли. HIGH же обгоняет и системные
+// обычные потоки, и при кодировании на процессоре (libx264 занимает все ядра)
+// душил бы саму игру — у человека проседал бы VRChat ради стрима из VRChat.
+// REALTIME не трогаем вовсе: он способен заморозить ввод и драйверы.
+// Фон (загрузки yt-dlp, превью, ffprobe, сборка для Unity, опросы PowerShell,
+// распаковка компонентов) — ступенью ниже обычного: он не срочный и не должен
+// отнимать процессор у эфира и игры. Не LOW: под полной нагрузкой игры он бы
+// почти не получал времени, и следующий трек не успевал бы скачаться.
+// Windows не наследует ABOVE_NORMAL дочерним процессам, поэтому приоритет
+// ставится каждому процессу сразу после запуска (BELOW_NORMAL наследуется —
+// ffmpeg, которого yt-dlp зовёт для склейки, тоже окажется в фоне).
+const ПРИОРИТЕТ_ЭФИРА = osConstants.priority.PRIORITY_ABOVE_NORMAL;
+const ПРИОРИТЕТ_ФОНА = osConstants.priority.PRIORITY_BELOW_NORMAL;
+
+function setChildPriority(child, priority) {
+  // pid нет, если процесс не запустился (ENOENT) — об этом скажет его 'error'.
+  if (child?.pid) { try { setPriority(child.pid, priority); } catch {} }
+  return child;
+}
+const onAir = child => setChildPriority(child, ПРИОРИТЕТ_ЭФИРА);
+const inBackground = child => setChildPriority(child, ПРИОРИТЕТ_ФОНА);
+
+try { setPriority(process.pid, ПРИОРИТЕТ_ЭФИРА); } catch {}
+
 // Пока идёт эфир, медиапоток прокачивается через event loop Node, поэтому
 // в рабочих путях запрещены spawnSync/долгие синхронные вызовы: каждая
 // блокировка = заикание звука. Всё, что запускается во время стрима,
@@ -233,7 +265,9 @@ function toolAvailable(name, versionArgs = ['--version']) {
 function spawnCollect(command, args, timeout = 10000, options = {}) {
   return new Promise(resolvePromise => {
     let child;
-    try { child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], ...options }); }
+    // Все, кто идёт через сборщик, — разовые пробы и опросы (ffprobe, списки
+    // окон и устройств, PowerShell, распаковка): это фон, а не эфир.
+    try { child = inBackground(spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], ...options })); }
     catch (error) { return resolvePromise({ status: -1, stdout: '', stderr: String(error.message || error) }); }
     let stdout = '', stderr = '';
     const timer = setTimeout(() => child.kill('SIGTERM'), timeout);
@@ -246,7 +280,9 @@ function spawnCollect(command, args, timeout = 10000, options = {}) {
 }
 
 function encoderWorks(name) {
-  if (!toolAvailable('ffmpeg', ['-version'])) return false;
+  // Наличие ffmpeg уже известно из tools: раньше на каждый вариант кодировщика
+  // запускался ещё и «ffmpeg -version» — три лишних синхронных запуска на старте.
+  if (!tools.ffmpeg) return false;
   // format=nv12 обязателен для Intel QuickSync и не мешает остальным: без
   // него проба QSV падает даже там, где кодировщик есть.
   const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=s=640x360:d=0.1', '-frames:v', '1', '-vf', 'format=nv12', '-c:v', name, '-f', 'null', '-'], {
@@ -362,14 +398,15 @@ function ensureCacheDir() {
   return directory;
 }
 
-// Буквы дисков перебираем проверкой существования: ни одного процесса и мгновенно.
-function listDrives() {
-  const letters = [];
-  for (let code = 67; code <= 90; code++) {
-    const letter = String.fromCharCode(code);
-    try { if (existsSync(`${letter}:\\`)) letters.push(`${letter}:`); } catch {}
-  }
-  return letters;
+// Буквы дисков перебираем проверкой существования: ни одного процесса. Но не
+// синхронно: уборка зовёт это раз в 10 минут посреди эфира, а отключённый
+// сетевой диск отвечает на проверку секундами — всё это время event loop, а
+// с ним и поток, стоял бы. Асинхронные проверки идут параллельно в фоне.
+async function listDrives() {
+  const буквы = [];
+  for (let code = 67; code <= 90; code++) буквы.push(String.fromCharCode(code));
+  const есть = await Promise.all(буквы.map(letter => access(`${letter}:\\`).then(() => `${letter}:`, () => null)));
+  return есть.filter(Boolean);
 }
 
 function saveConfig(next) {
@@ -657,6 +694,8 @@ function tunnelFailMessage() {
 }
 
 function trackTunnelChild(child, provider) {
+  // Туннель отдаёт поток зрителям через интернет — он часть эфира.
+  onAir(child);
   tunnelCandidates.add(child);
   child.on('error', error => {
     tunnelCandidates.delete(child);
@@ -901,8 +940,8 @@ function sshArgs(server, passwordFile) {
 // Первое подключение: узнаём отпечаток ключа хоста, ничего не выполняя.
 function sshDiscoverHostKey(server) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(PLINK(), ['-ssh', '-batch', '-P', String(server.sshPort || 22), '-l', String(server.user || 'root'),
-      server.host, 'exit'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = inBackground(spawn(PLINK(), ['-ssh', '-batch', '-P', String(server.sshPort || 22), '-l', String(server.user || 'root'),
+      server.host, 'exit'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
     let out = '';
     const timer = setTimeout(() => { child.kill(); reject(new Error('Сервер не отвечает по SSH.')); }, 25000);
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
@@ -926,7 +965,7 @@ function sshRun(server, password, script, timeout = 180000) {
     try { writeFileSync(passwordFile, `${password}\n`, { encoding: 'utf8', mode: 0o600 }); }
     catch (error) { return reject(error); }
     const cleanup = () => { try { rmSync(passwordFile, { force: true }); } catch {} };
-    const child = spawn(PLINK(), sshArgs(server, passwordFile), { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = inBackground(spawn(PLINK(), sshArgs(server, passwordFile), { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
     let stdout = '', stderr = '';
     const timer = setTimeout(() => child.kill(), timeout);
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
@@ -1696,9 +1735,20 @@ function cachedReadyCount() {
   return queue.filter(item => item.local || (готовыеВКеше.has(item.id) && !mediaCacheJobs.has(item.id))).length;
 }
 
+// Адреса сетевых карт помним 15 секунд. networkInterfaces() на Windows —
+// синхронный опрос всех адаптеров (~4 мс, а с VPN-адаптерами и дольше), и
+// окно звало его дважды на каждый запрос состояния, то есть дважды в 0,8 с,
+// круглосуточно — прямо в event loop, через который идёт эфир. Адреса
+// меняются редко, а 15 секунд запаздывания в списке ссылок никто не заметит.
+let lanAddresses = null;
+let lanAddressesAt = 0;
+
 function getLanAddresses() {
-  return Object.values(networkInterfaces()).flat().filter(Boolean)
+  if (lanAddresses && Date.now() - lanAddressesAt < 15000) return lanAddresses;
+  lanAddresses = Object.values(networkInterfaces()).flat().filter(Boolean)
     .filter(item => item.family === 'IPv4' && !item.internal).map(item => item.address);
+  lanAddressesAt = Date.now();
+  return lanAddresses;
 }
 
 function cleanHls() {
@@ -1711,13 +1761,25 @@ function cleanHls() {
   mkdirSync(HLS_DIR, { recursive: true });
 }
 
-function inspectHlsHealth() {
+// Проверка идёт дважды в секунду всё время работы программы. Раньше она
+// читала плейлист и сегмент синхронно — каждое такое чтение, которое
+// антивирус растягивает на свежем файле, останавливало event loop вместе с
+// потоком. Теперь чтение асинхронное, а флаг не даёт тикам наложиться.
+let hlsHealthBusy = false;
+
+async function inspectHlsHealth() {
+  if (hlsHealthBusy) return;
+  hlsHealthBusy = true;
+  // Пока шло чтение, канал могли пересобрать (cleanHls заводит новое
+  // состояние) — тогда прочитанное относится к старому каналу и выбрасывается.
+  const снимок = hlsHealth;
   try {
-    const playlist = readFileSync(join(HLS_DIR, 'live.m3u8'), 'utf8');
+    const playlist = await readFile(join(HLS_DIR, 'live.m3u8'), 'utf8');
     const uris = playlist.split(/\r?\n/).filter(line => /^segment-\d+\.ts$/i.test(line.trim()));
     const latest = uris.at(-1) || '';
     if (!latest) throw new Error('нет сегментов');
-    const modified = statSync(join(HLS_DIR, latest)).mtimeMs;
+    const modified = (await stat(join(HLS_DIR, latest))).mtimeMs;
+    if (снимок !== hlsHealth) return;
     const now = Date.now();
     if (latest !== hlsHealth.latest) {
       let ratio = hlsHealth.realtimeRatio;
@@ -1740,11 +1802,12 @@ function inspectHlsHealth() {
     autoReduceQuality(hlsHealth);
     watchStalledStream(hlsHealth);
   } catch {
+    if (снимок !== hlsHealth) return;
     hlsHealth.ready = false;
     hlsHealth.segmentAge = null;
     // Плейлиста нет, а эфир идёт — это тоже фриз (край мёртв).
     if (activeKind) trackStreamQuality(null);
-  }
+  } finally { hlsHealthBusy = false; }
 }
 
 // ── Телеметрия качества и синхронизация задержки ────────────────────────────
@@ -1888,17 +1951,16 @@ function startHlsHealthMonitor() {
   // channelLive был ложным в момент создания таймера, и опрос навсегда
   // оставался ежесекундным — в режиме «свой сервер» это 86 тысяч запросов
   // в сутки на чужую машину.
-  let последняяПроверка = 0;
-  const канал = setInterval(() => {
-    // Пока канал поднимается — спрашиваем каждые полсекунды, чтобы «готово»
-    // загоралось сразу, как сервер принял поток. Поднялся — раз в 5 секунд,
-    // иначе это тысячи лишних запросов в сутки на чужую машину.
-    const пауза = channelLive ? 5000 : 500;
-    if (Date.now() - последняяПроверка < пауза) return;
-    последняяПроверка = Date.now();
-    watchChannel().catch(() => {});
-  }, 250);
-  канал.unref?.();
+  // Пока канал поднимается — спрашиваем каждые полсекунды, чтобы «готово»
+  // загоралось сразу, как сервер принял поток. Поднялся — раз в 5 секунд,
+  // иначе это тысячи лишних запросов в сутки на чужую машину. Следующая
+  // проверка планируется по итогу текущей: раньше таймер будил процесс каждые
+  // 250 мс круглосуточно только затем, чтобы узнать, что ещё рано.
+  const следующая = () => {
+    if (shuttingDown) return;
+    setTimeout(() => { watchChannel().catch(() => {}).finally(следующая); }, channelLive ? 5000 : 500).unref?.();
+  };
+  следующая();
 }
 
 function validWebUrl(value) {
@@ -2238,7 +2300,7 @@ function startWindowWatcher(handle) {
   stopWindowWatcher();
   const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
   if (!existsSync(helper)) return;
-  const child = spawn(helper, ['--watch', '--hwnd', String(handle)], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  const child = onAir(spawn(helper, ['--watch', '--hwnd', String(handle)], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
   windowWatcher = child;
   child.stderr.setEncoding('utf8');
   let остаток = '';
@@ -2270,7 +2332,7 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
   log(`Захват экрана · ${encoder.label} · ${config.quality}/${config.fps} FPS`);
   stopStandby();
   const stdio = ['ignore', 'pipe', 'pipe', audioHelperArgs ? 'pipe' : 'ignore', windowHelperArgs ? 'pipe' : 'ignore'];
-  const child = spawn('ffmpeg', args, { windowsHide: true, stdio });
+  const child = onAir(spawn('ffmpeg', args, { windowsHide: true, stdio }));
   let aux = null;
   let windowCapture = null;
   activeProcess = child;
@@ -2288,7 +2350,7 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
       aux = activeAuxProcess;
       aux.stdout.pipe(child.stdio[3]);
     } else {
-      aux = spawn(helper, audioHelperArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      aux = onAir(spawn(helper, audioHelperArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
       aux.stdin.on('error', () => {});
       activeAuxProcess = aux;
       aux.stdout.on('error', () => {});
@@ -2323,7 +2385,7 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
       windowCapture = activeWindowProcess;
       windowCapture.stdout.pipe(child.stdio[4]);
     } else {
-      windowCapture = spawn(helper, windowHelperArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      windowCapture = onAir(spawn(helper, windowHelperArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
       windowCapture.stdin.on('error', () => {});
       activeWindowProcess = windowCapture;
       windowCapture.stdout.on('error', () => {});
@@ -2521,7 +2583,7 @@ function startMediaMtx() {
     `- user: vrcast`, `  pass: ${rtspPublishPass}`, `  ips: ['127.0.0.1']`, '  permissions:', '  - action: publish',
     'paths:', '  live: {}', '',
   ].join('\n'), 'utf8');
-  const child = spawn(MEDIAMTX(), [configFile], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  const child = onAir(spawn(MEDIAMTX(), [configFile], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
   mediaMtxProcess = child;
   child.stderr?.setEncoding('utf8');
   child.stderr?.on('data', chunk => {
@@ -2660,7 +2722,7 @@ function startRtspPush() {
     // а из MPEG-TS он приходит в ADTS — с «-c copy» публикация просто не стартует
     // («AAC with no global headers»), aac_adtstoasc тут не помогает, потому что
     // заголовок SDP пишется до первого пакета.
-    const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts+discardcorrupt',
+    const child = onAir(spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts+discardcorrupt',
       // Без nobuffer и с запасом на разбор: публикация стартует раньше, чем
       // relay выдаст первый кадр, и с урезанным probesize ffmpeg сдавался —
       // «dimensions not set», падение, перезапуск по кругу. Теперь он спокойно
@@ -2671,7 +2733,7 @@ function startRtspPush() {
       // Пакеты уходят сразу, без придержки в муксере: каждая такая задержка
       // складывается с буфером плеера и в VRChat видна как отставание.
       '-muxdelay', '0', '-muxpreload', '0', '-flush_packets', '1', '-max_delay', '0',
-      '-f', 'rtsp', '-rtsp_transport', 'tcp', '-rw_timeout', '5000000', target.url], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+      '-f', 'rtsp', '-rtsp_transport', 'tcp', '-rw_timeout', '5000000', target.url], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] }));
     rtspPushProcesses.set(target.id, child);
     rtspPushUrls.set(target.id, target.url);
     child.stdin.on('error', () => {});
@@ -2788,7 +2850,7 @@ function startRelay(profile) {
   const args = ['-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts+discardcorrupt',
     '-probesize', '1000000', '-analyzeduration', '1000000', '-thread_queue_size', '1024', '-f', 'mpegts', '-i', 'pipe:0',
     '-map', '0:v:0', '-map', '0:a:0', ...relayOutputArgs(profile)];
-  relayProcess = spawn('ffmpeg', args, { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+  relayProcess = onAir(spawn('ffmpeg', args, { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] }));
   relayProcess.stdin.on('error', error => {
     if (!stopping) log(`Канал HLS: ${error.message}`);
   });
@@ -2838,10 +2900,10 @@ function preparePausedFrame(media, position, preferredBroadcastFrame = null, pre
     rmSync(frameFile, { force: true });
     const seekArgs = broadcastFrameSource ? [] : ['-ss', Math.max(0, Number(position) || 0).toFixed(3)];
     const frameFilter = `${broadcastFrameSource ? 'reverse,' : ''}scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
-    const extractor = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', ...seekArgs, '-i', source,
+    const extractor = onAir(spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', ...seekArgs, '-i', source,
       '-frames:v', '1', '-vf', frameFilter,
       '-c:v', 'png', '-threads', '1', '-update', '1', '-y', frameFile],
-    { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
     pauseFrameProcess = extractor;
     attachProcessLogs(extractor, 'Pause frame');
     const timer = setTimeout(() => { try { extractor.kill('SIGTERM'); } catch {} }, 4000);
@@ -2853,13 +2915,28 @@ function preparePausedFrame(media, position, preferredBroadcastFrame = null, pre
   });
 }
 
+// Неподвижная картинка (заставка, стоп-кадр паузы) раньше подавалась как
+// «-re -loop 1 -framerate N -i файл»: демуксер image2 на каждом кадре заново
+// читал PNG с диска, декодер его распаковывал, scale масштабировал — 60 раз в
+// секунду ради одной и той же картинки. Заставка идёт всегда, пока открыта
+// программа, и на простое это съедало полъядра — больше, чем сам эфир трека
+// (замер: 7,7 с процессора за 15 с против 0,3 с). Теперь картинка читается и
+// готовится один раз, loop повторяет уже готовый кадр (сразу в формате
+// кодировщика — без перевода цвета на каждом кадре), setpts ставит ровные
+// метки, а realtime держит темп настенных часов вместо «-re», которому больше
+// нечего читать. Проверено на выдаче в трубу: шаг меток ровно 1/fps, без рывков.
+function stillFrameFilter(fps) {
+  const формат = encoder.family === 'qsv' ? 'nv12' : 'yuv420p';
+  return `format=${формат},loop=loop=-1:size=1:start=0,setpts=N/(${fps}*TB),realtime`;
+}
+
 function startPausedFrameProducer(frameFile) {
   const profile = sessionProfile('queue');
   stopStandby();
-  const args = ['-hide_banner', '-loglevel', 'warning', '-re', '-loop', '1', '-framerate', String(profile.fps), '-i', frameFile,
+  const args = ['-hide_banner', '-loglevel', 'warning', '-i', frameFile,
     '-re', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0',
-    '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile)];
-  const child = spawn('ffmpeg', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    '-vf', stillFrameFilter(profile.fps), '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile)];
+  const child = onAir(spawn('ffmpeg', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
   standbyProcess = child;
   pipeToRelay(child);
   attachProcessLogs(child, 'Paused frame');
@@ -2901,13 +2978,14 @@ function startStandby(profile = sessionProfile()) {
   // остановки или между треками — он просто видит экран ожидания.
   const hasImage = existsSync(STANDBY_IMAGE);
   const videoInput = hasImage
-    ? ['-re', '-loop', '1', '-framerate', String(profile.fps), '-i', STANDBY_IMAGE]
+    ? ['-i', STANDBY_IMAGE]
     : ['-re', '-f', 'lavfi', '-i', `color=c=0x17121f:s=${width}x${height}:r=${profile.fps}`];
+  const fit = `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
   const args = ['-hide_banner', '-loglevel', 'warning', ...videoInput,
     '-re', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0',
-    '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
+    '-vf', hasImage ? `${fit},${stillFrameFilter(profile.fps)}` : fit,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile)];
-  const child = spawn('ffmpeg', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = onAir(spawn('ffmpeg', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
   standbyProcess = child;
   pipeToRelay(child);
   attachProcessLogs(child, 'Standby');
@@ -2957,6 +3035,9 @@ function startQueue(initialIndex = 0) {
 
 function spawnJson(command, args, timeout = 60000) {
   return new Promise((resolvePromise, reject) => {
+    // Приоритет обычный, не фоновый: через spawnJson yt-dlp разбирает ссылку
+    // трека, который сейчас пойдёт в эфир, и человек ждёт его прямо сейчас —
+    // в фоне под нагрузкой игры это растягивалось бы на лишние секунды заставки.
     const child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error('Источник отвечает слишком долго.')); }, timeout);
@@ -3109,7 +3190,8 @@ function mediaCacheLimit() {
 function cleanupStorage() {
   trimMediaCache();
   обновитьГотовые();
-  storageInfo = { sizeMb: mediaCacheSizeMb(), drives: listDrives() };
+  storageInfo = { ...storageInfo, sizeMb: mediaCacheSizeMb() };
+  listDrives().then(drives => { storageInfo = { ...storageInfo, drives }; }).catch(() => {});
   const alive = new Set(queue.map(item => item.id));
   try {
     for (const name of readdirSync(mediaCacheDir())) {
@@ -3186,7 +3268,7 @@ function startCacheDownload(item) {
       '--socket-timeout', '20', '-f',
       'bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/best[height<=1080]',
       '--merge-output-format', 'mp4', '--remux-video', 'mp4', '-o', join(directory, 'source.%(ext)s'), item.sourceUrl];
-    const child = spawn(ytdlpPath(), args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = inBackground(spawn(ytdlpPath(), args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
     mediaCacheProcesses.set(child, item.id);
     let stderr = '';
     child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-16000); });
@@ -3254,7 +3336,7 @@ function unityVideoEncodeArgs(profile) {
 
 function runUnityFfmpeg(args, label, generation = unityBuildGeneration) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn('ffmpeg', args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = inBackground(spawn('ffmpeg', args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
     unityBuildProcess = child;
     let stderr = '';
     child.stderr.setEncoding('utf8');
@@ -3359,7 +3441,7 @@ function startUnityCaptureRecording() {
   const args = ['-hide_banner', '-loglevel', 'warning', '-live_start_index', '-2', '-i', `http://127.0.0.1:${PORT}/stream/live.m3u8`,
     '-map', '0:v:0', '-map', '0:a:0', '-vf', 'setpts=PTS-STARTPTS', '-af', 'asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0',
     ...unityVideoEncodeArgs(profile), '-c:a', 'aac', '-b:a', '160k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '-y', temporary];
-  const child = spawn('ffmpeg', args, { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+  const child = inBackground(spawn('ffmpeg', args, { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] }));
   unityCaptureProcess = child; unityCaptureStartedAt = Date.now();
   unityCapture = { state: 'recording', message: 'Идёт запись захвата…', updatedAt: Date.now() };
   let stderr = '';
@@ -3537,7 +3619,7 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
     if (manualTransition) return;
     currentDuration = media.duration || item.duration || null;
     stopStandby();
-    const child = spawn('ffmpeg', queueProducerArgs(media, markProducerTimestamp(nextProducerTimestamp()), sourcePosition), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = onAir(spawn('ffmpeg', queueProducerArgs(media, markProducerTimestamp(nextProducerTimestamp()), sourcePosition), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
     activeProcess = child;
     pipeToRelay(child);
     currentStartedAt = Date.now();
@@ -3901,7 +3983,7 @@ function качатьПревью() {
          '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination]
       : ['-hide_banner', '-loglevel', 'error', '-i', item.sourceUrl,
          '-an', '-map', 'disp:attached_pic', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination];
-    const child = spawn('ffmpeg', args, { windowsHide: true, stdio: 'ignore' });
+    const child = inBackground(spawn('ffmpeg', args, { windowsHide: true, stdio: 'ignore' }));
     previewChildren.add(child);
     const дальше = () => { previewChildren.delete(child); занятоПревью--; качатьПревью(); };
     child.on('close', code => {
@@ -4116,12 +4198,12 @@ async function ensureLivePreview() {
   if (config.captureMode === 'window') {
     const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
     if (!existsSync(helper)) return false;
-    const захват = spawn(helper, ['--hwnd', String(rect.handle), '--width', '960', '--height', '540', '--fps', кадры],
-      { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
-    const перевод = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'rawvideo', '-pixel_format', 'nv12',
+    const захват = inBackground(spawn(helper, ['--hwnd', String(rect.handle), '--width', '960', '--height', '540', '--fps', кадры],
+      { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] }));
+    const перевод = inBackground(spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'rawvideo', '-pixel_format', 'nv12',
       '-video_size', '960x540', '-framerate', кадры, '-i', 'pipe:0',
       '-vf', `fps=${кадры}`, '-q:v', '5', '-update', '1', '-y', CAPTURE_PREVIEW],
-      { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
+      { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] }));
     захват.stdout.on('error', () => {}); перевод.stdin.on('error', () => {});
     захват.stdout.pipe(перевод.stdin);
     перевод.on('close', () => { try { захват.stdin.end(); } catch {} });
@@ -4131,7 +4213,7 @@ async function ensureLivePreview() {
     if (rect) args.push('-offset_x', String(rect.x), '-offset_y', String(rect.y), '-video_size', `${rect.width}x${rect.height}`, '-i', 'desktop');
     else args.push('-i', 'desktop');
     args.push('-vf', 'scale=960:-2:flags=fast_bilinear', '-q:v', '5', '-update', '1', '-y', CAPTURE_PREVIEW);
-    previewProcess = spawn('ffmpeg', args, { windowsHide: true, stdio: 'ignore' });
+    previewProcess = inBackground(spawn('ffmpeg', args, { windowsHide: true, stdio: 'ignore' }));
   }
   previewKind = вид;
   previewIdleTimer = setInterval(() => {
@@ -4161,8 +4243,8 @@ async function generateCapturePreview() {
     if (rect.minimized) return { unavailable: false, minimized: true, rect };
     const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
     if (!existsSync(helper)) throw new Error('Компонент изолированного захвата окна не найден.');
-    const capture = spawn(helper, ['--hwnd', rect.handle, '--width', '960', '--height', '540', '--fps', '5'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    const converter = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'rawvideo', '-pixel_format', 'nv12', '-video_size', '960x540', '-framerate', '5', '-i', 'pipe:0', '-frames:v', '1', '-q:v', '3', '-y', CAPTURE_PREVIEW], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+    const capture = inBackground(spawn(helper, ['--hwnd', rect.handle, '--width', '960', '--height', '540', '--fps', '5'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
+    const converter = inBackground(spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'rawvideo', '-pixel_format', 'nv12', '-video_size', '960x540', '-framerate', '5', '-i', 'pipe:0', '-frames:v', '1', '-q:v', '3', '-y', CAPTURE_PREVIEW], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] }));
     capture.stdout.on('error', () => {}); converter.stdin.on('error', () => {});
     capture.stdout.pipe(converter.stdin);
     let errorText = '';
@@ -4585,13 +4667,19 @@ const server = http.createServer(async (req, res) => {
     }
     if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/stream/')) {
       const head = req.method === 'HEAD';
-      if ((url.pathname === '/stream/live.m3u8' || url.pathname === '/stream/preview.m3u8') && existsSync(join(HLS_DIR, 'live.m3u8'))) {
+      // Плейлист читаем асинхронно: его спрашивает каждый зритель и окно
+      // предпросмотра примерно раз в секунду, и синхронное чтение (которое
+      // антивирус, проверяющий свежий файл, растягивает до десятков мс) каждый
+      // раз останавливало event loop, через который идёт поток.
+      const живой = url.pathname === '/stream/live.m3u8' || url.pathname === '/stream/preview.m3u8'
+        ? await readFile(join(HLS_DIR, 'live.m3u8'), 'utf8').catch(() => null) : null;
+      if (живой !== null) {
         const preview = url.pathname === '/stream/preview.m3u8';
         // ponytail: локальное окно 4×1с — минимальная задержка для AVPro на этом
         // же ПК; публичное окно шире, потому что туннель добавляет джиттер.
         const liveWindow = publicTunnelHost ? 10 : 4;
         const liveOffset = publicTunnelHost ? 3 : 1.5;
-        const playlist = prepareLivePlaylist(readFileSync(join(HLS_DIR, 'live.m3u8'), 'utf8'), preview ? 60 : liveWindow, preview ? 2 : liveOffset);
+        const playlist = prepareLivePlaylist(живой, preview ? 60 : liveWindow, preview ? 2 : liveOffset);
         res.writeHead(200, { 'Content-Type': mime['.m3u8'], 'Cache-Control': 'no-cache, no-store, must-revalidate',
           'CDN-Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': 'no-store', 'Surrogate-Control': 'no-store',
           'Pragma': 'no-cache', 'Expires': '0', ...общийДоступ(publicTunnelHost) });

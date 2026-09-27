@@ -811,12 +811,12 @@ $('#previewToggle').addEventListener('click',()=>{
 // Свёрнутое окно программы не должно ничего декодировать.
 document.addEventListener('visibilitychange',()=>{
   ui.windowHidden=document.hidden;
-  if (document.hidden) stopPreview(); else if (ui.status) startPreview(ui.status);
+  if (document.hidden) stopPreview(); else { refresh(); if (ui.status) startPreview(ui.status); }
 });
 for (const [event,hidden] of [['vrcast-hidden',true],['vrcast-shown',false]]) {
   document.addEventListener(event,()=>{
     ui.windowHidden=hidden;
-    if (hidden) stopPreview(); else if (ui.status) startPreview(ui.status);
+    if (hidden) stopPreview(); else { refresh(); if (ui.status) startPreview(ui.status); }
   });
 }
 $('#clearCache').addEventListener('click',async()=>{
@@ -886,7 +886,10 @@ $('#showLogs').addEventListener('click',()=>$('#logDialog').showModal());
 $('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast://open-folder';});
 $('#appSoundSettings').addEventListener('click',()=>{window.location.href='vrcast://app-sound';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
-async function refresh(){try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
+// Свёрнутое окно состояние не спрашивает: смотреть его некому, а каждый
+// запрос — работа сервера в том же event loop, через который идёт эфир.
+// При разворачивании окно сразу обновляется само (см. vrcast-shown ниже).
+async function refresh(){if(ui.windowHidden)return;try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
 async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);// Снимок источника обновляем только когда открыта вкладка «Экран», окно видно и эфир не идёт: раньше программа бесконечно порождала ffmpeg каждые две секунды даже на простое.
 // Пока открыта вкладка «Экран» и эфир не идёт, сервер держит живой поток
 // картинки — забираем её пятнадцать раз в секунду. Раз в две секунды просим
