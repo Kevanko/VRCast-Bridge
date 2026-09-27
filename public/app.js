@@ -1,6 +1,18 @@
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
-const ui = { previewOn: localStorage.getItem('previewOn')!=='0', windowHidden: false, source: 'queue', output: 'local', status: null, sources: { windows: [], monitors: [], audioDevices: [], audioOutputs: [] }, hls: null, previewUrl: '', progressAt: 0, seeking: false, seekPending: false, seekDraft: 0, seekRevision: 0, previewBusy: false, previewTimer: null, speedPendingUntil: 0, loopPendingUntil: 0, liveApplyTimer: null, queueSignature: '', unitySelectedId: '' };
+// Запись в DOM только при настоящем изменении. Состояние приходит каждую
+// секунду, а почти всё в нём от раза к разу одинаково: присвоение того же
+// текста, класса или hidden всё равно пересоздаёт узлы и будит перерасчёт
+// стилей и вёрстки — рядом с эфиром и VRChat это чистая потеря процессора.
+function setText(node, value) { value=String(value??''); if (node.textContent!==value) node.textContent=value; }
+function setHtml(node, value) { if (node._html!==value) { node._html=value; node.innerHTML=value; } }
+function setHidden(node, value) { value=Boolean(value); if (node.hidden!==value) node.hidden=value; }
+function setDisabled(node, value) { value=Boolean(value); if (node.disabled!==value) node.disabled=value; }
+function setClass(node, value) { if (node.className!==value) node.className=value; }
+function setTitle(node, value) { if (node.title!==value) node.title=value; }
+// Предпросмотр по умолчанию выключен: декодирование эфира в окне стоит больше,
+// чем само кодирование. Включается кнопкой с глазом и запоминается.
+const ui = { previewOn: localStorage.getItem('previewOn')==='1', windowHidden: false, source: 'queue', output: 'local', status: null, sources: { windows: [], monitors: [], audioDevices: [], audioOutputs: [] }, hls: null, previewUrl: '', progressAt: 0, seeking: false, seekPending: false, seekDraft: 0, seekRevision: 0, previewBusy: false, previewTimer: null, speedPendingUntil: 0, loopPendingUntil: 0, liveApplyTimer: null, queueSignature: '', unitySelectedId: '' };
 
 async function api(path, options = {}) {
   // Один короткий повтор при обрыве связи: программа может на секунду уйти в
@@ -41,25 +53,34 @@ function progressPosition(state = ui.status) {
 function renderProgress() {
   const state = ui.status;
   if (!state?.progress || state.activeKind !== 'queue') {
-    $('#elapsedTime').textContent='0:00'; $('#totalTime').textContent=state?.activeKind==='screen'&&state.running?'LIVE':'0:00';
-    if (!ui.seeking&&!ui.seekPending) { $('#seekBar').value='0'; $('#seekBar').style.setProperty('--seek','0%'); }
+    setText($('#elapsedTime'),'0:00'); setText($('#totalTime'),state?.activeKind==='screen'&&state.running?'LIVE':'0:00');
+    if (!ui.seeking&&!ui.seekPending) paintSeek(0);
     return;
   }
   const position=(ui.seeking||ui.seekPending)?ui.seekDraft:progressPosition(state), total=Number(state?.progress?.duration)||0, percent=total?Math.min(100,position/total*100):0;
-  $('#elapsedTime').textContent=formatTime(position); $('#totalTime').textContent=total?formatTime(total):'LIVE';
-  if (!ui.seeking&&!ui.seekPending) { $('#seekBar').value=String(Math.round(percent*10)); $('#seekBar').style.setProperty('--seek',`${percent}%`); }
+  setText($('#elapsedTime'),formatTime(position)); setText($('#totalTime'),total?formatTime(total):'LIVE');
+  if (!ui.seeking&&!ui.seekPending) paintSeek(percent);
+}
+// Полоса перемотки двигается по десятым долям процента: чаще перерисовывать
+// её незачем, а каждая запись стиля — это перерасчёт и отрисовка плеера.
+function paintSeek(percent) {
+  const bar=$('#seekBar'), step=Math.round(percent*10);
+  if (bar._step===step) return;
+  bar._step=step; bar.value=String(step); bar.style.setProperty('--seek',`${step/10}%`);
 }
 
 function renderNowPlaying(state) {
   const item=currentItem(state), cover=$('#nowCover');
   if (item) {
-    $('#nowTitle').textContent=item.title; $('#nowSource').textContent=item.local?'Файл с компьютера':'Медиа по ссылке';
-    cover.innerHTML=item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{innerHTML:'${icon('note').replace(/'/g,"\\'")}'}))">`:`<span>${icon('note')}</span>`;
+    setText($('#nowTitle'),item.title); setText($('#nowSource'),item.local?'Файл с компьютера':'Медиа по ссылке');
+    // Запасной значок лежит рядом скрытым. Раньше его разметку вставляли прямо
+    // в onerror, её кавычки рвали атрибут, и под обложкой торчал текст «'))">».
+    setHtml(cover,item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="" onerror="this.nextElementSibling.hidden=false;this.remove()"><span hidden>${icon('note')}</span>`:`<span>${icon('note')}</span>`);
   } else if (state.running && state.activeKind==='screen') {
-    $('#nowTitle').textContent=captureLabel(); $('#nowSource').textContent=audioLabel(); cover.innerHTML=`<span>${icon('display')}</span>`;
-  } else { $('#nowTitle').textContent='Эфир не запущен'; $('#nowSource').textContent=ui.source==='queue'?'Добавьте видео справа':'Выберите экран или окно справа'; cover.innerHTML=`<span>${icon('note')}</span>`; }
+    setText($('#nowTitle'),captureLabel()); setText($('#nowSource'),audioLabel()); setHtml(cover,`<span>${icon('display')}</span>`);
+  } else { setText($('#nowTitle'),'Эфир не запущен'); setText($('#nowSource'),ui.source==='queue'?'Добавьте видео справа':'Выберите экран или окно справа'); setHtml(cover,`<span>${icon('note')}</span>`); }
   // Иконка паузы: в эфире — по состоянию плеера, в локальном предпросмотре — по video.
-  $('#togglePause').innerHTML=icon((ui.localPreviewId&&!state.running)?($('#streamPreview').paused?'play':'pause'):(state.playback?.paused?'play':'pause'));
+  setHtml($('#togglePause'),icon((ui.localPreviewId&&!state.running)?($('#streamPreview').paused?'play':'pause'):(state.playback?.paused?'play':'pause')));
   if(Date.now()>ui.speedPendingUntil)paintSpeed(state.playback?.speed||1);
   if(Date.now()>ui.loopPendingUntil)paintLoop(state.playback?.loopMode||'once');
   $('#playerUi').classList.toggle('disabled',ui.source==='queue'&&(state.activeKind!=='queue'||!state.running));
@@ -70,13 +91,13 @@ function renderNowPlaying(state) {
 const SPEED_STEPS=[0.5,0.75,1,1.25,1.5,2];
 const icon=name=>`<svg class="ic" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const LOOP_STEPS=[['once','repeat','Без повтора'],['all','repeat','Повтор очереди'],['one','repeat-one','Повтор трека']];
-function paintSpeed(value){const button=$('#speedSelect');button.dataset.value=String(value);button.textContent=`${value}×`;
-  button.classList.toggle('on',Number(value)!==1);button.title=`Скорость ${value}× — нажмите, чтобы изменить`;}
+function paintSpeed(value){const button=$('#speedSelect');if(button.dataset.value!==String(value))button.dataset.value=String(value);setText(button,`${value}×`);
+  button.classList.toggle('on',Number(value)!==1);setTitle(button,`Скорость ${value}× — нажмите, чтобы изменить`);}
 function paintLoop(mode){const button=$('#loopSelect');const step=LOOP_STEPS.find(item=>item[0]===mode)||LOOP_STEPS[0];
-  button.dataset.value=step[0];button.innerHTML=icon(step[1]);button.classList.toggle('on',step[0]!=='once');button.title=`${step[2]} — нажмите, чтобы изменить`;}
+  if(button.dataset.value!==step[0])button.dataset.value=step[0];setHtml(button,icon(step[1]));button.classList.toggle('on',step[0]!=='once');setTitle(button,`${step[2]} — нажмите, чтобы изменить`);}
 
 function monitorPlaceholder(title, text, name = 'broadcast') {
-  $('#monitorPlaceholderTitle').textContent=title; $('#monitorPlaceholderText').textContent=text; $('#monitorPlaceholderIcon').innerHTML=icon(name);
+  setText($('#monitorPlaceholderTitle'),title); setText($('#monitorPlaceholderText'),text); setHtml($('#monitorPlaceholderIcon'),icon(name));
 }
 
 // Декодирование 1080p60 в окне программы стоит около полутора ядер — больше,
@@ -89,18 +110,37 @@ function previewAllowed() {
 function stopPreview() {
   ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl='';
   const video=$('#streamPreview');
-  video.pause(); video.srcObject=null; video.removeAttribute('src'); video.load?.();
+  // Локальный трек на свёрнутом окне только ставим на паузу: иначе после
+  // разворачивания плеер оставался пустым, а кнопка паузы управляла ничем.
+  if (ui.localPreviewId && !ui.status?.running) video.pause();
+  else {
+    video.pause();
+    if (video.srcObject) video.srcObject=null;
+    if (video.hasAttribute('src')) { video.removeAttribute('src'); video.load?.(); }
+    $('#monitor').classList.remove('previewing');
+  }
   // Кадр захвата — отдельная картинка: без этого при выключении оставался экран.
   const снимок=$('#capturePreview');
-  снимок.removeAttribute('src');
-  $('#monitor').classList.remove('previewing','source-preview');
+  if (снимок.hasAttribute('src')) снимок.removeAttribute('src');
+  $('#monitor').classList.remove('source-preview');
 }
+
+// Браузер сам играет только эти форматы; остальное (mkv, avi, ролики по
+// ссылке) сервер отдаёт кодом 415/404, и в консоли копились ошибки загрузки.
+const ЛОКАЛЬНО_ИГРАЕТСЯ=/\.(mp4|webm|m4v|m4a|mp3|aac|ogg|opus|wav)$/i;
 
 // Локальный предпросмотр: трек играет прямо в браузере, без эфира. Так видео
 // можно посмотреть и подготовить, а трансляция начнётся только по «Начать эфир».
 function показатьЛокальныйПредпросмотр(id){
   const item=(ui.status?.queue||[]).find(x=>x.id===id);
   if(!item)return;
+  ui.localNote=null;
+  if(!item.local||item.unavailable||!ЛОКАЛЬНО_ИГРАЕТСЯ.test(item.sourceUrl||'')){
+    if(ui.localPreviewId)очиститьЛокальныйПредпросмотр();
+    ui.localNote=[item.title,'Смотреть можно в эфире — нажмите «Начать эфир видео»','broadcast'];
+    if(ui.status)render(ui.status);
+    return;
+  }
   ui.localPreviewId=id;
   ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl='';
   const video=$('#streamPreview'), monitor=$('#monitor');
@@ -109,10 +149,12 @@ function показатьЛокальныйПредпросмотр(id){
   video.load?.();
   monitor.classList.add('previewing'); monitor.classList.remove('source-preview');
   video.play().then(()=>video.pause()).catch(()=>{
-    // Формат браузер не тянет (mkv, удалённое видео) — показываем обложку и
-    // подсказку: смотреть можно только в эфире.
+    // Кодек внутри файла браузер не тянет (HEVC и т. п.) — показываем название
+    // и подсказку: смотреть можно только в эфире.
+    if(ui.localPreviewId!==id)return;
     очиститьЛокальныйПредпросмотр();
-    monitorPlaceholder(item.title,'Смотреть можно в эфире — нажмите «Начать эфир видео»','broadcast');
+    ui.localNote=[item.title,'Смотреть можно в эфире — нажмите «Начать эфир видео»','broadcast'];
+    if(ui.status)render(ui.status);
   });
   if(ui.status)render(ui.status);
 }
@@ -124,36 +166,54 @@ function переключитьЛокальнуюПаузу(){
 }
 // Иконка play/pause следует за локальным плеером сразу, не дожидаясь render.
 for(const событие of ['play','pause']) $('#streamPreview').addEventListener(событие,()=>{
-  if(ui.localPreviewId&&!ui.status?.running) $('#togglePause').innerHTML=icon($('#streamPreview').paused?'play':'pause');
+  if(ui.localPreviewId&&!ui.status?.running) setHtml($('#togglePause'),icon($('#streamPreview').paused?'play':'pause'));
 });
 
 function очиститьЛокальныйПредпросмотр(){
   ui.localPreviewId='';
   const video=$('#streamPreview');
   try{ video.pause(); }catch{}
-  video.removeAttribute('src'); video.load?.();
+  if(video.hasAttribute('src')){ video.removeAttribute('src'); video.load?.(); }
   $('#monitor').classList.remove('previewing');
 }
 
 function paintPreviewToggle() {
   const button=$('#previewToggle');
   button.classList.toggle('off',!ui.previewOn);
-  button.title=ui.previewOn?'Выключить предпросмотр — освободит процессор':'Включить предпросмотр';
-  button.innerHTML=icon(ui.previewOn?'eye':'eye-off');
-  $('#monitorPlaceholderIcon').innerHTML=icon(ui.previewOn?'broadcast':'eye-off');
+  setTitle(button,ui.previewOn?'Выключить предпросмотр — освободит процессор':'Включить предпросмотр');
+  setHtml(button,icon(ui.previewOn?'eye':'eye-off'));
+}
+
+// Что написать в пустом кадре. Раньше надпись оставалась от прошлого
+// состояния: после остановки эфира висело «Картинка выключена», а при
+// выключенном предпросмотре — «Ничего не выбрано», хотя дело в выключателе.
+function paintMonitorPlaceholder(state) {
+  const monitor=$('#monitor');
+  if (monitor.classList.contains('window-paused')||monitor.classList.contains('source-preview')) return;
+  if (state.running) {
+    if (!ui.previewOn) monitorPlaceholder('Картинка выключена','Эфир идёт, окно не тратит процессор','eye-off');
+    else monitorPlaceholder('Эфир идёт','Картинка появится через пару секунд','broadcast');
+    return;
+  }
+  if (ui.localPreviewId) return;
+  if (ui.source==='queue' && ui.localNote) return monitorPlaceholder(...ui.localNote);
+  if (!ui.previewOn) return monitorPlaceholder('Предпросмотр выключен','Окно не декодирует видео и не тратит процессор. Включить — кнопка с глазом','eye-off');
+  monitorPlaceholder('Ничего не выбрано',ui.source==='queue'?'Нажмите трек в списке — он откроется здесь без эфира':'Выберите экран или окно справа','broadcast');
 }
 
 function startPreview(state) {
   const video=$('#streamPreview'), monitor=$('#monitor');
   if (!previewAllowed()) {
-    if (ui.hls||ui.previewUrl) stopPreview();
-    if (state.running && ui.previewOn===false) monitorPlaceholder('Картинка выключена','Эфир идёт, окно не тратит процессор','eye-off');
+    if (ui.hls||ui.rtc||ui.previewUrl) stopPreview();
     return;
   }
   if (!state.running) {
     // Локальный предпросмотр трогать нельзя — он живёт своей жизнью до эфира.
     if (ui.localPreviewId) return;
-    ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl=''; video.removeAttribute('src'); video.srcObject=null; monitor.classList.remove('previewing'); return;
+    if (ui.hls||ui.rtc||ui.previewUrl||video.srcObject||video.hasAttribute('src')) {
+      ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl=''; video.removeAttribute('src'); video.srcObject=null;
+    }
+    monitor.classList.remove('previewing'); return;
   }
   // Эфир пошёл — локальный предпросмотр больше не нужен.
   if (ui.localPreviewId) ui.localPreviewId='';
@@ -188,14 +248,14 @@ function renderStorage(state){
     select.value=cache.root||'';
   }
   const лимит=cache.limitGb?`${cache.limitGb} ГБ`:'авто';
-  $('#cacheSize').textContent=`${cache.sizeMb||0} МБ из ${лимит}`;
+  setText($('#cacheSize'),`${cache.sizeMb||0} МБ из ${лимит}`);
   if(document.activeElement!==$('#cacheLimit'))$('#cacheLimit').value=String(cache.limitGb||0);
   const free=state.disk?.freeMb;
   const всего=state.disk?.totalMb;
   const место=free!==null&&free!==undefined&&всего
     ? ` · свободно ${(free/1024).toFixed(1)} из ${(всего/1024).toFixed(0)} ГБ`
     : '';
-  $('#cacheHint').textContent=cache.path?`${cache.path}${место}`:'';
+  setText($('#cacheHint'),cache.path?`${cache.path}${место}`:'');
 }
 
 function renderServers(state) {
@@ -224,18 +284,21 @@ function renderServers(state) {
     }).join(''):'<li class="server-empty">Сервера пока нет.<br>Он даёт постоянную ссылку — раздать её можно один раз и больше не менять.</li>';
   }
   // Молчим, когда всё идёт как надо: об этом уже говорят лампа и карточка.
-  $('#serverHint').textContent=!servers.length?'Есть свой VPS — подключите его, и ссылка перестанет меняться.'
-    :remote.reachable===false?'Сервер не отвечает. Проверьте, что машина включена и порт 8554 открыт.'
+  // Порт — тот, что записан у сервера: раньше подсказка всегда называла 8554.
+  const порт=servers.find(item=>item.id===active)?.rtspPort||8554;
+  setText($('#serverHint'),!servers.length?'Есть свой VPS — подключите его, и ссылка перестанет меняться.'
+    :remote.reachable===false?`Сервер не отвечает. Проверьте, что машина включена и порт ${порт} открыт.`
     :state.config.outputMode!=='remote'?'Выберите сервер, чтобы вещать через него.'
-    :'';
+    :'');
 }
 
 // «Этот ПК»: одна ссылка для своей сети (друзьям рядом) и, если есть белый IP,
 // ссылка через интернет. Подпись над ссылкой, в самой ссылке — только адрес.
 function заполнитьСсылку(строкаId, подписьId, url){
   const строка=$(строкаId), подпись=$(подписьId);
-  строка.hidden=!url; подпись.hidden=!url;
-  if(url){ строка.querySelector('code').textContent=url; строка.querySelector('.direct-copy').dataset.url=url; }
+  setHidden(строка,!url); setHidden(подпись,!url);
+  const кнопка=строка.querySelector('.direct-copy');
+  if(url){ setText(строка.querySelector('code'),url); if(кнопка.dataset.url!==url)кнопка.dataset.url=url; }
 }
 function renderLocalOutput(state){
   const d=state.rtsp?.direct||{};
@@ -243,11 +306,14 @@ function renderLocalOutput(state){
   заполнитьСсылку('#whiteLinkRow','#whiteLinkCaption',d.white||'');
   const поле=$('#whiteIp');
   if(document.activeElement!==поле) поле.value=state.config.whiteIp||'';
-  $('#localHint').textContent=d.white
-    ?'Ссылка через интернет откроется у друзей, если на роутере открыт порт 8554.'
+  // Порт берём из самой ссылки: RTSP этого ПК слушает не 8554 (тот — у своего
+  // сервера), и подсказка отправляла открывать на роутере не тот порт.
+  const порт=(d.white||'').match(/:(\d+)\//)?.[1]||'';
+  setText($('#localHint'),d.white
+    ?`Ссылка через интернет откроется у друзей, если на роутере открыт порт ${порт} (TCP).`
     :d.local
       ?'Эту ссылку открывают друзья в одной сети с вами. Есть белый IP — впишите, дам ссылку для интернета.'
-      :'Пока видно только этот ПК. Друзьям рядом — впишите адрес своей сети, из интернета — белый IP.';
+      :'Пока видно только этот ПК. Друзьям рядом — впишите адрес своей сети, из интернета — белый IP.');
 }
 
 // Прямая ссылка — по клику копируем.
@@ -396,24 +462,37 @@ serverDialog.addEventListener('close',()=>{ $('#serverWipe').textContent='Сне
 
 function renderTemplates(state) {
   const select=$('#templateSelect'), selected=select.value, templates=state.templates||[];
-  select.innerHTML='<option value="">Новый набор…</option>'+templates.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.count}</option>`).join('');
-  if(selected&&templates.some(item=>item.id===selected))select.value=selected;
-  $('#templateCount').textContent=String(templates.length);
-  const has=Boolean(select.value); $('#loadTemplate').disabled=!has; $('#appendTemplate').disabled=!has; $('#deleteTemplate').disabled=!has;
+  // Список пересобираем только когда наборы поменялись: пересборка на каждом
+  // опросе захлопывала раскрытый список прямо под курсором.
+  const html='<option value="">Новый набор…</option>'+templates.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.count}</option>`).join('');
+  if(select._html!==html){
+    setHtml(select,html);
+    if(selected&&templates.some(item=>item.id===selected))select.value=selected;
+  }
+  setText($('#templateCount'),String(templates.length));
+  const has=Boolean(select.value); setDisabled($('#loadTemplate'),!has); setDisabled($('#appendTemplate'),!has); setDisabled($('#deleteTemplate'),!has);
 }
 
 function render(state) {
+  // Любая отрисовка не из опроса (ответ на нажатие) сбрасывает сравнение:
+  // следующий опрос обязан перерисовать, даже если совпал с прошлым опросом.
+  ui.lastPollText='';
   ui.status=state; ui.progressAt=Date.now();  const ready=state.tools.ffmpeg&&state.tools.ytdlp;
   if(ui.seekPending&&!state.playback?.busy&&Number(state.playback?.revision)>=ui.seekRevision)ui.seekPending=false;
   const streamReady=Boolean(state.stream?.ready), streamStalled=state.stream?.state==='stalled';
-  $('#stateDot').className=`state-dot ${state.disk?.low||streamStalled?'error':state.running?'live':ready?'ready':''}`;
-  $('#systemState').textContent=state.disk?.low?`Мало места на диске · ${Math.max(0,Math.round(state.disk.freeMb/1024*10)/10)} ГБ`:state.playback?.buffering?'Загружаю видео':streamStalled?'Не успевает':state.running&&streamReady?'В эфире':state.running?'Запускаю…':streamReady?'Готово':ready?'Готов к эфиру':'Нужен FFmpeg';
+  setClass($('#stateDot'),`state-dot ${state.disk?.low||streamStalled?'error':state.running?'live':ready?'ready':''}`);
+  // Раньше при любом недостающем инструменте писалось «Нужен FFmpeg» — даже
+  // когда FFmpeg на месте, а не хватает yt-dlp, и пока всё это само качается.
+  const качаюИнструменты=Object.values(state.toolDownloads||{}).some(item=>item.state==='work');
+  setText($('#systemState'),state.disk?.low?`Мало места на диске · ${Math.max(0,Math.round(state.disk.freeMb/1024*10)/10)} ГБ`:state.playback?.buffering?'Загружаю видео':streamStalled?'Не успевает':state.running&&streamReady?'В эфире':state.running?'Запускаю…':streamReady?'Готово':ready?'Готов к эфиру':качаюИнструменты?'Докачиваю инструменты':!state.tools.ffmpeg?'Нужен FFmpeg':'Нужен yt-dlp');
   const tunnelMode=state.config.outputMode==='tunnel', tunnelReady=tunnelMode&&state.tunnel?.ready, tunnelStarting=tunnelMode&&state.tunnel?.state==='starting';
   const tunnelServes=tunnelMode&&state.tunnel?.serves===true, tunnelVerifying=tunnelMode&&state.tunnel?.verifying, tunnelBroken=tunnelMode&&state.tunnel?.serves===false;
   const unityMode=$('#playerMode').value==='unity', unity=state.compatibility?.unity||{};
   if(!ui.unitySelectedId||!state.queue.some(item=>item.id===ui.unitySelectedId))ui.unitySelectedId=unity.queue?.itemId||state.currentId||state.queue[0]?.id||'';
   const storedUnitySource=ui.source==='screen'?unity.capture||{}:unity.queue||{};
-  const unitySource=ui.source==='queue'&&ui.unitySelectedId&&storedUnitySource.itemId!==ui.unitySelectedId
+  // «Выбран другой трек» — только если какой-то трек уже собран. Раньше это
+  // писалось при первом же входе в режим Unity, когда не собрано ничего.
+  const unitySource=ui.source==='queue'&&ui.unitySelectedId&&storedUnitySource.itemId&&storedUnitySource.itemId!==ui.unitySelectedId
     ?{...storedUnitySource,available:false,url:'',stale:true}:storedUnitySource;
   let shownUrl='', hint='', linkText='', linkGood=false, linkError=false;
   if(unityMode){shownUrl=unitySource.available?unitySource.url:'';hint=unitySource.scope==='local'&&tunnelMode?'Рабочая локальная Unity-ссылка. Для друзей используйте AVPro: бесплатный Pinggy подменяет Unity-запрос страницей предупреждения.':ui.source==='screen'?'Unity получит завершённую запись, а не прямой эфир.':unitySource.stale?'Трек изменился — подготовьте заново.':'Unity получает один трек — выберите его в очереди.';linkText=unitySource.available?(ui.source==='screen'?'Клип готов':'Трек готов'):unitySource.state==='building'||unitySource.state==='recording'||unitySource.state==='finalizing'?'Готовлю файл…':'Файл не готов';linkGood=Boolean(unitySource.available);linkError=unitySource.state==='error';}
@@ -429,7 +508,10 @@ function render(state) {
       :remote.reachable===false?'Сервер не отвечает'
       :remote.channelRejected?'Нужна постоянная ссылка'
       :remote.live?'Через ваш сервер'
-      :state.running?'Подключаюсь…':'Сервер на связи';
+      :state.running?'Подключаюсь…'
+      // «На связи» — только когда проверка действительно ответила; пока ответа
+      // нет, раньше здесь тоже писалось «на связи», даже для мёртвого адреса.
+      :remote.reachable===true?'Сервер на связи':'Проверяю сервер…';
     linkGood=Boolean(remote.live);
     linkError=Boolean(remote.configured&&(remote.reachable===false||remote.channelRejected||(!remote.live&&state.running)));
   }
@@ -460,41 +542,43 @@ function render(state) {
     linkGood=(tunnelMode?tunnelServes:rtspLive);
     linkError=streamStalled||state.tunnel?.state==='error'||tunnelBroken;
   }
-  $('#playbackUrl').textContent=shownUrl||(linkError?'Ссылка пока недоступна':'Подготовка ссылки…'); $('#trustHint').textContent=hint;
-  $('#altLinkRow').hidden=true;
-  $('#copyUrl').disabled=!shownUrl;
-  const linkState=$('#linkState'); linkState.className=`link-state ${linkGood?'public':linkError?'error':''}`; linkState.querySelector('span').textContent=linkText;
+  setText($('#playbackUrl'),shownUrl||(linkError?'Ссылка пока недоступна':'Подготовка ссылки…')); setText($('#trustHint'),hint);
+  setHidden($('#altLinkRow'),true);
+  setDisabled($('#copyUrl'),!shownUrl);
+  const linkState=$('#linkState'); setClass(linkState,`link-state ${linkGood?'public':linkError?'error':''}`); setText(linkState.querySelector('span'),linkText);
   // Транспорт имеет смысл только для RTSP-ссылки
-  $('#unityTools').hidden=!unityMode;
+  setHidden($('#unityTools'),!unityMode);
   if(unityMode){
-    const storedQueueTask=unity.queue||{}, queueTask=ui.unitySelectedId&&storedQueueTask.itemId!==ui.unitySelectedId?{...storedQueueTask,available:false,stale:true}:storedQueueTask, captureTask=unity.capture||{}, task=ui.source==='screen'?captureTask:queueTask;
+    const storedQueueTask=unity.queue||{}, queueTask=ui.unitySelectedId&&storedQueueTask.itemId&&storedQueueTask.itemId!==ui.unitySelectedId?{...storedQueueTask,available:false,stale:true}:storedQueueTask, captureTask=unity.capture||{}, task=ui.source==='screen'?captureTask:queueTask;
     const progress=ui.source==='screen'?(task.state==='ready'?1:task.state==='recording'||task.state==='finalizing'?Math.min(.95,(Number(task.elapsed)||0)/60):0):Number(task.progress)||0;
-    $('#unityTaskText').textContent=task.stale?'Выбран другой трек — подготовьте его':task.message||(ui.source==='screen'?'Запись ещё не создана':'Трек ещё не подготовлен');
-    $('#unityTaskPercent').textContent=task.state==='recording'?formatTime(task.elapsed):task.state==='finalizing'?'…':`${Math.round(progress*100)}%`;
-    $('#unityTaskBar').style.width=`${Math.round(progress*100)}%`;
-    $('#prepareUnityQueue').hidden=ui.source!=='queue'; $('#prepareUnityQueue').disabled=queueTask.state==='building'||state.running||!state.queue.length;
-    $('#prepareUnityQueue').textContent=queueTask.state==='building'?'Подготовка трека…':queueTask.available&&!queueTask.stale?'Подготовить этот трек заново':'Подготовить выбранный трек';
-    $('#recordUnityCapture').hidden=ui.source!=='screen'; $('#recordUnityCapture').disabled=captureTask.state==='finalizing'||(captureTask.state!=='recording'&&state.activeKind!=='screen');
-    $('#recordUnityCapture').textContent=captureTask.state==='recording'?'Завершить запись и создать MP4':captureTask.state==='finalizing'?'Завершаю MP4…':'Записать Unity-клип из эфира';
+    setText($('#unityTaskText'),task.stale?'Выбран другой трек — подготовьте его':task.message||(ui.source==='screen'?'Запись ещё не создана':'Трек ещё не подготовлен'));
+    setText($('#unityTaskPercent'),task.state==='recording'?formatTime(task.elapsed):task.state==='finalizing'?'…':`${Math.round(progress*100)}%`);
+    const ширина=`${Math.round(progress*100)}%`; if($('#unityTaskBar').style.width!==ширина)$('#unityTaskBar').style.width=ширина;
+    setHidden($('#prepareUnityQueue'),ui.source!=='queue'); setDisabled($('#prepareUnityQueue'),queueTask.state==='building'||state.running||!state.queue.length);
+    setText($('#prepareUnityQueue'),queueTask.state==='building'?'Подготовка трека…':queueTask.available&&!queueTask.stale?'Подготовить этот трек заново':'Подготовить выбранный трек');
+    setHidden($('#recordUnityCapture'),ui.source!=='screen'); setDisabled($('#recordUnityCapture'),captureTask.state==='finalizing'||(captureTask.state!=='recording'&&state.activeKind!=='screen'));
+    setText($('#recordUnityCapture'),captureTask.state==='recording'?'Завершить запись и создать MP4':captureTask.state==='finalizing'?'Завершаю MP4…':'Записать Unity-клип из эфира');
   }
-  $('#appVersion').textContent=state.appVersion||'';
+  setText($('#appVersion'),state.appVersion||'');
   const update=state.update||{};
   const качается=Object.values(state.toolDownloads||{}).find(item=>item.state==='work');
-  $('#toolProgress').hidden=!качается;
+  setHidden($('#toolProgress'),!качается);
   if(качается){
-    const мегабайты=качается.totalMb?` · ${качается.doneMb} из ${качества(качается)} МБ`:'';
-    $('#toolProgress').innerHTML=`<i style="width:${качается.percent}%"></i><span>${качается.label} ${качается.percent}%${мегабайты}</span>`;
+    // Здесь стояла несуществующая функция «качества()»: при любой загрузке с
+    // известным размером render падал, и весь интерфейс замирал до её конца.
+    const мегабайты=качается.totalMb?` · ${качается.doneMb} из ${качается.totalMb} МБ`:'';
+    setHtml($('#toolProgress'),`<i style="width:${качается.percent}%"></i><span>${escapeHtml(качается.label)} ${качается.percent}%${мегабайты}</span>`);
   }
   offerUpdate(update);
-  $('#updateButton').hidden=!update.available;
-  if(update.available)$('#updateButton').textContent=update.installing?(update.ready?`Устанавливаю ${update.version}…`:`Скачиваю ${update.version} — ${Number(update.percent)||0}%`):`Обновить до ${update.version}`;
-  $('#updateButton').disabled=Boolean(update.installing);
-  $('#encoderLabel').textContent=state.performance?.encoder||'неизвестно';
+  setHidden($('#updateButton'),!update.available);
+  if(update.available)setText($('#updateButton'),update.installing?(update.ready?`Устанавливаю ${update.version}…`:`Скачиваю ${update.version} — ${Number(update.percent)||0}%`):`Обновить до ${update.version}`);
+  setDisabled($('#updateButton'),Boolean(update.installing));
+  setText($('#encoderLabel'),state.performance?.encoder||'неизвестно');
   const реж=state.performance?.encoderMode||'auto', гпу=state.performance?.gpuLabel||'';
-  $('#encoderNote').textContent=
+  setText($('#encoderNote'),
     реж==='cpu'?'Считает процессор: качество чуть выше, но нагрузка на CPU. Берите, когда видеокарта занята игрой.'
     :реж==='gpu'?(гпу?`${гпу} — кодирование уходит на видеокарту, процессор свободнее.`:'Видеокарты не нашлось — эфир считает процессор.')
-    :(гпу?`Авто: сейчас ${гпу}. Программа сама берёт видеокарту, если она есть.`:'Авто: видеокарты не нашлось — считает процессор.');
+    :(гпу?`Авто: сейчас ${гпу}. Программа сама берёт видеокарту, если она есть.`:'Авто: видеокарты не нашлось — считает процессор.'));
   const слабый=state.performance&&state.performance.hardware===false;
   const тяжело=слабый&&(ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30));
   const ratio=Number(state.performance?.realtimeRatio||0);
@@ -509,20 +593,26 @@ function render(state) {
     if(q.driftCorrections>0)health+=` · синхр. ${q.driftCorrections}`;
   }
   const last=events[events.length-1];
-  $('#streamHealth').textContent=health;
-  $('#streamHealth').title=state.running
+  setText($('#streamHealth'),health);
+  setTitle($('#streamHealth'),state.running
     ?`Задержка сейчас ${lat.toFixed(1)}с (пик ${Number(perf.maxLiveLatencySec||0).toFixed(1)}с)\nФризов ${q.freezes||0} на ${q.freezeSeconds||0}с всего\nСинхронизаций задержки ${q.driftCorrections||0}${last?`\nПоследнее: ${last.detail}${last.position!=null?` (${last.title||'трек'} на ${last.position}с)`:''}`:''}`
-    :'';
-  $('#queueCount').textContent=state.queue.length; $('#logs').textContent=state.logs.join('\n')||'Журнал пуст';
+    :'');
+  setText($('#queueCount'),state.queue.length);
+  // Журнал в сотню строк переписываем, только пока его окно открыто: иначе
+  // это самая тяжёлая запись в DOM на каждом опросе, и её никто не видит.
+  if($('#logDialog').open)paintLogs(state);
+  syncConfigControls(state);
   // Показания выхода всегда на виду: что уходит в эфир, какая чёткость и
   // сколько кадров. Раньше это было спрятано под шестерёнкой, и автопонижение
   // качества человек замечал только в журнале.
   const выход=state.activeKind==='screen'?'screen':'queue';
   const чёткость=выход==='screen'?state.config.quality:state.config.mediaQuality;
   const кадры=выход==='screen'?state.config.fps:state.config.mediaFps;
-  $('#monitorBadge').textContent=state.running
+  setText($('#monitorBadge'),state.running
     ?`${state.activeKind==='screen'?'Экран':'Видео'} · ${чёткость} · ${кадры} к/с`
-    :'Нет эфира';
+    // Надпись кадра источника («Предпросмотр», «Окно свёрнуто») ставит его
+    // обновление; раньше каждый опрос затирал её обратно на «Нет эфира».
+    :$('#monitor').matches('.source-preview,.window-paused')?$('#monitorBadge').textContent:'Нет эфира');
   const monitor=$('#monitor');
   // Транспорт (перемотка, пауза, скорость) нужен только когда идёт живое
   // видео. На предпросмотре источника и при остановленном эфире управлять
@@ -533,27 +623,53 @@ function render(state) {
   monitor.classList.toggle('tally-live',Boolean(state.running&&streamReady));
   monitor.classList.toggle('tally-cue',Boolean(state.running&&!streamReady));
   const list=$('#queueList');
-  const queueSignature=JSON.stringify([state.currentId,ui.unitySelectedId,$('#playerMode').value,state.queue.map(item=>[item.id,item.title,item.thumbnail,item.duration,item.unavailable])]);
-  if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>`<div class="queue-item ${state.currentId===item.id?'playing':''} ${item.unavailable?'unavailable':''} ${$('#playerMode').value==='unity'&&ui.unitySelectedId===item.id?'unity-selected':''}" data-id="${item.id}" ${item.unavailable?'data-unavailable="1"':''} role="button" tabindex="0" title="${$('#playerMode').value==='unity'?'Выбрать для подготовки Unity':'Включить этот трек'}"><span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="" onerror="this.replaceWith('${String(index+1).padStart(2,'0')}')">`:String(index+1).padStart(2,'0')}</span><span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small>${item.unavailable?'⚠ недоступен — пропускается':`${item.local?'Локальный файл · ':''}${item.duration?formatTime(item.duration):'длительность неизвестна'}`}</small></span><button class="remove-item" aria-label="Удалить из очереди" title="Удалить">×</button></div>`).join(''):'<div class="empty-state">Очередь пуста</div>';}
+  const unityВыбор=$('#playerMode').value==='unity';
+  const подсказкаТрека=unityВыбор?'Выбрать для подготовки Unity':state.running?'Включить этот трек в эфире':'Посмотреть здесь, без эфира';
+  const queueSignature=JSON.stringify([state.currentId,ui.unitySelectedId,подсказкаТрека,state.queue.map(item=>[item.id,item.title,item.thumbnail,item.duration,item.unavailable,item.local])]);
+  if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>`<div class="queue-item ${state.currentId===item.id?'playing':''} ${item.unavailable?'unavailable':''} ${unityВыбор&&ui.unitySelectedId===item.id?'unity-selected':''}" data-id="${escapeHtml(item.id)}" ${item.unavailable?'data-unavailable="1"':''} role="button" tabindex="0" title="${подсказкаТрека}"><span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="" onerror="this.replaceWith('${String(index+1).padStart(2,'0')}')">`:String(index+1).padStart(2,'0')}</span><span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small>${item.unavailable?'⚠ недоступен — пропускается':`${item.local?'Локальный файл · ':''}${item.duration?formatTime(item.duration):'длительность неизвестна'}`}</small></span><button class="remove-item" aria-label="Удалить из очереди" title="Удалить">×</button></div>`).join(''):'<div class="empty-state">Очередь пуста</div>';}
   const screenSource=ui.source==='screen';
-  $('#menuMediaQuality').hidden=screenSource; $('#menuMediaFps').hidden=screenSource;
-  $('#menuScreenQuality').hidden=!screenSource; $('#menuScreenFps').hidden=!screenSource;
-  renderNowPlaying(state); renderProgress(); renderTemplates(state); renderServers(state); renderLocalOutput(state); renderStorage(state); startPreview(state);
+  setHidden($('#menuMediaQuality'),screenSource); setHidden($('#menuMediaFps'),screenSource);
+  setHidden($('#menuScreenQuality'),!screenSource); setHidden($('#menuScreenFps'),!screenSource);
+  renderNowPlaying(state); renderProgress(); renderTemplates(state); renderServers(state); renderLocalOutput(state); renderStorage(state); startPreview(state); paintMonitorPlaceholder(state);
   // Пуск и остановка — отдельная явная кнопка, и её название прямо говорит,
   // что именно начнётся или прекратится. Раньше кнопка пуска была спрятана
   // всегда, и запустить эфир экрана можно было только через «Показать экран
   // в эфире» в настройках источника — это находили не сразу.
   const экран=ui.source==='screen';
-  $('#goLive').hidden=state.running;
-  $('#goLive').textContent=экран?'Начать эфир экрана':'Начать эфир видео';
-  $('#stopLive').hidden=!state.running;
-  $('#stopLive').textContent=state.activeKind==='screen'?'Остановить эфир экрана':'Остановить эфир';
-  $('#skipTrack').hidden=!(state.running&&state.activeKind==='queue');
+  setHidden($('#goLive'),state.running);
+  setText($('#goLive'),экран?'Начать эфир экрана':'Начать эфир видео');
+  setHidden($('#stopLive'),!state.running);
+  setText($('#stopLive'),state.activeKind==='screen'?'Остановить эфир экрана':'Остановить эфир');
+  setHidden($('#skipTrack'),!(state.running&&state.activeKind==='queue'));
   // Пока эфир экрана идёт, эта кнопка применяет смену источника или настроек.
   // Когда эфира нет, её работу делает кнопка пуска — двух одинаковых не нужно.
-  $('#applyCapture').hidden=!(экран&&state.activeKind==='screen');
-  $('#applyCapture').textContent='Применить изменения';
-  $$('.broadcast-mode button').forEach(node=>node.disabled=state.running);
+  setHidden($('#applyCapture'),!(экран&&state.activeKind==='screen'));
+  setText($('#applyCapture'),'Применить изменения');
+  $$('.broadcast-mode button').forEach(node=>setDisabled(node,state.running));
+  schedulePlaybackClock();
+  // Эфир закончился, а открыта вкладка «Экран» — возвращаем живой кадр
+  // источника. Раньше после остановки там оставалась пустая заглушка.
+  if(ui.wasRunning&&!state.running&&ui.source==='screen')refreshCapturePreview(false).catch(()=>{});
+  ui.wasRunning=state.running;
+}
+
+function paintLogs(state=ui.status) {
+  setText($('#logs'),(state?.logs||[]).join('\n')||'Журнал пуст');
+}
+
+// Настройки качества могут поменяться и без нас — автопонижение, другая
+// вкладка. Меню показывало то, что было при запуске окна, и врало. Сверяем
+// со статусом, но не в те полторы секунды, пока человек сам что-то жмёт.
+function syncConfigControls(state) {
+  if (Date.now()<ui.configEditUntil) return;
+  const c=state.config||{};
+  const значения={quality:c.quality,fps:c.fps,mediaQuality:c.mediaQuality,mediaFps:c.mediaFps,videoBitrate:c.videoBitrate??0,encoderMode:c.encoderMode||'auto',tunnelProviderSelect:c.tunnelProvider||'auto'};
+  for (const [id,value] of Object.entries(значения)) {
+    if (value===undefined||value===null) continue;
+    const select=document.getElementById(id);
+    if (!select||select.value===String(value)||![...select.options].some(option=>option.value===String(value))) continue;
+    select.value=String(value); paintSegments(select);
+  }
 }
 
 function chooseSource(source) {
@@ -631,7 +747,7 @@ function fillSelect(select, items, value, placeholder, mapper) {
 async function loadCaptureSources() {
   const saved={...(ui.status?.config||{})}, currentWindow=$('#windowSource').value, currentMonitor=$('#monitorSource').value, currentOutput=$('#audioOutput').value, currentDevice=$('#audioDevice').value; ui.sources=await api('/api/capture-sources');
   if(currentWindow)saved.captureWindowHandle=currentWindow;if(currentMonitor)saved.captureMonitorId=currentMonitor;if(currentOutput)saved.audioOutputId=currentOutput;if(currentDevice)saved.captureAudioDevice=currentDevice;
-  fillSelect($('#monitorSource'),ui.sources.monitors,saved.captureMonitorId,'Выберите монитор',item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.width}×${item.height}</option>`);
+  fillSelect($('#monitorSource'),ui.sources.monitors,saved.captureMonitorId,'Основной монитор',item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.width}×${item.height}</option>`);
   fillWindowPicker(ui.sources.windows,saved.captureWindowHandle);
   fillSelect($('#audioOutput'),ui.sources.audioOutputs,saved.audioOutputId,'Выберите выход',item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`);
   fillSelect($('#audioDevice'),ui.sources.audioDevices,saved.captureAudioDevice,'Выберите вход',name=>`<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`);
@@ -656,17 +772,21 @@ function selectedRect() {
   if(mode==='region')return{x:Number($('#regionX').value),y:Number($('#regionY').value),width:Number($('#regionWidth').value),height:Number($('#regionHeight').value)};
   if(mode==='desktop'&&ui.sources.monitors.length){const left=Math.min(...ui.sources.monitors.map(x=>x.x)),top=Math.min(...ui.sources.monitors.map(x=>x.y)),right=Math.max(...ui.sources.monitors.map(x=>x.x+x.width)),bottom=Math.max(...ui.sources.monitors.map(x=>x.y+x.height));return{x:left,y:top,width:right-left,height:bottom-top};} return null;
 }
-async function refreshCapturePreview(save = true) {
-  if (ui.source!=='screen'||ui.previewBusy||ui.status?.running||!previewAllowed()) return; ui.previewBusy=true;
+// force — явное нажатие «Обновить кадр»: один снимок даже при выключенном
+// предпросмотре. Раньше кнопка при выключенном глазе молча ничего не делала.
+async function refreshCapturePreview(save = true, force = false) {
+  if (ui.source!=='screen'||ui.previewBusy||ui.status?.running||(!previewAllowed()&&!force)) return; ui.previewBusy=true;
   try {
     if(save)await saveConfig(); const result=await api('/api/capture-preview',{method:'POST'}); const monitor=$('#monitor');
+    if(ui.source!=='screen'||ui.status?.running)return;
     monitor.classList.toggle('window-paused',Boolean(result.minimized||result.unavailable));
-    if(result.minimized){monitor.classList.remove('source-preview');monitorPlaceholder('ОКНО СВЁРНУТО','В эфире заглушка, звук продолжает идти','minus');}
-    else if(result.unavailable){monitor.classList.remove('source-preview');monitorPlaceholder('ОКНО НЕДОСТУПНО','Откройте приложение или обновите список','alert');}
-    else{$('#capturePreview').src=`${result.url}&cache=${Date.now()}`;monitor.classList.add('source-preview');monitorPlaceholder('ИСТОЧНИК НЕ ВЫБРАН','Выберите медиа, окно, монитор или область');}
-    $('#monitorBadge').textContent=result.minimized?'PAUSED':result.unavailable?'MISSING':'PREVIEW';
+    if(result.minimized){monitor.classList.remove('source-preview');monitorPlaceholder('Окно свёрнуто','В эфире заглушка, звук продолжает идти','minus');}
+    else if(result.unavailable){monitor.classList.remove('source-preview');monitorPlaceholder('Окно недоступно','Откройте приложение или обновите список','alert');}
+    else{$('#capturePreview').src=`${result.url}&cache=${Date.now()}`;monitor.classList.add('source-preview');}
+    setText($('#monitorBadge'),result.minimized?'Окно свёрнуто':result.unavailable?'Окно не найдено':previewAllowed()?'Предпросмотр':'Снимок');
+    scheduleCaptureFrames();
   } catch(error){
-    if(!$('#monitor').classList.contains('source-preview')){monitorPlaceholder('НЕТ ПРЕДПРОСМОТРА',error.message||'Обновите список источников','alert');$('#monitorBadge').textContent='RETRY';}
+    if(!$('#monitor').classList.contains('source-preview')){monitorPlaceholder('Нет предпросмотра',error.message||'Обновите список источников','alert');setText($('#monitorBadge'),'Нет кадра');}
     throw error;
   } finally { ui.previewBusy=false; }
 }
@@ -681,7 +801,12 @@ $('#monitorSource').addEventListener('change',()=>refreshCapturePreview().catch(
 $('#windowSource').addEventListener('change',()=>refreshCapturePreview().catch(error=>toast(error.message,true)));
 
 $('#refreshSources').addEventListener('click',async()=>{try{await loadCaptureSources();toast('Список обновлён');}catch(error){toast(error.message,true);}});
-$('#refreshPreview').addEventListener('click',()=>refreshCapturePreview().catch(error=>toast(error.message,true))); $('#highlightSource').addEventListener('click',highlightSelected);
+$('#refreshPreview').addEventListener('click',()=>{
+  if(ui.status?.running)return toast('Идёт эфир — картинка источника видна в самом эфире',true);
+  refreshCapturePreview(true,true).catch(error=>toast(error.message,true));
+});
+// Координаты области, введённые руками, тоже должны сразу попадать в кадр.
+for(const id of ['#regionX','#regionY','#regionWidth','#regionHeight'])$(id).addEventListener('change',()=>refreshCapturePreview().catch(error=>toast(error.message,true))); $('#highlightSource').addEventListener('click',highlightSelected);
 $('#applyCapture').addEventListener('click',async()=>{const button=$('#applyCapture');button.disabled=true;try{await saveConfig();$('#monitor').classList.remove('source-preview','window-paused');render(await api('/api/start/screen',{method:'POST'}));toast('Источник применён');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
 $('#selectRegion').addEventListener('click',()=>{window.location.href='vrcast://select-region';}); $('#pickLocal').addEventListener('click',()=>{window.location.href='vrcast://pick-media';});
 window.applySelectedRegion=region=>{$('#regionX').value=region.x;$('#regionY').value=region.y;$('#regionWidth').value=region.width;$('#regionHeight').value=region.height;refreshCapturePreview().catch(()=>{});toast(`Выбрано ${region.width}×${region.height}`);};
@@ -692,7 +817,7 @@ $('#queueList').addEventListener('click',async event=>{
   const row=event.target.closest('.queue-item'); if(!row)return;
   const id=row.dataset.id;
   try{
-    if(event.target.closest('.remove-item')){ if(id===ui.localPreviewId)очиститьЛокальныйПредпросмотр(); render(await api(`/api/queue/${id}`,{method:'DELETE'})); return; }
+    if(event.target.closest('.remove-item')){ if(id===ui.localPreviewId)очиститьЛокальныйПредпросмотр(); ui.localNote=null; render(await api(`/api/queue/${encodeURIComponent(id)}`,{method:'DELETE'})); return; }
     if($('#playerMode').value==='unity'){ ui.unitySelectedId=id; if(ui.status)render(ui.status); toast('Трек выбран — нажмите «Подготовить».'); return; }
     // Эфир идёт — переключаемся на этот трек прямо в эфире.
     if(ui.status?.running){ await playback('jump',{id}); return; }
@@ -701,13 +826,15 @@ $('#queueList').addEventListener('click',async event=>{
     показатьЛокальныйПредпросмотр(id);
   }catch(error){toast(error.message,true);}
 });
-$('#queueList').addEventListener('keydown',event=>{if((event.key==='Enter'||event.key===' ')&&event.target.matches('.queue-item')){event.preventDefault();playback('jump',{id:event.target.dataset.id});}});
-$('#clearQueue').addEventListener('click',async()=>{try{render(await api('/api/queue',{method:'DELETE'}));}catch(error){toast(error.message,true);}});
+// Enter/пробел делают то же, что щелчок. Раньше клавиша всегда слала «jump»,
+// и без эфира это молча запускало трансляцию вместо предпросмотра.
+$('#queueList').addEventListener('keydown',event=>{if((event.key==='Enter'||event.key===' ')&&event.target.matches('.queue-item')){event.preventDefault();event.target.click();}});
+$('#clearQueue').addEventListener('click',async()=>{try{очиститьЛокальныйПредпросмотр();ui.localNote=null;render(await api('/api/queue',{method:'DELETE'}));}catch(error){toast(error.message,true);}});
 $('#templateSelect').addEventListener('change',event=>{const item=ui.status?.templates?.find(entry=>entry.id===event.target.value);if(item)$('#templateName').value=item.name;$('#loadTemplate').disabled=!item;$('#appendTemplate').disabled=!item;$('#deleteTemplate').disabled=!item;});
-$('#saveTemplate').addEventListener('click',async()=>{const button=$('#saveTemplate');button.disabled=true;try{const result=await api('/api/templates',{method:'POST',body:JSON.stringify({id:$('#templateSelect').value,name:$('#templateName').value})});render(result.status);$('#templateSelect').value=result.id;$('#templateSelect').dispatchEvent(new Event('change'));toast('Шаблон очереди сохранён');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
-async function loadTemplate(append){const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}/load`,{method:'POST',body:JSON.stringify({append})}));toast(append?'Шаблон добавлен к очереди':'Шаблон загружен');}catch(error){toast(error.message,true);}}
+$('#saveTemplate').addEventListener('click',async()=>{const button=$('#saveTemplate');button.disabled=true;try{const result=await api('/api/templates',{method:'POST',body:JSON.stringify({id:$('#templateSelect').value,name:$('#templateName').value})});render(result.status);$('#templateSelect').value=result.id;$('#templateSelect').dispatchEvent(new Event('change'));toast('Набор сохранён');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
+async function loadTemplate(append){const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}/load`,{method:'POST',body:JSON.stringify({append})}));toast(append?'Набор добавлен к списку':'Набор загружен');}catch(error){toast(error.message,true);}}
 $('#loadTemplate').addEventListener('click',()=>loadTemplate(false)); $('#appendTemplate').addEventListener('click',()=>loadTemplate(true));
-$('#deleteTemplate').addEventListener('click',async()=>{const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}`,{method:'DELETE'}));$('#templateName').value='';toast('Шаблон удалён');}catch(error){toast(error.message,true);}});
+$('#deleteTemplate').addEventListener('click',async()=>{const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}`,{method:'DELETE'}));$('#templateName').value='';toast('Набор удалён');}catch(error){toast(error.message,true);}});
 // Форма добавления: два ясных случая вместо одной анкеты на всё.
 // «Уже настроен» — вставили адрес и ключ, который выдал сервер при установке.
 // «Настроить с нуля» — пароль root, и программа сама всё поставит.
@@ -804,48 +931,58 @@ $('#previewToggle').addEventListener('click',()=>{
   ui.previewOn=!ui.previewOn;
   localStorage.setItem('previewOn',ui.previewOn?'1':'0');
   paintPreviewToggle();
-  if (ui.previewOn) { if (ui.status) startPreview(ui.status); }
-  else { stopPreview(); if (ui.status?.running) monitorPlaceholder('Картинка выключена','Эфир идёт, окно не тратит процессор','eye-off'); }
+  if (!ui.previewOn) stopPreview();
+  if (ui.status) render(ui.status);
+  if (ui.previewOn && ui.source==='screen' && !ui.status?.running) refreshCapturePreview(false).catch(()=>{});
   toast(ui.previewOn?'Предпросмотр включён':'Предпросмотр выключен — процессор свободнее');
 });
-// Свёрнутое окно программы не должно ничего декодировать.
-document.addEventListener('visibilitychange',()=>{
-  ui.windowHidden=document.hidden;
-  if (document.hidden) stopPreview(); else { refresh(); if (ui.status) startPreview(ui.status); }
-});
-for (const [event,hidden] of [['vrcast-hidden',true],['vrcast-shown',false]]) {
-  document.addEventListener(event,()=>{
-    ui.windowHidden=hidden;
-    if (hidden) stopPreview(); else { refresh(); if (ui.status) startPreview(ui.status); }
-  });
+// Свёрнутое окно программы не должно ничего декодировать, анимировать и
+// часто опрашивать сервер. WebView2 при сворачивании не всегда скрывает
+// страницу для браузера, поэтому оболочка шлёт свои vrcast-hidden/-shown.
+function setWindowHidden(hidden) {
+  if (ui.windowHidden===hidden) return;
+  ui.windowHidden=hidden;
+  document.documentElement.classList.toggle('window-hidden',hidden);
+  if (hidden) stopPreview();
+  else if (ui.status) { render(ui.status); if (ui.source==='screen'&&!ui.status.running) refreshCapturePreview(false).catch(()=>{}); }
+  scheduleCaptureFrames();
+  // Вернулись — сразу свежее состояние, а не через пять секунд.
+  schedulePoll(hidden?undefined:0);
 }
+document.addEventListener('visibilitychange',()=>setWindowHidden(document.hidden));
+document.addEventListener('vrcast-hidden',()=>setWindowHidden(true));
+document.addEventListener('vrcast-shown',()=>setWindowHidden(document.hidden));
 $('#clearCache').addEventListener('click',async()=>{
-  try{ render(await api('/api/cache/clear',{method:'POST'})); toast('Кеш очищен'); }
+  try{ render(await api('/api/cache/clear',{method:'POST'})); toast('Скачанное удалено — играющий трек не тронут'); }
   catch(error){ toast(error.message,true); }
 });
-$('#seekBar').addEventListener('input',event=>{ui.seeking=true;const percent=Number(event.target.value)/10;event.target.style.setProperty('--seek',`${percent}%`);const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*percent/100;$('#elapsedTime').textContent=formatTime(ui.seekDraft);});
-$('#seekBar').addEventListener('change',async event=>{const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*Number(event.target.value)/1000;ui.seeking=false;ui.seekPending=true;ui.seekRevision=Number(ui.status?.playback?.revision||0)+1;if(!await playback('seek',{position:ui.seekDraft}))ui.seekPending=false;});
-function applyQualityLive(kind,что='Качество'){clearTimeout(ui.liveApplyTimer);ui.liveApplyTimer=setTimeout(async()=>{try{const live=ui.status?.activeKind===kind;render(await saveConfig(live));toast(live?`${что} применён${что==='Качество'?'о':''}`:`${что} сохранён${что==='Качество'?'о':''}`);}catch(error){toast(error.message,true);}},350);}
+$('#seekBar').addEventListener('input',event=>{ui.seeking=true;event.target._step=undefined;const percent=Number(event.target.value)/10;event.target.style.setProperty('--seek',`${percent}%`);const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*percent/100;setText($('#elapsedTime'),formatTime(ui.seekDraft));});
+$('#seekBar').addEventListener('change',async event=>{const total=Number(ui.status?.progress?.duration)||0;ui.seekDraft=total*Number(event.target.value)/1000;ui.seeking=false;ui.seekPending=true;ui.seekRevision=Number(ui.status?.playback?.revision||0)+1;if(!await playback('seek',{position:ui.seekDraft})){ui.seekPending=false;renderProgress();}});
+function applyQualityLive(kind,что='Качество'){ui.configEditUntil=Date.now()+2500;clearTimeout(ui.liveApplyTimer);ui.liveApplyTimer=setTimeout(async()=>{try{const live=ui.status?.activeKind===kind;render(await saveConfig(live));
+  // «Качество» — среднего рода: раньше выходило «Качество применёно».
+  const о=что==='Качество';toast(live?`${что} ${о?'применено':'применён'}`:`${что} ${о?'сохранено':'сохранён'}`);}catch(error){ui.configEditUntil=0;toast(error.message,true);if(ui.status)syncConfigControls(ui.status);}},350);}
 $('#quality').addEventListener('change',()=>applyQualityLive('screen'));$('#fps').addEventListener('change',()=>applyQualityLive('screen'));
 // Битрейт применяется к тому, что идёт прямо сейчас: раньше выбор просто лежал
 // в настройках до следующего запуска, и казалось, что регулятор ничего не делает.
 $('#videoBitrate').addEventListener('change',()=>applyQualityLive(ui.status?.activeKind||'screen','Битрейт'));
 $('#encoderMode').addEventListener('change',()=>applyQualityLive(ui.status?.activeKind||'screen','Кодировщик'));
-$('#tunnelProviderSelect').addEventListener('change',async()=>{try{render(await saveConfig(false));toast('Быстрая ссылка переподключается');}catch(error){toast(error.message,true);}});
+$('#tunnelProviderSelect').addEventListener('change',async()=>{ui.configEditUntil=Date.now()+2500;try{render(await saveConfig(false));toast(ui.output==='tunnel'?'Быстрая ссылка переподключается':'Сохранено');}catch(error){ui.configEditUntil=0;toast(error.message,true);}});
 $('#mediaQuality').addEventListener('change',()=>applyQualityLive('queue'));$('#mediaFps').addEventListener('change',()=>applyQualityLive('queue'));
+// Не получилось — кнопка возвращается к тому, что на самом деле стоит на
+// сервере. Раньше она оставалась на новом значении, которого не было.
 $('#speedSelect').addEventListener('click',async()=>{const current=Number($('#speedSelect').dataset.value)||1;
   const next=SPEED_STEPS[(SPEED_STEPS.indexOf(current)+1)%SPEED_STEPS.length];
-  paintSpeed(next);ui.speedPendingUntil=Date.now()+1500;await playback('speed',{speed:next});paintSpeed(next);ui.speedPendingUntil=0;});
+  paintSpeed(next);ui.speedPendingUntil=Date.now()+1500;const ok=await playback('speed',{speed:next});ui.speedPendingUntil=0;paintSpeed(ok?next:(ui.status?.playback?.speed||1));});
 $('#loopSelect').addEventListener('click',async()=>{const current=$('#loopSelect').dataset.value||'once';
   const next=LOOP_STEPS[(LOOP_STEPS.findIndex(item=>item[0]===current)+1)%LOOP_STEPS.length][0];
-  paintLoop(next);ui.loopPendingUntil=Date.now()+1500;await playback('loop',{mode:next});paintLoop(next);ui.loopPendingUntil=0;});
+  paintLoop(next);ui.loopPendingUntil=Date.now()+1500;const ok=await playback('loop',{mode:next});ui.loopPendingUntil=0;paintLoop(ok?next:(ui.status?.playback?.loopMode||'once'));});
 // Сегменты: один клик — одно изменение, без второго выпадающего списка
 // поверх первого. Значение продолжает жить в скрытом select, поэтому весь
 // остальной код (сохранение настроек, восстановление при запуске) не менялся.
 function paintSegments(select) {
   const box=document.querySelector(`.seg[data-for="${select.id}"]`);
   if(!box)return;
-  for(const button of box.children)button.setAttribute('aria-checked',String(button.dataset.value===select.value));
+  for(const button of box.children){const on=String(button.dataset.value===select.value);if(button.getAttribute('aria-checked')!==on)button.setAttribute('aria-checked',on);}
 }
 
 function buildSegments() {
@@ -875,35 +1012,103 @@ function buildSegments() {
 
 function paintVolume(input, output) { const value=Number(input.value); output.value=`${value}%`; input.style.setProperty('--volume',`${value/input.max*100}%`); }
 $('#mediaVolume').addEventListener('input',event=>paintVolume(event.target,$('#mediaVolumeValue')));
-$('#mediaVolume').addEventListener('change',async event=>{if(ui.status?.activeKind==='queue')playback('volume',{volume:Number(event.target.value)/100});else try{await saveConfig();}catch(error){toast(error.message,true);}});
+$('#mediaVolume').addEventListener('change',async event=>{if(ui.status?.activeKind==='queue')playback('volume',{volume:Number(event.target.value)/100});else try{render(await saveConfig());}catch(error){toast(error.message,true);}});
 $('#captureVolume').addEventListener('input',event=>paintVolume(event.target,$('#captureVolumeValue')));
+// Громкость экрана раньше только рисовалась: в настройки она попадала лишь при
+// следующем пуске, а в идущем эфире не менялась вовсе.
+$('#captureVolume').addEventListener('change',async()=>{
+  try{ const live=ui.status?.activeKind==='screen'; render(await saveConfig(live)); toast(live?'Громкость эфира изменена':'Громкость сохранена'); }
+  catch(error){ toast(error.message,true); }
+});
 
 $('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button.disabled=true;try{await saveConfig();const тело=ui.source==='queue'&&ui.localPreviewId?JSON.stringify({id:ui.localPreviewId}):undefined;
-  render(await api(`/api/start/${ui.source}`,{method:'POST',body:тело}));ui.localPreviewId='';toast(ui.output==='tunnel'?'Запускаю эфир и получаю публичную ссылку':'Эфир запускается');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
+  $('#monitor').classList.remove('source-preview','window-paused');
+  render(await api(`/api/start/${ui.source}`,{method:'POST',body:тело}));ui.localPreviewId='';ui.localNote=null;toast(ui.output==='tunnel'?'Запускаю эфир и получаю публичную ссылку':'Эфир запускается');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
 $('#stopLive').addEventListener('click',async()=>{try{render(await api('/api/stop',{method:'POST'}));}catch(error){toast(error.message,true);}});
 $('#updateButton').addEventListener('click',()=>{const update=ui.status?.update;if(!update?.available)return;ui.offeredVersion=update.version;paintUpdateDialog(update);if(!updateDialog.open)updateDialog.showModal();});
-$('#showLogs').addEventListener('click',()=>$('#logDialog').showModal());
+$('#showLogs').addEventListener('click',()=>{paintLogs();$('#logDialog').showModal();const журнал=$('#logs');журнал.scrollTop=журнал.scrollHeight;schedulePoll(0);});
 $('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast://open-folder';});
 $('#appSoundSettings').addEventListener('click',()=>{window.location.href='vrcast://app-sound';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
-// Свёрнутое окно состояние не спрашивает: смотреть его некому, а каждый
-// запрос — работа сервера в том же event loop, через который идёт эфир.
-// При разворачивании окно сразу обновляется само (см. vrcast-shown ниже).
-async function refresh(){if(ui.windowHidden)return;try{render(await api('/api/status'));}catch(error){if(ui.status)toast(error.message,true);}}
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();render(state);await loadCaptureSources();setInterval(refresh,800);setInterval(renderProgress,200);// Снимок источника обновляем только когда открыта вкладка «Экран», окно видно и эфир не идёт: раньше программа бесконечно порождала ffmpeg каждые две секунды даже на простое.
-// Пока открыта вкладка «Экран» и эфир не идёт, сервер держит живой поток
-// картинки — забираем её пятнадцать раз в секунду. Раз в две секунды просим
-// сервер поддержать поток: без этого он гаснет сам через пять секунд.
-ui.previewTimer=setInterval(()=>{if(ui.source!=='screen'||document.hidden||ui.windowHidden||ui.status?.activeKind==='screen')return;refreshCapturePreview(false).catch(()=>{});},2000);
-ui.previewFrameTimer=setInterval(()=>{
-  if(ui.source!=='screen'||document.hidden||ui.windowHidden||ui.status?.activeKind==='screen')return;
-  const снимок=$('#capturePreview');
-  if(!снимок.getAttribute('src'))return;
-  снимок.src=`/api/capture-preview?time=${Date.now()}`;
-},66);
+// Опрос состояния подстраивается под то, что происходит. Раньше запрос шёл
+// каждые 800 мс круглосуточно, а часы перемотки перерисовывались пять раз
+// в секунду даже без эфира и на свёрнутом окне.
+function pollDelay() {
+  const s=ui.status;
+  if (ui.windowHidden) return 5000;
+  if (!s) return 1000;
+  const занят=s.running||$('#logDialog').open||ui.deploying||ui.seekPending
+    ||s.playback?.busy||s.playback?.buffering||s.update?.installing||(s.cache?.downloading||[]).length
+    ||Object.values(s.toolDownloads||{}).some(item=>item.state==='work')
+    ||['building','recording','finalizing'].includes(s.compatibility?.unity?.queue?.state)
+    ||['building','recording','finalizing'].includes(s.compatibility?.unity?.capture?.state)
+    ||(s.config?.outputMode==='tunnel'&&!(s.tunnel?.serves===true||s.tunnel?.serves===false))
+    ||(s.config?.outputMode==='remote'&&s.rtsp?.remote?.reachable==null)
+    ||s.stream?.state==='starting';
+  return занят?1000:2500;
+}
+async function refresh(){
+  try{
+    const response=await fetch('/api/status',{cache:'no-store'});
+    if(!response.ok)throw new Error(`Ошибка ${response.status}`);
+    const text=await response.text();
+    ui.offline=false;
+    // Ничего не поменялось — и рисовать нечего. На простое это почти каждый опрос.
+    if(text===ui.lastPollText&&ui.status)return;
+    const state=JSON.parse(text);
+    render(state);
+    ui.lastPollText=text;
+  }catch{
+    // Одно сообщение на обрыв, а не тост на каждый опрос.
+    if(ui.status&&!ui.offline){ui.offline=true;toast('Нет связи с программой — она перезапускается. Подождите пару секунд.',true);}
+  }
+}
+function schedulePoll(delay=pollDelay()) {
+  clearTimeout(ui.pollTimer);
+  ui.pollTimer=setTimeout(async()=>{ await refresh(); schedulePoll(); },delay);
+}
+// Часы и полоса перемотки идут сами между опросами, но только пока видео
+// действительно играет и окно видно.
+function schedulePlaybackClock() {
+  const s=ui.status;
+  const нужно=Boolean(s?.running&&s.activeKind==='queue'&&!s.playback?.paused&&s.progress&&!ui.windowHidden);
+  if(нужно&&!ui.clockTimer)ui.clockTimer=setInterval(renderProgress,250);
+  else if(!нужно&&ui.clockTimer){clearInterval(ui.clockTimer);ui.clockTimer=null;}
+}
+// Пока открыта вкладка «Экран», окно видно и эфир не идёт, сервер держит живой
+// поток картинки источника. Следующий кадр просим, только когда пришёл
+// предыдущий: раньше запрос уходил каждые 66 мс, сколько бы ни висело старых.
+// Раз в две секунды просим сервер поддержать поток — иначе он гаснет сам.
+function captureFramesWanted() {
+  return ui.source==='screen'&&previewAllowed()&&!ui.status?.running&&$('#monitor').classList.contains('source-preview');
+}
+function scheduleCaptureFrames() {
+  const нужно=captureFramesWanted();
+  if(нужно&&!ui.keepAliveTimer)ui.keepAliveTimer=setInterval(()=>{ if(captureFramesWanted())refreshCapturePreview(false).catch(()=>{}); else scheduleCaptureFrames(); },2000);
+  else if(!нужно&&ui.keepAliveTimer){clearInterval(ui.keepAliveTimer);ui.keepAliveTimer=null;}
+}
+$('#capturePreview').addEventListener('load',()=>{
+  if(!captureFramesWanted())return;
+  clearTimeout(ui.frameTimer);
+  ui.frameTimer=setTimeout(()=>{ if(captureFramesWanted())$('#capturePreview').src=`/api/capture-preview?time=${Date.now()}`; },66);
+});
+$('#capturePreview').addEventListener('error',()=>{
+  // Кадр ещё не готов — пробуем реже, а не долбим сервер 15 раз в секунду.
+  if(!captureFramesWanted())return;
+  clearTimeout(ui.frameTimer);
+  ui.frameTimer=setTimeout(()=>{ if(captureFramesWanted())$('#capturePreview').src=`/api/capture-preview?time=${Date.now()}`; },1000);
+});
+
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
+  ui.windowHidden=document.hidden; document.documentElement.classList.toggle('window-hidden',document.hidden);
+  render(state);
+  // Опрос запускаем до списка источников: тот идёт через PowerShell и может
+  // упасть — раньше тогда интерфейс так и оставался без обновлений.
+  schedulePoll();
+  await loadCaptureSources().catch(error=>toast(error.message,true));
 const stall={time:0,strikes:0};
-setInterval(()=>{const video=$('#streamPreview');
-  if(!ui.hls||!ui.status?.running||ui.status?.stream?.state!=='ready'){stall.strikes=0;stall.time=video.currentTime;return;}
+setInterval(()=>{if(!ui.hls)return;const video=$('#streamPreview');
+  if(!ui.status?.running||ui.status?.stream?.state!=='ready'){stall.strikes=0;stall.time=video.currentTime;return;}
   if(video.currentTime===stall.time){if(++stall.strikes>=3){stall.strikes=0;ui.hls.destroy();ui.hls=null;ui.previewUrl='';startPreview(ui.status);}}
   else stall.strikes=0;
   stall.time=video.currentTime;},3000);}
@@ -958,18 +1163,8 @@ document.addEventListener('keydown',event=>{ if(event.key==='Escape')togglePlaye
 $('#copyLogs').addEventListener('click',async()=>{
   const text=$('#logs').textContent||'';
   const ok=await copyText(text);
-  toast(ok?'Журнал скопирован':'Не удалось скопировать');
+  toast(ok?'Журнал скопирован':'Не удалось скопировать',!ok);
 });
-
-// Эфир поднимается сам при запуске программы: ссылка работает сразу, в кадре
-// стоит заставка. Видео включает пользователь — кнопкой в плеере.
-async function startSource(){
-  const button=$('#togglePause');
-  button.disabled=true;
-  try{ await saveConfig(); render(await api(`/api/start/${ui.source}`,{method:'POST'})); }
-  catch(error){ toast(error.message,true); }
-  finally{ button.disabled=false; }
-}
 
 
 // Обновление: окно появляется само, когда на GitHub вышла версия новее.
@@ -982,30 +1177,38 @@ function updateBlocked(version){
 }
 
 function paintUpdateDialog(update){
-  $('#updateVersion').textContent=update.version||'';
-  $('#updateNotes').textContent=(update.notes||'').replace(/^#{1,6}\s*/gm,'').replace(/\*\*(.+?)\*\*/g,'$1').replace(/`/g,'').trim()||'Исправления и улучшения.';
+  setText($('#updateVersion'),update.version||'');
+  setText($('#updateNotes'),(update.notes||'').replace(/^#{1,6}\s*/gm,'').replace(/\*\*(.+?)\*\*/g,'$1').replace(/`/g,'').trim()||'Исправления и улучшения.');
   // Качаем и ставим по кнопке. Загрузка не начинается сама — только после
   // нажатия «Обновить»; дальше видно проценты, потом установка и перезапуск.
   const процент=Number(update.percent)||0;
   const качается=update.installing&&!update.ready;
   const ставится=update.installing&&update.ready;
+  // «Готова к установке» писалось и тогда, когда файл ещё даже не скачан.
   const строка=update.error?`Не удалось: ${update.error}`
     :ставится?'Устанавливаю, программа перезапустится…'
     :качается?(update.totalMb?`Скачиваю ${update.version} — ${update.doneMb||0} из ${update.totalMb} МБ`:'Начинаю загрузку…')
-    :`Версия ${update.version} готова к установке. Нажмите «Обновить».`;
-  $('#updateProgress').textContent=строка;
-  $('#updateBar').hidden=!качается;
-  $('#updateBar').firstElementChild.style.width=`${качается?процент:0}%`;
-  $('#updateNow').disabled=Boolean(update.installing);
-  $('#updateNow').textContent=update.error?'Повторить':ставится?'Устанавливаю…':качается?`Скачиваю ${процент}%`:'Обновить';
+    :update.ready?`Версия ${update.version} скачана и готова к установке.`
+    :`Вышла версия ${update.version}. «Обновить» — скачаю и установлю, программа перезапустится.`;
+  setText($('#updateProgress'),строка);
+  setHidden($('#updateBar'),!качается);
+  const ширина=`${качается?процент:0}%`, полоса=$('#updateBar').firstElementChild;
+  if(полоса.style.width!==ширина)полоса.style.width=ширина;
+  setDisabled($('#updateNow'),Boolean(update.installing));
+  setText($('#updateNow'),update.error?'Повторить':ставится?'Устанавливаю…':качается?`Скачиваю ${процент}%`:'Обновить');
 }
 function offerUpdate(update){
   if(!update?.available||!update.version)return;
-  paintUpdateDialog(update);
-  if(updateDialog.open||updateBlocked(update.version))return;
+  // Закрытое окно не перерисовываем на каждом опросе — его никто не видит.
+  if(updateDialog.open)paintUpdateDialog(update);
+  // Закрыли Escape'ом — до следующего запуска не навязываемся. Раньше окно
+  // через секунду выскакивало снова, и закрыть его можно было только «Позже».
+  if(updateDialog.open||updateBlocked(update.version)||ui.updateDismissed===update.version)return;
   ui.offeredVersion=update.version;
+  paintUpdateDialog(update);
   updateDialog.showModal();
 }
+updateDialog.addEventListener('close',()=>{ if(!ui.status?.update?.installing)ui.updateDismissed=ui.offeredVersion; });
 $('#updateLater').addEventListener('click',()=>{
   localStorage.setItem('updateSnooze',String(Date.now()+24*60*60*1000));
   updateDialog.close(); toast('Напомню завтра');
@@ -1020,8 +1223,8 @@ $('#updateNow').addEventListener('click',async()=>{
   // приходит в статусе и рисуется в этом же окне; когда файл готов — сервер
   // подменяет exe и перезапускается, поэтому под конец связь оборвётся, и это
   // норма, а не сбой.
-  try{ render(await api('/api/update/apply',{method:'POST'})); }
-  catch(error){ if(!/fetch|network|Failed/i.test(String(error.message)))toast(error.message,true); }
+  try{ const state=await api('/api/update/apply',{method:'POST'}); render(state); paintUpdateDialog(state.update||{}); schedulePoll(0); }
+  catch(error){ if(!/fetch|network|Failed|Нет связи/i.test(String(error.message)))toast(error.message,true); $('#updateNow').disabled=false; }
 });
 
 // WHEP: браузер отправляет предложение, медиасервер отвечает — и картинка идёт
