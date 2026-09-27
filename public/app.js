@@ -773,7 +773,12 @@ async function loadCaptureSources() {
 }
 
 async function refreshWindows() {
-  const selected=$('#windowSource').value, windows=await api('/api/windows');
+  const windows=await api('/api/windows');
+  // Выбор читаем ПОСЛЕ ответа, а не до: запрос идёт через PowerShell 1–2 с, и
+  // за это время загрузка источников успевала выставить сохранённое окно. Старое
+  // (пустое) значение его затирало — при режиме «звук окна» выбранное окно
+  // терялось на каждом запуске, и «Вещать экран» падало с «Выберите окно».
+  const selected=$('#windowSource').value||(!ui.sourcesLoaded?ui.status?.config?.captureWindowHandle||'':'');
   ui.sources.windows=windows;
   fillWindowPicker(windows,selected);
 }
@@ -1355,6 +1360,25 @@ function закрытьНастройки(сразу=false){
 $('#openSettings').addEventListener('click',открытьНастройки);
 $('#closeSettings').addEventListener('click',()=>закрытьНастройки());
 settingsDialog.addEventListener('cancel',event=>{ event.preventDefault(); закрытьНастройки(); });
+// Остальные окна (журнал, сервер, обновление) закрываются так же плавно, как
+// настройки: их close() и Escape сначала проигрывают затухание. Раньше они
+// исчезали мгновенно, и окна программы вели себя по-разному.
+for(const окно of document.querySelectorAll('dialog')){
+  if(окно===settingsDialog)continue;
+  const закрыть=окно.close.bind(окно), показать=окно.showModal.bind(окно);
+  окно.close=()=>{
+    if(!окно.open||окно.classList.contains('closing'))return;
+    if(меньшеДвижения.matches){ закрыть(); return; }
+    окно.classList.add('closing');
+    let таймер=0;
+    const готово=()=>{ clearTimeout(таймер); окно.removeEventListener('animationend',готово); if(!окно.classList.contains('closing'))return; окно.classList.remove('closing'); if(окно.open)закрыть(); };
+    таймер=setTimeout(готово,220);
+    окно.addEventListener('animationend',готово);
+  };
+  // Открыли снова, пока идёт затухание, — довести закрытие мгновенно, иначе showModal упадёт.
+  окно.showModal=()=>{ if(окно.classList.contains('closing')){ окно.classList.remove('closing'); закрыть(); } показать(); };
+  окно.addEventListener('cancel',event=>{ event.preventDefault(); окно.close(); });
+}
 let настройкиНажалиНаФон=false;
 settingsDialog.addEventListener('mousedown',event=>{ настройкиНажалиНаФон=(event.target===settingsDialog); });
 settingsDialog.addEventListener('click',event=>{ if(event.target===settingsDialog&&настройкиНажалиНаФон)закрытьНастройки(); });

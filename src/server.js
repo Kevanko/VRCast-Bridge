@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.13';
+const APP_VERSION = '0.54.14';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
