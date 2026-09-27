@@ -677,3 +677,32 @@ test('испорченный файл на повторе не перезапу�
   await api('/api/config', { outputMode: 'local', loopMode: 'once' });
   await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
 });
+
+test('неудачное переключение на захват не гасит идущий эфир видео', async () => {
+  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  const file = join(dataDirectory, 'switch-guard.mp4');
+  const made = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30',
+    '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '20', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-shortest', '-y', file], { windowsHide: true, timeout: 30000 });
+  assert.equal(made.status, 0);
+  await api('/api/queue/local', { paths: [file] });
+  await api('/api/start/queue');
+  for (let i = 0; i < 40 && (await currentStatus()).activeKind !== 'queue'; i++) await new Promise(resolve => setTimeout(resolve, 250));
+  try {
+    // Окно не выбрано — захват запускать нельзя, но и эфир видео трогать нельзя.
+    await api('/api/config', { captureMode: 'window', captureWindowHandle: '', audioMode: 'none' });
+    const окно = await api('/api/start/screen');
+    assert.equal(окно.status, 400);
+    assert.match((await окно.json()).error, /окно/i);
+    assert.equal((await currentStatus()).activeKind, 'queue', 'эфир видео должен продолжиться');
+    // Звук окна без процесса — раньше молча уходил весь системный звук.
+    await api('/api/config', { captureMode: 'monitor', audioMode: 'process', audioProcessId: '' });
+    const звук = await api('/api/start/screen');
+    assert.equal(звук.status, 400);
+    assert.match((await звук.json()).error, /звука приложения/i);
+    assert.equal((await currentStatus()).activeKind, 'queue', 'эфир видео должен продолжиться');
+  } finally {
+    await api('/api/config', { captureMode: 'monitor', audioMode: 'system' });
+    await api('/api/stop');
+    await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  }
+});

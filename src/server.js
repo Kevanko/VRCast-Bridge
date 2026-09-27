@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.12';
+const APP_VERSION = '0.54.13';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -2509,6 +2509,14 @@ async function startScreenInner() {
   // требует нового захвата окна, но звук при этом трогать незачем.
   keepAudioHelper = тотЖеЗахват && Boolean(activeAuxProcess) && audioHelperSignature() === audioHelperKey;
   keepWindowHelper = тотЖеЗахват && Boolean(activeWindowProcess) && windowHelperSignature(текущийПрофиль) === windowHelperKey;
+  // Проверки настроек — ДО остановки текущего эфира. Раньше они шли после
+  // stopActive, и неудачная попытка переключиться с плейлиста на захват
+  // (окно не выбрано) просто гасила работающий эфир у всех зрителей.
+  if (config.captureMode === 'window' && !/^\d+$/.test(String(config.captureWindowHandle))) throw new Error('Выберите окно для захвата.');
+  // Звук окна без процесса: раньше эта проверка стояла после добавления
+  // --local-volume и не срабатывала никогда — помощник уходил без --pid, то есть
+  // в режим ВСЕГО системного звука, и в эфир попадало всё (Discord, уведомления).
+  if (config.audioMode === 'process' && !/^\d+$/.test(String(config.audioProcessId))) throw new Error('Для звука приложения выберите окно с работающим процессом.');
   stopActive(false, true, true);
   // Список мониторов и окон спрашивается у PowerShell — это секунда и больше.
   // Нажатый за это время «Стоп» или запуск очереди раньше ничего не отменял:
@@ -2531,7 +2539,6 @@ async function startScreenInner() {
   let selectedWindow = null;
   let ddagrabOutput = null;
   if (config.captureMode === 'window') {
-    if (!/^\d+$/.test(String(config.captureWindowHandle))) throw new Error('Выберите окно для захвата.');
     selectedWindow = (await listWindows()).find(item => item.handle === String(config.captureWindowHandle)) || null;
     проверитьОтмену();
       windowCaptureState = !selectedWindow ? 'missing' : selectedWindow.minimized ? 'minimized' : 'visible';
@@ -2572,7 +2579,6 @@ async function startScreenInner() {
     // ровно на столько же усиливаем звук в эфире. Приглушить полностью нельзя —
     // захват идёт после регулятора, и вместе с колонками замолчал бы и стрим.
     if (config.audioMode === 'process') audioHelperArgs.push('--local-volume', localAppLevel().toFixed(3));
-    if (config.audioMode === 'process' && !audioHelperArgs.length) throw new Error('Для звука приложения выберите окно с работающим процессом.');
     // Без use_wallclock_as_timestamps: штамп времени чтения из пайпа + aresample
     // async образуют петлю (всплеск → тишина → всплеск дальше), разгоняющую
     // аудио-таймлайн на сотни секунд. Хелпер сам держит темп 1.0x по Stopwatch,
@@ -2627,13 +2633,22 @@ function startMediaMtx() {
     `- user: vrcast`, `  pass: ${rtspPublishPass}`, `  ips: ['127.0.0.1']`, '  permissions:', '  - action: publish',
     'paths:', '  live: {}', '',
   ].join('\n'), 'utf8');
-  const child = onAir(spawn(MEDIAMTX(), [configFile], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
+  // MediaMTX пишет свои ошибки в stdout, а не в stderr. Раньше stdout
+  // выбрасывался, и при падении в журнале стояло «Причина: не сообщил» — хотя
+  // сервер прямо говорил, что порт занят или зарезервирован Windows.
+  const child = onAir(spawn(MEDIAMTX(), [configFile], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
   mediaMtxProcess = child;
-  child.stderr?.setEncoding('utf8');
-  child.stderr?.on('data', chunk => {
-    const строка = String(chunk).trim().split(String.fromCharCode(10)).pop();
-    if (строка) { mediaMtxLastError = строка.slice(0, 200); logDetail(`RTSP-сервер: ${строка.slice(0, 300)}`); }
-  });
+  const разобратьВывод = chunk => {
+    const строка = String(chunk).trim().split(String.fromCharCode(10)).pop()?.trim();
+    if (!строка) return;
+    logDetail(`RTSP-сервер: ${строка.slice(0, 300)}`);
+    const порт = строка.match(/listen (?:tcp|udp) [^:]*:(\d+): bind/i)?.[1];
+    mediaMtxLastError = порт
+      ? `порт ${порт} занят другой программой или зарезервирован Windows (Hyper-V/WSL) — задайте другой порт через VRCAST_PORT`
+      : строка.slice(0, 200);
+  };
+  child.stdout?.setEncoding('utf8'); child.stdout?.on('data', разобратьВывод);
+  child.stderr?.setEncoding('utf8'); child.stderr?.on('data', разобратьВывод);
   // Поднялись после падения — публикацию надо восстановить самим. Без этого
   // сервер работал, а канал оставался пустым: пушер умер вместе с ним, а его
   // собственная попытка перезапуска пришлась на те секунды, когда сервера ещё
