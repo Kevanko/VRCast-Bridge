@@ -771,8 +771,8 @@ internal sealed class SetupWindow : Form
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(520, 270);
-        BackColor = Color.FromArgb(13, 16, 23);
-        ForeColor = Color.FromArgb(227, 230, 239);
+        BackColor = Color.FromArgb(14, 12, 24);
+        ForeColor = Color.FromArgb(244, 241, 255);
         Font = new Font("Segoe UI", 9F);
         Icon = MainWindow.LoadAppIcon();
 
@@ -913,7 +913,7 @@ internal sealed class MainWindow : Form
         MinimumSize = new Size(980, 640);
         StartPosition = FormStartPosition.CenterScreen;
 
-        BackColor = Color.FromArgb(10, 12, 11);
+        BackColor = Color.FromArgb(14, 12, 24);
         AllowDrop = true;
         _webView.AllowExternalDrop = false;
         Controls.Add(_webView);
@@ -1190,10 +1190,10 @@ internal sealed class MainWindow : Form
         {
             _webView.CoreWebView2?.NavigateToString(
                 "<!doctype html><meta charset=\"utf-8\">" +
-                "<style>html,body{height:100%;margin:0;background:#0d1017;color:#e3e6ef;" +
+                "<style>html,body{height:100%;margin:0;background:#0e0c18;color:#f4f1ff;" +
                 "font:14px 'Segoe UI',system-ui,sans-serif;display:grid;place-items:center}" +
                 "div{max-width:560px;display:grid;gap:12px}pre{max-height:220px;overflow:auto;padding:10px;" +
-                "background:#151926;border:1px solid #2a3145;border-radius:8px;color:#8a91a6;font-size:12px;white-space:pre-wrap}" +
+                "background:#16132a;border:1px solid #332d55;border-radius:8px;color:#a8a0cc;font-size:12px;white-space:pre-wrap}" +
                 "b{font-size:16px}</style><div><b>Сервер не запустился</b>" +
                 "<span>Проверьте интернет: при первом запуске догружаются компоненты. Ниже — что записал журнал.</span>" +
                 "<pre>" + текст + "</pre></div>");
@@ -1207,11 +1207,11 @@ internal sealed class MainWindow : Form
         {
             _webView.CoreWebView2?.NavigateToString(
                 "<!doctype html><meta charset=\"utf-8\">" +
-                "<style>html,body{height:100%;margin:0;display:grid;place-items:center;background:#0d1017;" +
-                "color:#8a91a6;font:14px 'Segoe UI',system-ui,sans-serif}" +
+                "<style>html,body{height:100%;margin:0;display:grid;place-items:center;background:#0e0c18;" +
+                "color:#a8a0cc;font:14px 'Segoe UI',system-ui,sans-serif}" +
                 "div{display:grid;gap:10px;justify-items:center}" +
-                "b{color:#e3e6ef;font-size:15px;font-weight:600}" +
-                "i{width:26px;height:26px;border:2px solid #2a3145;border-top-color:#7a78cf;border-radius:50%;" +
+                "b{color:#f4f1ff;font-size:15px;font-weight:600}" +
+                "i{width:26px;height:26px;border:2px solid #332d55;border-top-color:#8f6bff;border-radius:50%;" +
                 "animation:spin 1s linear infinite}" +
                 "@keyframes spin{to{transform:rotate(360deg)}}</style>" +
                 "<div><i></i><b>VRCast Bridge готовится к работе</b>" +
@@ -1404,8 +1404,8 @@ internal sealed class RegionSelector : Form
     {
         base.OnPaint(args);
         if (_selection.IsEmpty) return;
-        using var fill = new SolidBrush(Color.FromArgb(90, 169, 112, 255));
-        using var pen = new Pen(Color.FromArgb(169, 112, 255), 4);
+        using var fill = new SolidBrush(Color.FromArgb(90, 143, 107, 255));
+        using var pen = new Pen(Color.FromArgb(143, 107, 255), 4);
         args.Graphics.FillRectangle(fill, _selection);
         args.Graphics.DrawRectangle(pen, _selection);
     }
@@ -1463,7 +1463,7 @@ internal sealed class CaptureOutline : Form
         // содержимое у окон во весь экран. Тёмная подложка под ней даёт
         // контраст и на светлом кадре, и на тёмном.
         using var shadow = new Pen(Color.FromArgb(200, 10, 12, 20), 3);
-        using var edge = new Pen(Color.FromArgb(240, 138, 136, 224), 2);
+        using var edge = new Pen(Color.FromArgb(240, 167, 139, 255), 2);
         var outer = new Rectangle(1, 1, Math.Max(1, ClientSize.Width - 3), Math.Max(1, ClientSize.Height - 3));
         args.Graphics.DrawRectangle(shadow, outer);
         args.Graphics.DrawRectangle(edge, outer);
