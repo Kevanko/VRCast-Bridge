@@ -1799,6 +1799,15 @@ function correctDrift() {
   if (!activeKind || queuePaused || playbackBusy) return;
   const отклонение = Math.abs(liveLatency);
   if (!Number.isFinite(liveLatency) || отклонение < DRIFT_LIMIT) return;
+  // Минус ловим только у живого захвата экрана. У трека очереди отставание —
+  // это время открытия сетевого источника (-re держит его постоянным до конца
+  // трека), и пересборка лишь заново открывала бы его с тем же отставанием —
+  // по кругу раз в 45с. А во время фриза минус растёт просто потому, что кадров
+  // нет: это работа watchStalledStream, а не полная пересборка канала с resync.
+  if (liveLatency < 0) {
+    const живой = hlsHealth.segmentAge !== null && hlsHealth.segmentAge < FREEZE_START;
+    if (activeKind !== 'screen' || freezeState || !живой) return;
+  }
   if (Date.now() - driftCorrectedAt < 45000) return;
   const куда = liveLatency > 0 ? 'край убежал вперёд' : 'поток отстаёт';
   driftCorrectedAt = Date.now();

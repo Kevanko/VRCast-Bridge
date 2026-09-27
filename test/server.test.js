@@ -7,7 +7,7 @@ import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const port = 48717;
+const port = Number(process.env.VRCAST_TEST_PORT || 48717);
 let server;
 let dataDirectory;
 
