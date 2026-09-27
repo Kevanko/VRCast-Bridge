@@ -71,6 +71,12 @@ internal static class Program
             }
             if (!firstInstance)
             {
+                // Окно первой копии может быть спрятано в трей — у скрытого окна
+                // нет MainWindowHandle, и поиск по процессу его не находит.
+                // Поэтому просим его показаться своим сообщением; разрешение
+                // на передний план отдаём заранее, иначе Windows его не пустит.
+                AllowSetForegroundWindow(-1);
+                PostMessage(new IntPtr(0xffff), ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
                 FocusRunningWindow();
                 singleInstance.Dispose();
                 return;
@@ -109,6 +115,7 @@ internal static class Program
             ["VRCast.Payload.server.js"] = Path.Combine("src", "server.js"),
             ["VRCast.Payload.index.html"] = Path.Combine("public", "index.html"),
             ["VRCast.Payload.styles.css"] = Path.Combine("public", "styles.css"),
+            ["VRCast.Payload.ui.css"] = Path.Combine("public", "ui.css"),
             ["VRCast.Payload.app.js"] = Path.Combine("public", "app.js"),
             ["VRCast.Payload.hls.min.js"] = Path.Combine("public", "vendor", "hls.min.js"),
             ["VRCast.Payload.AudioCapture.exe"] = Path.Combine("tools", "VRCast.AudioCapture.exe"),
@@ -162,6 +169,16 @@ internal static class Program
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint RegisterWindowMessage(string name);
+    [DllImport("user32.dll")]
+    private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")]
+    private static extern bool AllowSetForegroundWindow(int processId);
+
+    // «Покажись»: вторая копия шлёт его всем окнам верхнего уровня, в том
+    // числе скрытым, и главное окно из трея разворачивается.
+    internal static readonly uint ShowWindowMessage = RegisterWindowMessage("VRCastBridge.ShowWindow");
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr window, int command);
 
@@ -518,6 +535,36 @@ internal static class Program
         catch { return false; }
     }
 
+    // Что делать с крестиком окна: идёт ли эфир и выбран ли трей. Настройка
+    // живёт у сервера (config.closeToTray), поэтому берём её тем же запросом,
+    // что и признак эфира. Сервер не ответил — null: тогда окно просто
+    // закрывается, прятать в трей программу без сервера незачем.
+    internal static async Task<(bool Running, bool CloseToTray)?> ReadWindowState()
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            using var document = JsonDocument.Parse(await http.GetStringAsync($"{AppUrl}api/status?logs=0"));
+            var root = document.RootElement;
+            var running = root.TryGetProperty("running", out var value) && value.ValueKind == JsonValueKind.True;
+            var toTray = !(root.TryGetProperty("config", out var config)
+                && config.TryGetProperty("closeToTray", out var tray) && tray.ValueKind == JsonValueKind.False);
+            return (running, toTray);
+        }
+        catch { return null; }
+    }
+
+    internal static void StopBroadcast()
+    {
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            using var content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+            client.PostAsync($"{AppUrl}api/stop", content).GetAwaiter().GetResult();
+        }
+        catch { }
+    }
+
     // Готовность — это «сервер отвечает», а не «версии совпали». Строгое
     // сравнение однажды уже подвесило запуск на полторы минуты из-за расхождения
     // в один номер; своя версия проверяется там, где это правда важно —
@@ -830,6 +877,12 @@ internal sealed class MainWindow : Form
     private readonly WebView2 _webView = new() { Dock = DockStyle.Fill };
     private bool _closing;
     private bool _ready;
+    // Значок у часов: через него окно возвращается, когда крестик спрятал
+    // программу в трей, а эфир при этом продолжает идти.
+    private readonly NotifyIcon _tray = new() { Text = "VRCast Bridge" };
+    private readonly ToolStripMenuItem _trayStop = new("Остановить эфир");
+    private bool _exitRequested;
+    private bool _trayHintShown;
 
     // Без явной иконки WinForms подставляет свою стандартную заглушку — именно
     // она и висела на панели задач вместо логотипа приложения.
@@ -867,12 +920,11 @@ internal sealed class MainWindow : Form
         Shown += InitializeWebView;
         // Что происходит на подготовке — видно прямо в окне.
         Program.BootStatus = message => { try { BeginInvoke(() => { if (_webView.CoreWebView2 is not null && !_ready) ShowSplash(message); }); } catch { } };
-        // Свёрнутое окно не должно декодировать эфир: страница гасит предпросмотр.
-        Resize += (_, _) =>
-        {
-            var name = WindowState == FormWindowState.Minimized ? "vrcast-hidden" : "vrcast-shown";
-            try { _webView.CoreWebView2?.ExecuteScriptAsync($"document.dispatchEvent(new Event('{name}'))"); } catch { }
-        };
+        // Свёрнутое или спрятанное в трей окно не должно декодировать эфир:
+        // страница гасит предпросмотр и реже спрашивает сервер.
+        Resize += (_, _) => SendVisibility();
+        VisibleChanged += (_, _) => SendVisibility();
+        SetupTray();
         // Геометрию применяем после создания окна: до этого WinForms пересчитывает
         // координаты под DPI другого монитора и окно уползает при каждом запуске.
         Shown += (_, _) => RestoreGeometry();
@@ -887,6 +939,75 @@ internal sealed class MainWindow : Form
         {
             if (args.Data?.GetData(DataFormats.FileDrop) is string[] paths) await AddMediaFiles(paths);
         };
+    }
+
+    private void SendVisibility()
+    {
+        var name = !Visible || WindowState == FormWindowState.Minimized ? "vrcast-hidden" : "vrcast-shown";
+        try { _webView.CoreWebView2?.ExecuteScriptAsync($"document.dispatchEvent(new Event('{name}'))"); } catch { }
+    }
+
+    private void SetupTray()
+    {
+        _tray.Icon = LoadAppIcon() ?? SystemIcons.Application;
+        var menu = new ContextMenuStrip();
+        var open = new ToolStripMenuItem("Открыть", null, (_, _) => ShowFromTray());
+        open.Font = new Font(open.Font, FontStyle.Bold);
+        _trayStop.Click += (_, _) => Task.Run(Program.StopBroadcast);
+        menu.Items.Add(open);
+        menu.Items.Add(_trayStop);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("Выйти", null, (_, _) => ExitFromTray()));
+        // «Остановить эфир» доступна, только когда эфир есть. Узнаём в фоне:
+        // меню открывается сразу, пункт обновится через доли секунды.
+        menu.Opening += (_, _) =>
+        {
+            _ = Task.Run(async () =>
+            {
+                var state = await Program.ReadWindowState();
+                try { BeginInvoke(() => _trayStop.Enabled = state?.Running == true); } catch { }
+            });
+        };
+        _tray.ContextMenuStrip = menu;
+        _tray.MouseDoubleClick += (_, args) => { if (args.Button == MouseButtons.Left) ShowFromTray(); };
+        _tray.Visible = true;
+        FormClosed += (_, _) => { _tray.Visible = false; _tray.Dispose(); };
+    }
+
+    private void HideToTray()
+    {
+        Hide();
+        if (_trayHintShown) return;
+        _trayHintShown = true;
+        _tray.ShowBalloonTip(4000, "VRCast Bridge работает в трее",
+            "Эфир продолжается. Открыть окно — двойной щелчок по значку.", ToolTipIcon.None);
+    }
+
+    private void ShowFromTray()
+    {
+        if (_closing) return;
+        Show();
+        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        Activate();
+        BringToFront();
+    }
+
+    // «Выйти» из трея делает то же, что раньше делал крестик: спрашивает про
+    // идущий эфир и штатно гасит сервер.
+    private void ExitFromTray()
+    {
+        _exitRequested = true;
+        Close();
+    }
+
+    protected override void WndProc(ref Message message)
+    {
+        if (Program.ShowWindowMessage != 0 && message.Msg == (int)Program.ShowWindowMessage)
+        {
+            ShowFromTray();
+            return;
+        }
+        base.WndProc(ref message);
     }
 
     // Окно программы рисует WebView2. Если рантайма нет, раньше показывалась
@@ -1182,17 +1303,30 @@ internal sealed class MainWindow : Form
     private void OnClosing(object? sender, FormClosingEventArgs eventArgs)
     {
         if (_closing) return;
-        // Эфир идёт прямо сейчас — закрытие оборвёт его у всех, кто смотрит.
-        // Спрашиваем, как спрашивает любой редактор про несохранённый файл.
         // Task.Run обязателен: прямое ожидание на потоке окна встанет намертво.
-        var вЭфире = false;
+        (bool Running, bool CloseToTray)? состояние = null;
         try
         {
-            var запрос = Task.Run(Program.IsBroadcasting);
-            вЭфире = запрос.Wait(TimeSpan.FromSeconds(2)) && запрос.Result;
+            var запрос = Task.Run(Program.ReadWindowState);
+            if (запрос.Wait(TimeSpan.FromSeconds(2.5))) состояние = запрос.Result;
         }
         catch { }
-        if (вЭфире && MessageBox.Show(this,
+        // Крестик при выбранном трее только прячет окно: сервер и эфир живут.
+        // Выход из трея, выключение Windows и снятие задачи — настоящий выход.
+        var пользователь = eventArgs.CloseReason == CloseReason.UserClosing;
+        if (!_exitRequested && пользователь && состояние?.CloseToTray == true)
+        {
+            eventArgs.Cancel = true;
+            HideToTray();
+            return;
+        }
+        _exitRequested = false;
+        // Эфир идёт прямо сейчас — закрытие оборвёт его у всех, кто смотрит.
+        // Спрашиваем, как спрашивает любой редактор про несохранённый файл.
+        // Окно может быть спрятано в трее — тогда вопрос без владельца, иначе
+        // он открылся бы за другими окнами.
+        var вЭфире = состояние?.Running == true;
+        if (вЭфире && MessageBox.Show(Visible ? this : null,
                 "Сейчас идёт эфир — если закрыть программу, у зрителей он прервётся."
                 + Environment.NewLine + Environment.NewLine + "Всё равно закрыть?",
                 "VRCast Bridge", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
@@ -1201,6 +1335,7 @@ internal sealed class MainWindow : Form
             return;
         }
         _closing = true;
+        _tray.Visible = false;
         SaveGeometry();
         // Окно убираем сразу, а процесс живёт ещё пару секунд: за это время
         // сервер штатно сворачивает захват. Раньше всё убивалось разом, и
