@@ -8,7 +8,7 @@ import { join } from 'node:path';
 
 // Отдельный порт и каталог: этот файл запускается своим процессом и не должен
 // драться за 4717х-порт с основным набором тестов.
-const port = 48719;
+const port = Number(process.env.VRCAST_TEST_PORT || 48717) + 2;
 let server;
 let dataDirectory;
 
