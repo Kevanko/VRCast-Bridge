@@ -555,7 +555,10 @@ internal static class Program
 internal sealed class ChildProcessJob : IDisposable
 {
     private IntPtr _handle;
+    private IntPtr _port;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const int JobObjectAssociateCompletionPortInformation = 7;
+    private const uint JobObjectMsgNewProcess = 6;
 
     private ChildProcessJob(Process process)
     {
@@ -570,25 +573,78 @@ internal sealed class ChildProcessJob : IDisposable
         try
         {
             Marshal.StructureToPtr(information, pointer, false);
-            if (!SetInformationJobObject(_handle, 9, pointer, (uint)size) || !AssignProcessToJobObject(_handle, process.Handle))
+            if (!SetInformationJobObject(_handle, 9, pointer, (uint)size))
                 throw new InvalidOperationException("Windows не смогла привязать процессы трансляции к приложению.");
+            // Подписка на новые процессы — до привязки node, чтобы не пропустить
+            // ни одного: всё, что он запустит, попадает в эту же группу.
+            WatchNewProcesses();
+            if (!AssignProcessToJobObject(_handle, process.Handle))
+            {
+                Dispose();
+                throw new InvalidOperationException("Windows не смогла привязать процессы трансляции к приложению.");
+            }
         }
         finally { Marshal.FreeHGlobal(pointer); }
+        PowerThrottling.Disable(process.Id);
     }
 
     internal static ChildProcessJob Attach(Process process) => new(process);
+
+    // Windows 11 (и 10 на батарее/сбалансированной схеме) переводит процессы,
+    // которые «не видны пользователю», в режим экономии EcoQoS: пониженная
+    // частота и энергоэффективные ядра. У node, ffmpeg и MediaMTX нет окон, а
+    // окно программы часто свёрнуто — система легко считает эфир фоновым, и
+    // кодировщик перестаёт успевать: фризы именно при свёрнутом окне. Node сам
+    // отказаться от этого не может (в нём нет SetProcessInformation), поэтому
+    // это делает оболочка: группа процессов сообщает в порт завершения о
+    // каждом новом процессе, и он сразу получает отказ от троттлинга. Это
+    // событие, а не опрос: поток спит на порту и не тратит ничего.
+    private void WatchNewProcesses()
+    {
+        _port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
+        if (_port == IntPtr.Zero) return;
+        var link = new JobObjectAssociateCompletionPort { CompletionKey = IntPtr.Zero, CompletionPort = _port };
+        var size = Marshal.SizeOf<JobObjectAssociateCompletionPort>();
+        var pointer = Marshal.AllocHGlobal(size);
+        try
+        {
+            Marshal.StructureToPtr(link, pointer, false);
+            if (!SetInformationJobObject(_handle, JobObjectAssociateCompletionPortInformation, pointer, (uint)size))
+            {
+                CloseHandle(_port); _port = IntPtr.Zero; return;
+            }
+        }
+        finally { Marshal.FreeHGlobal(pointer); }
+        var port = _port;
+        new Thread(() =>
+        {
+            // Закрытие порта в Dispose будит поток с ошибкой — на этом он выходит.
+            while (GetQueuedCompletionStatus(port, out var message, out _, out var data, uint.MaxValue))
+            {
+                if (message == JobObjectMsgNewProcess) PowerThrottling.Disable((int)data.ToInt64());
+            }
+        }) { IsBackground = true, Name = "VRCast job watcher" }.Start();
+    }
 
     public void Dispose()
     {
         if (_handle == IntPtr.Zero) return;
         CloseHandle(_handle);
         _handle = IntPtr.Zero;
+        if (_port != IntPtr.Zero) { CloseHandle(_port); _port = IntPtr.Zero; }
     }
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr CreateJobObject(IntPtr attributes, string? name);
     [DllImport("kernel32.dll")] private static extern bool SetInformationJobObject(IntPtr job, int informationClass, IntPtr information, uint length);
     [DllImport("kernel32.dll")] private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll")] private static extern IntPtr CreateIoCompletionPort(IntPtr file, IntPtr existingPort, UIntPtr key, uint threads);
+    [DllImport("kernel32.dll")] private static extern bool GetQueuedCompletionStatus(IntPtr port, out uint bytes, out UIntPtr key, out IntPtr overlapped, uint milliseconds);
+
+    [StructLayout(LayoutKind.Sequential)] private struct JobObjectAssociateCompletionPort
+    {
+        public IntPtr CompletionKey, CompletionPort;
+    }
 
     [StructLayout(LayoutKind.Sequential)] private struct IoCounters
     {
@@ -609,6 +665,45 @@ internal sealed class ChildProcessJob : IDisposable
         public IoCounters IoInfo;
         public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
     }
+}
+
+// Отказ процесса от энергосберегающего троттлинга (EcoQoS). Флаг «управляю
+// скоростью выполнения» с нулевым состоянием значит «никогда не замедлять»,
+// даже когда система считает процесс фоновым. Второй флаг просит Windows 11
+// не игнорировать запросы точного таймера (ffmpeg держит темп -re по нему),
+// пока окна не видно. Windows 10 второй флаг не знает и отвечает ошибкой —
+// тогда повторяем с одним первым. Где нет и первого (до 1709) — молча ничего.
+internal static class PowerThrottling
+{
+    private const uint ProcessSetInformation = 0x0200;
+    private const int ProcessPowerThrottlingClass = 4;
+    private const uint ExecutionSpeed = 0x1;
+    private const uint IgnoreTimerResolution = 0x4;
+
+    internal static void Disable(int processId)
+    {
+        var process = OpenProcess(ProcessSetInformation, false, processId);
+        if (process == IntPtr.Zero) return;
+        try
+        {
+            var state = new State { Version = 1, ControlMask = ExecutionSpeed | IgnoreTimerResolution, StateMask = 0 };
+            if (!SetProcessInformation(process, ProcessPowerThrottlingClass, ref state, (uint)Marshal.SizeOf<State>()))
+            {
+                state.ControlMask = ExecutionSpeed;
+                SetProcessInformation(process, ProcessPowerThrottlingClass, ref state, (uint)Marshal.SizeOf<State>());
+            }
+        }
+        finally { CloseHandle(process); }
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct State
+    {
+        public uint Version, ControlMask, StateMask;
+    }
+
+    [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint access, bool inherit, int processId);
+    [DllImport("kernel32.dll")] private static extern bool SetProcessInformation(IntPtr process, int informationClass, ref State information, uint size);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
 }
 
 // Установщик: куда положить программу и делать ли ярлык.
