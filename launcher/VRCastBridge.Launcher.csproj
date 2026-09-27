@@ -29,6 +29,7 @@
     <EmbeddedResource Include="..\src\server.js" LogicalName="VRCast.Payload.server.js" />
     <EmbeddedResource Include="..\public\index.html" LogicalName="VRCast.Payload.index.html" />
     <EmbeddedResource Include="..\public\styles.css" LogicalName="VRCast.Payload.styles.css" />
+    <EmbeddedResource Include="..\public\ui.css" LogicalName="VRCast.Payload.ui.css" />
     <EmbeddedResource Include="..\public\app.js" LogicalName="VRCast.Payload.app.js" />
     <EmbeddedResource Include="..\public\vendor\hls.min.js" LogicalName="VRCast.Payload.hls.min.js" />
     <EmbeddedResource Include="..\tools\VRCast.AudioCapture.exe" LogicalName="VRCast.Payload.AudioCapture.exe" />

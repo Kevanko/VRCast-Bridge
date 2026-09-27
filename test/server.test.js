@@ -506,6 +506,18 @@ test('белый IP даёт другу прямую ссылку через и�
   });
 });
 
+test('«при закрытии окна» хранится в настройках и принимает только булево', async () => {
+  const задать = body => fetch(`http://127.0.0.1:${port}/api/config`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(r => r.json());
+  const исходно = await fetch(`http://127.0.0.1:${port}/api/status?logs=0`).then(r => r.json());
+  assert.equal(исходно.config.closeToTray, true, 'по умолчанию окно прячется в трей');
+  assert.equal((await задать({ closeToTray: false })).config.closeToTray, false, 'выход сохраняется');
+  assert.equal((await задать({ closeToTray: 'yes' })).config.closeToTray, false, 'строка не меняет настройку');
+  assert.equal((await задать({})).config.closeToTray, false, 'запрос без поля не сбрасывает выбор');
+  assert.equal((await задать({ closeToTray: true })).config.closeToTray, true);
+});
+
 // Дочерние процессы тестового сервера: по ним видно, что реально запущено.
 function serverChildren() {
   const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',

@@ -88,6 +88,9 @@ const defaults = {
   encoderMode: 'auto',
   whiteIp: '',
   tunnelProvider: 'auto',
+  // Крестик окна прячет программу в трей, эфир продолжает идти. Оболочка
+  // читает это поле из /api/status в момент закрытия окна.
+  closeToTray: true,
 };
 
 function loadConfig() {
@@ -4701,6 +4704,9 @@ const server = http.createServer(async (req, res) => {
         whiteIp: body.whiteIp === undefined ? (config.whiteIp || '') : String(body.whiteIp).trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0].slice(0, 60).replace(/[^a-z0-9.:-]/gi, ''),
         tunnelProvider: ['auto', 'cloudflare', 'pinggy', 'localhostrun'].includes(body.tunnelProvider) ? body.tunnelProvider : (config.tunnelProvider || 'auto'),
         cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
+        // Только настоящий булев: строка «false» из кривого запроса не должна
+        // превращаться в true и молча прятать окно вместо выхода.
+        closeToTray: typeof body.closeToTray === 'boolean' ? body.closeToTray : config.closeToTray !== false,
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),
         // Каждое поле откатывается к прежнему значению, если его не прислали.
