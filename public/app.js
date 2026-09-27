@@ -654,7 +654,9 @@ function render(state) {
 }
 
 function paintLogs(state=ui.status) {
-  setText($('#logs'),(state?.logs||[]).join('\n')||'Журнал пуст');
+  // Обычный опрос приходит без журнала — тогда ничего не трогаем.
+  if(!Array.isArray(state?.logs))return;
+  setText($('#logs'),state.logs.join('\n')||'Журнал пуст');
 }
 
 // Настройки качества могут поменяться и без нас — автопонижение, другая
@@ -1049,7 +1051,7 @@ function pollDelay() {
 }
 async function refresh(){
   try{
-    const response=await fetch('/api/status',{cache:'no-store'});
+    const response=await fetch($('#logDialog').open?'/api/status':'/api/status?logs=0',{cache:'no-store'});
     if(!response.ok)throw new Error(`Ошибка ${response.status}`);
     const text=await response.text();
     ui.offline=false;

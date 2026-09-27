@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.11';
+const APP_VERSION = '0.54.12';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1219,6 +1219,9 @@ function isPrivateIp(ip) {
   if (a === 192 && b === 168) return true;
   if (a === 172 && b >= 16 && b <= 31) return true;
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT провайдера
+  // 198.18.0.0/15 — служебный диапазон; его занимают VPN-туннели (Clash/mihomo,
+  // Koala Clash). Иначе адрес туннеля выдавался друзьям как «белый IP».
+  if (a === 198 && (b === 18 || b === 19)) return true;
   if (a === 198 && (b === 18 || b === 19)) return true; // тестовый диапазон / VPN
   if (a >= 224) return true; // multicast и зарезервированное
   return false;
@@ -1674,7 +1677,7 @@ async function startUpdateInstall() {
   }
 }
 
-function status() {
+function status(withLogs = true) {
   const speed = Number(config.playbackSpeed) || 1;
   const runningElapsed = currentStartedAt ? Math.max(0, (Date.now() - currentStartedAt) / 1000) * speed : 0;
   const elapsed = queuePaused ? pausedPosition : sourcePosition + runningElapsed;
@@ -1723,7 +1726,9 @@ function status() {
     playbackUrl: publicAddress(),
     webrtcUrl: mediaMtxProcess ? `http://127.0.0.1:${WEBRTC_PORT}/live/whep` : '',
     localPlaybackUrl: `http://127.0.0.1:${PORT}/stream/live.m3u8`,
-    logs: logLines, logFolder: DATA_DIR, update: updateState,
+    // Журнал (сотня строк) нужен только открытому окну журнала; опрос интерфейса
+    // просит статус без него (?logs=0) — ответ на каждом тике заметно легче.
+    logs: withLogs ? logLines : undefined, logFolder: DATA_DIR, update: updateState,
   };
 }
 
@@ -1753,8 +1758,17 @@ let lanAddressesAt = 0;
 
 function getLanAddresses() {
   if (lanAddresses && Date.now() - lanAddressesAt < 15000) return lanAddresses;
-  lanAddresses = Object.values(networkInterfaces()).flat().filter(Boolean)
-    .filter(item => item.family === 'IPv4' && !item.internal).map(item => item.address);
+  // Виртуальные адаптеры (VirtualBox, VMware, Hyper-V/WSL, VPN-сети) тоже дают
+  // адреса 192.168.x, и «ссылка для своей сети» бралась с адаптера VirtualBox —
+  // друзьям в той же сети она не открывалась. Настоящие карты ставим первыми;
+  // виртуальные не выбрасываем — бывает, что других нет.
+  const виртуальный = (name, mac) => /virtualbox|vmware|vethernet|hyper-v|wsl|loopback|radmin|hamachi|zerotier|tailscale|wireguard|openvpn|tap-|tun/i.test(name)
+    || /^(0a:00:27|00:50:56|00:0c:29|00:05:69|00:15:5d)/i.test(String(mac || ''));
+  lanAddresses = Object.entries(networkInterfaces())
+    .flatMap(([name, list]) => (list || []).map(item => ({ ...item, virtual: виртуальный(name, item.mac) })))
+    .filter(item => item.family === 'IPv4' && !item.internal)
+    .sort((a, b) => Number(a.virtual) - Number(b.virtual))
+    .map(item => item.address);
   lanAddressesAt = Date.now();
   return lanAddresses;
 }
@@ -4504,7 +4518,7 @@ const server = http.createServer(async (req, res) => {
     if (origin && origin !== OWN_ORIGIN && !publicTunnelHost) {
       return json(res, 403, { error: 'Запрос со стороннего сайта.' });
     }
-    if (req.method === 'GET' && url.pathname === '/api/status') return json(res, 200, status());
+    if (req.method === 'GET' && url.pathname === '/api/status') return json(res, 200, status(url.searchParams.get('logs') !== '0'));
     if (req.method === 'GET' && url.pathname === '/api/capture-preview') {
       if (existsSync(CAPTURE_PREVIEW)) { res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store' }); createReadStream(CAPTURE_PREVIEW).pipe(res); return; }
       return json(res, 404, { error: 'Предпросмотр ещё не создан.' });
