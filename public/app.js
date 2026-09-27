@@ -197,7 +197,7 @@ function paintMonitorPlaceholder(state) {
   }
   if (ui.localPreviewId) return;
   if (ui.source==='queue' && ui.localNote) return monitorPlaceholder(...ui.localNote);
-  if (!ui.previewOn) return monitorPlaceholder('Предпросмотр выключен','Окно не декодирует видео и не тратит процессор. Включить — кнопка с глазом','eye-off');
+  if (!ui.previewOn) return monitorPlaceholder('Предпросмотр выключен','Так окно не тратит процессор. Включить — кнопка с глазом внизу','eye-off');
   monitorPlaceholder('Ничего не выбрано',ui.source==='queue'?'Нажмите трек в списке — он откроется здесь без эфира':'Выберите экран или окно справа','broadcast');
 }
 
@@ -248,14 +248,19 @@ function renderStorage(state){
     select.value=cache.root||'';
   }
   const лимит=cache.limitGb?`${cache.limitGb} ГБ`:'авто';
-  setText($('#cacheSize'),`${cache.sizeMb||0} МБ из ${лимит}`);
+  setText($('#cacheSize'),`Занято ${cache.sizeMb||0} МБ из ${лимит}`);
   if(document.activeElement!==$('#cacheLimit'))$('#cacheLimit').value=String(cache.limitGb||0);
   const free=state.disk?.freeMb;
   const всего=state.disk?.totalMb;
   const место=free!==null&&free!==undefined&&всего
     ? ` · свободно ${(free/1024).toFixed(1)} из ${(всего/1024).toFixed(0)} ГБ`
     : '';
-  setText($('#cacheHint'),cache.path?`${cache.path}${место}`:'');
+  // Полный путь занимал три строки и светил имя пользователя. Показываем диск
+  // и конец пути, целиком — во всплывающей подсказке.
+  const путь=String(cache.path||''), части=путь.split(/[\\/]/).filter(Boolean);
+  const коротко=части.length>3?[части[0],'…',...части.slice(-2)].join('\\'):путь;
+  setText($('#cacheHint'),путь?`${коротко}${место}`:'');
+  setTitle($('#cacheHint'),путь);
 }
 
 function renderServers(state) {
@@ -310,10 +315,10 @@ function renderLocalOutput(state){
   // сервера), и подсказка отправляла открывать на роутере не тот порт.
   const порт=(d.white||'').match(/:(\d+)\//)?.[1]||'';
   setText($('#localHint'),d.white
-    ?`Ссылка через интернет откроется у друзей, если на роутере открыт порт ${порт} (TCP).`
+    ?`Для интернета на роутере должен быть открыт порт ${порт} (TCP).`
     :d.local
-      ?'Эту ссылку открывают друзья в одной сети с вами. Есть белый IP — впишите, дам ссылку для интернета.'
-      :'Пока видно только этот ПК. Друзьям рядом — впишите адрес своей сети, из интернета — белый IP.');
+      ?'Откроется у друзей в вашей сети. Для интернета впишите белый IP.'
+      :'Пока ссылка работает только на этом ПК.');
 }
 
 // Прямая ссылка — по клику копируем.
@@ -464,7 +469,7 @@ function renderTemplates(state) {
   const select=$('#templateSelect'), selected=select.value, templates=state.templates||[];
   // Список пересобираем только когда наборы поменялись: пересборка на каждом
   // опросе захлопывала раскрытый список прямо под курсором.
-  const html='<option value="">Новый набор…</option>'+templates.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.count}</option>`).join('');
+  const html='<option value="">Новый список…</option>'+templates.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.count}</option>`).join('');
   if(select._html!==html){
     setHtml(select,html);
     if(selected&&templates.some(item=>item.id===selected))select.value=selected;
@@ -495,12 +500,12 @@ function render(state) {
   const unitySource=ui.source==='queue'&&ui.unitySelectedId&&storedUnitySource.itemId&&storedUnitySource.itemId!==ui.unitySelectedId
     ?{...storedUnitySource,available:false,url:'',stale:true}:storedUnitySource;
   let shownUrl='', hint='', linkText='', linkGood=false, linkError=false;
-  if(unityMode){shownUrl=unitySource.available?unitySource.url:'';hint=unitySource.scope==='local'&&tunnelMode?'Рабочая локальная Unity-ссылка. Для друзей используйте AVPro: бесплатный Pinggy подменяет Unity-запрос страницей предупреждения.':ui.source==='screen'?'Unity получит завершённую запись, а не прямой эфир.':unitySource.stale?'Трек изменился — подготовьте заново.':'Unity получает один трек — выберите его в очереди.';linkText=unitySource.available?(ui.source==='screen'?'Клип готов':'Трек готов'):unitySource.state==='building'||unitySource.state==='recording'||unitySource.state==='finalizing'?'Готовлю файл…':'Файл не готов';linkGood=Boolean(unitySource.available);linkError=unitySource.state==='error';}
+  if(unityMode){shownUrl=unitySource.available?unitySource.url:'';hint=unitySource.scope==='local'&&tunnelMode?'Эта ссылка работает только у вас. Друзьям — плеер AVPro.':ui.source==='screen'?'Unity получит готовую запись, а не прямой эфир.':unitySource.stale?'Трек изменился — подготовьте заново.':'Unity играет один трек — выберите его в списке.';linkText=unitySource.available?(ui.source==='screen'?'Клип готов':'Трек готов'):unitySource.state==='building'||unitySource.state==='recording'||unitySource.state==='finalizing'?'Готовлю файл…':'Файл не готов';linkGood=Boolean(unitySource.available);linkError=unitySource.state==='error';}
   else if(state.config.outputMode==='remote'){
     const remote=state.rtsp?.remote||{};
     shownUrl=remote.configured?remote.url:'';
-    hint=remote.channelRejected?'Этот сервер принимает только постоянную ссылку. Откройте «···» рядом с ним и включите «Постоянная ссылка».'
-      :remote.reachable===false?'Сервер не отвечает. Проверьте, что машина включена и запущена трансляция.':'';
+    hint=remote.channelRejected?'Сервер принимает только постоянную ссылку: «···» у сервера → «Постоянная ссылка».'
+      :remote.reachable===false?'Сервер не отвечает. Проверьте, что машина включена.':'';
     // «Подключаюсь…» — только когда эфир реально идёт и ждём канал. Просто
     // выбрали живой сервер и не вещаем — это «Сервер на связи», а не вечное
     // подключение. Не отвечает — честная ошибка, а не зелёная лампа.
@@ -524,11 +529,11 @@ function render(state) {
     hint=rtspLive?'':'В мире выберите плеер AVPro и разрешите Untrusted URLs.';
     // Бесплатный туннель не тянет тяжёлый поток — это и есть причина рывков у друзей.
     if(tunnelMode){const heavy=ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30);
-      if(heavy)hint+=' Через бесплатный туннель 1080p и 60 кадров рвутся — поставьте 720p и 30 кадров.';
+      if(heavy)hint+=' Через туннель 1080p и 60 кадров рвутся — лучше 720p и 30.';
       // Адрес выдаётся на один сеанс. Кто вставил его раньше — смотрит, а кто
       // зайдёт после перезапуска, получит нерабочую ссылку и будет думать,
       // что сломалась программа. Про это надо предупреждать заранее.
-      hint+=' Ссылка живёт до закрытия программы, в следующий раз будет другой. Если в мир заходят новые люди — берите свой сервер, его адрес постоянный.';}
+      hint+=' Адрес сменится при следующем запуске.';}
     // Если ссылка проверена и не отдаёт поток (Pinggy-заглушка, блок сети) —
     // показываем причину прямо здесь, а не ложное «готово».
     if(tunnelBroken&&state.tunnel?.error)hint=state.tunnel.error;
@@ -576,9 +581,9 @@ function render(state) {
   setText($('#encoderLabel'),state.performance?.encoder||'неизвестно');
   const реж=state.performance?.encoderMode||'auto', гпу=state.performance?.gpuLabel||'';
   setText($('#encoderNote'),
-    реж==='cpu'?'Считает процессор: качество чуть выше, но нагрузка на CPU. Берите, когда видеокарта занята игрой.'
-    :реж==='gpu'?(гпу?`${гпу} — кодирование уходит на видеокарту, процессор свободнее.`:'Видеокарты не нашлось — эфир считает процессор.')
-    :(гпу?`Авто: сейчас ${гпу}. Программа сама берёт видеокарту, если она есть.`:'Авто: видеокарты не нашлось — считает процессор.'));
+    реж==='cpu'?'Процессор: нагрузка выше, видеокарта свободна для игры'
+    :реж==='gpu'?(гпу?`Сейчас: ${гпу}`:'Видеокарты не нашлось — считает процессор')
+    :(гпу?`Сейчас: ${гпу}`:'Видеокарты не нашлось — считает процессор'));
   const слабый=state.performance&&state.performance.hardware===false;
   const тяжело=слабый&&(ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30));
   const ratio=Number(state.performance?.realtimeRatio||0);
@@ -626,7 +631,7 @@ function render(state) {
   const unityВыбор=$('#playerMode').value==='unity';
   const подсказкаТрека=unityВыбор?'Выбрать для подготовки Unity':state.running?'Включить этот трек в эфире':'Посмотреть здесь, без эфира';
   const queueSignature=JSON.stringify([state.currentId,ui.unitySelectedId,подсказкаТрека,state.queue.map(item=>[item.id,item.title,item.thumbnail,item.duration,item.unavailable,item.local])]);
-  if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>`<div class="queue-item ${state.currentId===item.id?'playing':''} ${item.unavailable?'unavailable':''} ${unityВыбор&&ui.unitySelectedId===item.id?'unity-selected':''}" data-id="${escapeHtml(item.id)}" ${item.unavailable?'data-unavailable="1"':''} role="button" tabindex="0" title="${подсказкаТрека}"><span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="" onerror="this.replaceWith('${String(index+1).padStart(2,'0')}')">`:String(index+1).padStart(2,'0')}</span><span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small>${item.unavailable?'⚠ недоступен — пропускается':`${item.local?'Локальный файл · ':''}${item.duration?formatTime(item.duration):'длительность неизвестна'}`}</small></span><button class="remove-item" aria-label="Удалить из очереди" title="Удалить">×</button></div>`).join(''):'<div class="empty-state">Очередь пуста</div>';}
+  if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>`<div class="queue-item ${state.currentId===item.id?'playing':''} ${item.unavailable?'unavailable':''} ${unityВыбор&&ui.unitySelectedId===item.id?'unity-selected':''}" data-id="${escapeHtml(item.id)}" ${item.unavailable?'data-unavailable="1"':''} role="button" tabindex="0" title="${подсказкаТрека}"><span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="" onerror="this.replaceWith('${String(index+1).padStart(2,'0')}')">`:String(index+1).padStart(2,'0')}</span><span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small>${item.unavailable?'⚠ недоступен — пропускается':`${item.local?'Локальный файл · ':''}${item.duration?formatTime(item.duration):'длительность неизвестна'}`}</small></span><button class="remove-item" aria-label="Удалить из очереди" title="Удалить">×</button></div>`).join(''):'<div class="empty-state">Вставьте ссылку или добавьте файлы — они появятся здесь</div>';}
   const screenSource=ui.source==='screen';
   setHidden($('#menuMediaQuality'),screenSource); setHidden($('#menuMediaFps'),screenSource);
   setHidden($('#menuScreenQuality'),!screenSource); setHidden($('#menuScreenFps'),!screenSource);
@@ -642,9 +647,12 @@ function render(state) {
   // захват (или обратно) можно было только через остановку эфира.
   const чужойЭфир=state.running&&state.activeKind!==(экран?'screen':'queue');
   setHidden($('#goLive'),state.running&&!чужойЭфир);
-  setText($('#goLive'),чужойЭфир?(экран?'Переключить эфир на экран':'Переключить эфир на видео'):(экран?'Начать эфир экрана':'Начать эфир видео'));
+  // Подписи короткие: длинные («Переключить эфир на экран») сжимали название
+  // трека рядом до двух букв.
+  setText($('#goLive'),чужойЭфир?(экран?'Вещать экран':'Вещать видео'):(экран?'Начать эфир экрана':'Начать эфир видео'));
+  setTitle($('#goLive'),чужойЭфир?'Эфир не прервётся: зрители сразу увидят новый источник':'');
   setHidden($('#stopLive'),!state.running);
-  setText($('#stopLive'),state.activeKind==='screen'?'Остановить эфир экрана':'Остановить эфир');
+  setText($('#stopLive'),'Остановить эфир');
   setHidden($('#skipTrack'),!(state.running&&state.activeKind==='queue'));
   // Пока эфир экрана идёт, эта кнопка применяет смену источника или настроек.
   // Когда эфира нет, её работу делает кнопка пуска — двух одинаковых не нужно.
@@ -670,7 +678,7 @@ function paintLogs(state=ui.status) {
 function syncConfigControls(state) {
   if (Date.now()<ui.configEditUntil) return;
   const c=state.config||{};
-  const значения={quality:c.quality,fps:c.fps,mediaQuality:c.mediaQuality,mediaFps:c.mediaFps,videoBitrate:c.videoBitrate??0,encoderMode:c.encoderMode||'auto',tunnelProviderSelect:c.tunnelProvider||'auto'};
+  const значения={quality:c.quality,fps:c.fps,mediaQuality:c.mediaQuality,mediaFps:c.mediaFps,videoBitrate:c.videoBitrate??0,encoderMode:c.encoderMode||'auto',tunnelProviderSelect:c.tunnelProvider||'auto',closeAction:c.closeToTray===false?'exit':'tray'};
   for (const [id,value] of Object.entries(значения)) {
     if (value===undefined||value===null) continue;
     const select=document.getElementById(id);
@@ -779,7 +787,7 @@ function configPayload() {
   const handle=$('#windowSource').value||(ждём?saved.captureWindowHandle||'':'');
   const selectedWindow=ui.sources.windows.find(item=>item.handle===handle);
   const processId=selectedWindow?selectedWindow.id:(ждём&&handle===saved.captureWindowHandle?saved.audioProcessId||'':'');
-  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:ждём?saved.captureMonitorId||'':$('#monitorSource').value,captureWindowHandle:handle,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:ждём?saved.audioOutputId||'':$('#audioOutput').value,audioProcessId:processId,captureAudioDevice:ждём?saved.captureAudioDevice||'':$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim(),tunnelProvider:$('#tunnelProviderSelect').value };
+  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:ждём?saved.captureMonitorId||'':$('#monitorSource').value,captureWindowHandle:handle,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:ждём?saved.audioOutputId||'':$('#audioOutput').value,audioProcessId:processId,captureAudioDevice:ждём?saved.captureAudioDevice||'':$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim(),tunnelProvider:$('#tunnelProviderSelect').value,closeToTray:$('#closeAction').value!=='exit' };
 }
 async function saveConfig(applyLive = false) { return api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),applyLive})}); }
 
@@ -849,10 +857,10 @@ $('#queueList').addEventListener('click',async event=>{
 $('#queueList').addEventListener('keydown',event=>{if((event.key==='Enter'||event.key===' ')&&event.target.matches('.queue-item')){event.preventDefault();event.target.click();}});
 $('#clearQueue').addEventListener('click',async()=>{try{очиститьЛокальныйПредпросмотр();ui.localNote=null;render(await api('/api/queue',{method:'DELETE'}));}catch(error){toast(error.message,true);}});
 $('#templateSelect').addEventListener('change',event=>{const item=ui.status?.templates?.find(entry=>entry.id===event.target.value);if(item)$('#templateName').value=item.name;$('#loadTemplate').disabled=!item;$('#appendTemplate').disabled=!item;$('#deleteTemplate').disabled=!item;});
-$('#saveTemplate').addEventListener('click',async()=>{const button=$('#saveTemplate');button.disabled=true;try{const result=await api('/api/templates',{method:'POST',body:JSON.stringify({id:$('#templateSelect').value,name:$('#templateName').value})});render(result.status);$('#templateSelect').value=result.id;$('#templateSelect').dispatchEvent(new Event('change'));toast('Набор сохранён');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
-async function loadTemplate(append){const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}/load`,{method:'POST',body:JSON.stringify({append})}));toast(append?'Набор добавлен к списку':'Набор загружен');}catch(error){toast(error.message,true);}}
+$('#saveTemplate').addEventListener('click',async()=>{const button=$('#saveTemplate');button.disabled=true;try{const result=await api('/api/templates',{method:'POST',body:JSON.stringify({id:$('#templateSelect').value,name:$('#templateName').value})});render(result.status);$('#templateSelect').value=result.id;$('#templateSelect').dispatchEvent(new Event('change'));toast('Список сохранён');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
+async function loadTemplate(append){const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}/load`,{method:'POST',body:JSON.stringify({append})}));toast(append?'Добавлено в конец списка':'Список открыт');}catch(error){toast(error.message,true);}}
 $('#loadTemplate').addEventListener('click',()=>loadTemplate(false)); $('#appendTemplate').addEventListener('click',()=>loadTemplate(true));
-$('#deleteTemplate').addEventListener('click',async()=>{const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}`,{method:'DELETE'}));$('#templateName').value='';toast('Набор удалён');}catch(error){toast(error.message,true);}});
+$('#deleteTemplate').addEventListener('click',async()=>{const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}`,{method:'DELETE'}));$('#templateName').value='';toast('Сохранённый список удалён');}catch(error){toast(error.message,true);}});
 // Форма добавления: два ясных случая вместо одной анкеты на всё.
 // «Уже настроен» — вставили адрес и ключ, который выдал сервер при установке.
 // «Настроить с нуля» — пароль root, и программа сама всё поставит.
@@ -1044,7 +1052,7 @@ $('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button
   render(await api(`/api/start/${ui.source}`,{method:'POST',body:тело}));ui.localPreviewId='';ui.localNote=null;toast(ui.output==='tunnel'?'Запускаю эфир и получаю публичную ссылку':'Эфир запускается');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
 $('#stopLive').addEventListener('click',async()=>{try{render(await api('/api/stop',{method:'POST'}));}catch(error){toast(error.message,true);}});
 $('#updateButton').addEventListener('click',()=>{const update=ui.status?.update;if(!update?.available)return;ui.offeredVersion=update.version;paintUpdateDialog(update);if(!updateDialog.open)updateDialog.showModal();});
-$('#showLogs').addEventListener('click',()=>{paintLogs();$('#logDialog').showModal();const журнал=$('#logs');журнал.scrollTop=журнал.scrollHeight;schedulePoll(0);});
+$('#showLogs').addEventListener('click',()=>{закрытьНастройки(true);paintLogs();$('#logDialog').showModal();const журнал=$('#logs');журнал.scrollTop=журнал.scrollHeight;schedulePoll(0);});
 $('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast://open-folder';});
 $('#appSoundSettings').addEventListener('click',()=>{window.location.href='vrcast://app-sound';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
@@ -1117,7 +1125,7 @@ $('#capturePreview').addEventListener('error',()=>{
   ui.frameTimer=setTimeout(()=>{ if(captureFramesWanted())$('#capturePreview').src=`/api/capture-preview?time=${Date.now()}`; },1000);
 });
 
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode,false);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#closeAction').value=state.config.closeToTray===false?'exit':'tray';paintCloseNote();$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode,false);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
   ui.windowHidden=document.hidden; document.documentElement.classList.toggle('window-hidden',document.hidden);
   render(state);
   // Опрос запускаем до списка источников: тот идёт через PowerShell и может
@@ -1285,3 +1293,68 @@ $('#cacheLimit').addEventListener('change',async()=>{
     toast('Лимит сохранён');
   }catch(error){ toast(error.message,true); }
 });
+
+// ─── Настройки ──────────────────────────────────────────────────────────────
+// Окно со всем редким: тема, крестик окна, кодировщик, туннель, место на
+// диске и журнал. Всё это раньше занимало основной экран и мешало найти
+// плейлист. Окно раскрывается и закрывается с короткой анимацией; при
+// системной настройке «меньше движения» — мгновенно.
+const settingsDialog=$('#settingsDialog');
+const ТЕМЫ={night:'#0e0c18',broadcast:'#0f1115',projector:'#121110'};
+
+function применитьТему(тема){
+  if(!ТЕМЫ[тема])тема='night';
+  if(тема==='night')delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme=тема;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content',ТЕМЫ[тема]);
+  for(const кнопка of $$('[data-theme-choice]'))кнопка.setAttribute('aria-checked',String(кнопка.dataset.themeChoice===тема));
+}
+применитьТему(document.documentElement.dataset.theme||'night');
+$('.theme-picker').addEventListener('click',event=>{
+  const кнопка=event.target.closest('[data-theme-choice]'); if(!кнопка)return;
+  применитьТему(кнопка.dataset.themeChoice);
+  try{ localStorage.setItem('theme',кнопка.dataset.themeChoice); }catch{}
+});
+// Стрелки внутри выбора темы — как у остальных переключателей.
+$('.theme-picker').addEventListener('keydown',event=>{
+  const шаг={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[event.key]; if(!шаг)return;
+  event.preventDefault();
+  const кнопки=$$('[data-theme-choice]'), i=кнопки.indexOf(document.activeElement);
+  const следующая=кнопки[(i+шаг+кнопки.length)%кнопки.length]; следующая.focus(); следующая.click();
+});
+
+function paintCloseNote(){
+  setText($('#closeActionNote'),$('#closeAction').value==='exit'
+    ?'Программа закроется, эфир остановится'
+    :'Эфир продолжится, значок будет у часов');
+}
+$('#closeAction').addEventListener('change',async()=>{
+  paintCloseNote(); ui.configEditUntil=Date.now()+2500;
+  try{ render(await saveConfig(false)); toast($('#closeAction').value==='exit'?'Крестик закрывает программу':'Крестик прячет окно в трей'); }
+  catch(error){ ui.configEditUntil=0; toast(error.message,true); }
+});
+
+const меньшеДвижения=matchMedia('(prefers-reduced-motion: reduce)');
+function открытьНастройки(){
+  if(settingsDialog.open)return;
+  settingsDialog.classList.remove('closing');
+  settingsDialog.showModal();
+  // Фокус — на выбранную тему, а не на крестик: так Tab ведёт по порядку.
+  settingsDialog.querySelector('[data-theme-choice][aria-checked="true"]')?.focus();
+}
+function закрытьНастройки(сразу=false){
+  if(!settingsDialog.open)return;
+  if(сразу||меньшеДвижения.matches){ settingsDialog.classList.remove('closing'); settingsDialog.close(); return; }
+  settingsDialog.classList.add('closing');
+  // Страховка по таймеру: animationend не придёт, если окно свёрнуто.
+  let таймер=0;
+  const готово=()=>{ clearTimeout(таймер); settingsDialog.removeEventListener('animationend',готово); settingsDialog.classList.remove('closing'); if(settingsDialog.open)settingsDialog.close(); };
+  таймер=setTimeout(готово,220);
+  settingsDialog.addEventListener('animationend',готово);
+}
+$('#openSettings').addEventListener('click',открытьНастройки);
+$('#closeSettings').addEventListener('click',()=>закрытьНастройки());
+settingsDialog.addEventListener('cancel',event=>{ event.preventDefault(); закрытьНастройки(); });
+let настройкиНажалиНаФон=false;
+settingsDialog.addEventListener('mousedown',event=>{ настройкиНажалиНаФон=(event.target===settingsDialog); });
+settingsDialog.addEventListener('click',event=>{ if(event.target===settingsDialog&&настройкиНажалиНаФон)закрытьНастройки(); });

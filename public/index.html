@@ -10,6 +10,11 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css?v=0.29.0">
+  <link rel="stylesheet" href="/ui.css?v=0.29.0">
+  <!-- Тема ставится до первой отрисовки: иначе при запуске на долю секунды
+       мелькала бы палитра по умолчанию. Хранилище может быть недоступно —
+       тогда просто остаётся «Ночной мир». -->
+  <script>try{var t=localStorage.getItem('theme');if(t==='broadcast'||t==='projector')document.documentElement.dataset.theme=t;}catch(e){}</script>
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" width="0" height="0"><defs>
@@ -17,36 +22,36 @@
 <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8.6 5.6h2.6v12.8H8.6zM12.8 5.6h2.6v12.8h-2.6z" fill="currentColor" stroke="none"/></symbol>
 <symbol id="i-prev" viewBox="0 0 24 24"><path d="M5 6.2h2.3v11.6H5z" fill="currentColor" stroke="none"/><path d="M19 6.2v11.6L9.4 12z" fill="currentColor" stroke="none"/></symbol>
 <symbol id="i-next" viewBox="0 0 24 24"><path d="M16.7 6.2H19v11.6h-2.3z" fill="currentColor" stroke="none"/><path d="M5 6.2v11.6L14.6 12z" fill="currentColor" stroke="none"/></symbol>
-<symbol id="i-display" viewBox="0 0 24 24"><rect x="3" y="4.6" width="18" height="12.2" rx="2.2"/><path d="M9 20.4h6M12 16.8v3.6"/></symbol>
-<symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.8" y="8.8" width="11.4" height="11.4" rx="2.2"/><path d="M15.4 5.4A1.6 1.6 0 0 0 13.8 3.8H5.6A1.8 1.8 0 0 0 3.8 5.6v8.2a1.6 1.6 0 0 0 1.6 1.6"/></symbol>
-<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.6v12.8M5.6 12h12.8"/></symbol>
-<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.4 6.8h15.2M9.4 6.8V4.6h5.2v2.2M6.6 6.8l.9 12.6h9l.9-12.6"/></symbol>
-<symbol id="i-close" viewBox="0 0 24 24"><path d="M6.4 6.4l11.2 11.2M17.6 6.4L6.4 17.6"/></symbol>
-<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.6 12a7.6 7.6 0 1 1-2.4-5.5"/><path d="M19.8 4.2v4.6h-4.6"/></symbol>
-<symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.2"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><path d="M12 2.6v2.8M12 18.6v2.8M2.6 12h2.8M18.6 12h2.8"/></symbol>
-<symbol id="i-repeat" viewBox="0 0 24 24"><path d="M7 7.4h7.6a3.2 3.2 0 0 1 3.2 3.2v1.2"/><path d="M14.4 4.6l2.8 2.8-2.8 2.8"/><path d="M17 16.6H9.4a3.2 3.2 0 0 1-3.2-3.2v-1.2"/><path d="M9.6 19.4l-2.8-2.8 2.8-2.8"/></symbol>
-<symbol id="i-repeat-one" viewBox="0 0 24 24"><path d="M7 7.4h7.6a3.2 3.2 0 0 1 3.2 3.2v1.2"/><path d="M14.4 4.6l2.8 2.8-2.8 2.8"/><path d="M17 16.6H9.4a3.2 3.2 0 0 1-3.2-3.2v-1.2"/><path d="M9.6 19.4l-2.8-2.8 2.8-2.8"/><path d="M10.9 10.9l1.5-.9v4.2"/></symbol>
-<symbol id="i-note" viewBox="0 0 24 24"><path d="M9.4 17.4V5.6l9-1.8v11.6"/><ellipse cx="6.9" cy="17.6" rx="2.6" ry="2.1"/><ellipse cx="15.9" cy="15.6" rx="2.6" ry="2.1"/></symbol>
-<symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3.4 6.6a1.8 1.8 0 0 1 1.8-1.8h3.6l1.9 2.4h8.1a1.8 1.8 0 0 1 1.8 1.8v8.4a1.8 1.8 0 0 1-1.8 1.8H5.2a1.8 1.8 0 0 1-1.8-1.8z"/><path d="M12 10.6v5.2M9.4 13.2h5.2"/></symbol>
-<symbol id="i-server" viewBox="0 0 24 24"><rect x="3.4" y="4.4" width="17.2" height="6" rx="1.8"/><rect x="3.4" y="13.6" width="17.2" height="6" rx="1.8"/><path d="M7 7.4h.02M7 16.6h.02"/></symbol>
-<symbol id="i-log" viewBox="0 0 24 24"><path d="M5.4 6.6h13.2M5.4 12h13.2M5.4 17.4h8.4"/></symbol>
-<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v9.6M8.2 10.4L12 14.2l3.8-3.8M5 19.4h14"/></symbol>
-<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13.6a3.6 3.6 0 0 0 5.2.3l2.6-2.6a3.6 3.6 0 0 0-5.1-5.1l-1.5 1.5"/><path d="M14 10.4a3.6 3.6 0 0 0-5.2-.3l-2.6 2.6a3.6 3.6 0 0 0 5.1 5.1l1.5-1.5"/></symbol>
-<symbol id="i-broadcast" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4"/><path d="M5 19a9.9 9.9 0 0 1 0-14M19 5a9.9 9.9 0 0 1 0 14"/></symbol>
-<symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.4L21 19.6H3z"/><path d="M12 10v4.2M12 17h.02"/></symbol>
-<symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
-<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.6 12s3.6-6.4 9.4-6.4S21.4 12 21.4 12s-3.6 6.4-9.4 6.4S2.6 12 2.6 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
-<symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M9.6 6a8.6 8.6 0 0 1 2.4-.4c5.8 0 9.4 6.4 9.4 6.4a17 17 0 0 1-3 3.8"/><path d="M6.3 7.8A17 17 0 0 0 2.6 12s3.6 6.4 9.4 6.4c1.5 0 2.8-.4 4-1"/><path d="M4.4 4.4l15.2 15.2"/></symbol>
-<symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.4a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.84 2.84l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56v.18a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.84-2.84l.06-.06a1.7 1.7 0 0 0 .34-1.88 1.7 1.7 0 0 0-1.56-1.04h-.18a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.56-1.1 1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.84-2.84l.06.06a1.7 1.7 0 0 0 1.88.34h.08A1.7 1.7 0 0 0 9.92 4.5v-.18a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.84 2.84l-.06.06a1.7 1.7 0 0 0-.34 1.88v.08a1.7 1.7 0 0 0 1.56 1.04h.18a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.54 1.04z"/></symbol>
-<symbol id="i-sound" viewBox="0 0 24 24"><path d="M5 9.4h3.2L12.6 5.6v12.8L8.2 14.6H5z"/><path d="M15.8 9.6a3.4 3.4 0 0 1 0 4.8M18.4 7a7 7 0 0 1 0 10"/></symbol>
-<symbol id="i-mute" viewBox="0 0 24 24"><path d="M5 9.4h3.2L12.6 5.6v12.8L8.2 14.6H5z"/><path d="M16.4 9.8l4.2 4.4M20.6 9.8l-4.2 4.4"/></symbol>
-<symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7.6 10l4.4 4.4L16.4 10"/></symbol>
+<symbol id="i-display" viewBox="0 0 24 24"><rect x="3" y="4.6" width="18" height="12.2" rx="2.2" vector-effect="non-scaling-stroke"/><path d="M9 20.4h6M12 16.8v3.6" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.8" y="8.8" width="11.4" height="11.4" rx="2.2" vector-effect="non-scaling-stroke"/><path d="M15.4 5.4A1.6 1.6 0 0 0 13.8 3.8H5.6A1.8 1.8 0 0 0 3.8 5.6v8.2a1.6 1.6 0 0 0 1.6 1.6" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.6v12.8M5.6 12h12.8" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.4 6.8h15.2M9.4 6.8V4.6h5.2v2.2M6.6 6.8l.9 12.6h9l.9-12.6" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="M6.4 6.4l11.2 11.2M17.6 6.4L6.4 17.6" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.6 12a7.6 7.6 0 1 1-2.4-5.5" vector-effect="non-scaling-stroke"/><path d="M19.8 4.2v4.6h-4.6" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.2" vector-effect="non-scaling-stroke"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><path d="M12 2.6v2.8M12 18.6v2.8M2.6 12h2.8M18.6 12h2.8" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-repeat" viewBox="0 0 24 24"><path d="M7 7.4h7.6a3.2 3.2 0 0 1 3.2 3.2v1.2" vector-effect="non-scaling-stroke"/><path d="M14.4 4.6l2.8 2.8-2.8 2.8" vector-effect="non-scaling-stroke"/><path d="M17 16.6H9.4a3.2 3.2 0 0 1-3.2-3.2v-1.2" vector-effect="non-scaling-stroke"/><path d="M9.6 19.4l-2.8-2.8 2.8-2.8" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-repeat-one" viewBox="0 0 24 24"><path d="M7 7.4h7.6a3.2 3.2 0 0 1 3.2 3.2v1.2" vector-effect="non-scaling-stroke"/><path d="M14.4 4.6l2.8 2.8-2.8 2.8" vector-effect="non-scaling-stroke"/><path d="M17 16.6H9.4a3.2 3.2 0 0 1-3.2-3.2v-1.2" vector-effect="non-scaling-stroke"/><path d="M9.6 19.4l-2.8-2.8 2.8-2.8" vector-effect="non-scaling-stroke"/><path d="M10.9 10.9l1.5-.9v4.2" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-note" viewBox="0 0 24 24"><path d="M9.4 17.4V5.6l9-1.8v11.6" vector-effect="non-scaling-stroke"/><ellipse cx="6.9" cy="17.6" rx="2.6" ry="2.1" vector-effect="non-scaling-stroke"/><ellipse cx="15.9" cy="15.6" rx="2.6" ry="2.1" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3.4 6.6a1.8 1.8 0 0 1 1.8-1.8h3.6l1.9 2.4h8.1a1.8 1.8 0 0 1 1.8 1.8v8.4a1.8 1.8 0 0 1-1.8 1.8H5.2a1.8 1.8 0 0 1-1.8-1.8z" vector-effect="non-scaling-stroke"/><path d="M12 10.6v5.2M9.4 13.2h5.2" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-server" viewBox="0 0 24 24"><rect x="3.4" y="4.4" width="17.2" height="6" rx="1.8" vector-effect="non-scaling-stroke"/><rect x="3.4" y="13.6" width="17.2" height="6" rx="1.8" vector-effect="non-scaling-stroke"/><path d="M7 7.4h.02M7 16.6h.02" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-log" viewBox="0 0 24 24"><path d="M5.4 6.6h13.2M5.4 12h13.2M5.4 17.4h8.4" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v9.6M8.2 10.4L12 14.2l3.8-3.8M5 19.4h14" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13.6a3.6 3.6 0 0 0 5.2.3l2.6-2.6a3.6 3.6 0 0 0-5.1-5.1l-1.5 1.5" vector-effect="non-scaling-stroke"/><path d="M14 10.4a3.6 3.6 0 0 0-5.2-.3l-2.6 2.6a3.6 3.6 0 0 0 5.1 5.1l1.5-1.5" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-broadcast" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4" vector-effect="non-scaling-stroke"/><path d="M5 19a9.9 9.9 0 0 1 0-14M19 5a9.9 9.9 0 0 1 0 14" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.4L21 19.6H3z" vector-effect="non-scaling-stroke"/><path d="M12 10v4.2M12 17h.02" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.6 12s3.6-6.4 9.4-6.4S21.4 12 21.4 12s-3.6 6.4-9.4 6.4S2.6 12 2.6 12z" vector-effect="non-scaling-stroke"/><circle cx="12" cy="12" r="2.8" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M9.6 6a8.6 8.6 0 0 1 2.4-.4c5.8 0 9.4 6.4 9.4 6.4a17 17 0 0 1-3 3.8" vector-effect="non-scaling-stroke"/><path d="M6.3 7.8A17 17 0 0 0 2.6 12s3.6 6.4 9.4 6.4c1.5 0 2.8-.4 4-1" vector-effect="non-scaling-stroke"/><path d="M4.4 4.4l15.2 15.2" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" vector-effect="non-scaling-stroke"/><path d="M19.4 14.4a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.84 2.84l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56v.18a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.84-2.84l.06-.06a1.7 1.7 0 0 0 .34-1.88 1.7 1.7 0 0 0-1.56-1.04h-.18a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.56-1.1 1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.84-2.84l.06.06a1.7 1.7 0 0 0 1.88.34h.08A1.7 1.7 0 0 0 9.92 4.5v-.18a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.84 2.84l-.06.06a1.7 1.7 0 0 0-.34 1.88v.08a1.7 1.7 0 0 0 1.56 1.04h.18a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.54 1.04z" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-sound" viewBox="0 0 24 24"><path d="M5 9.4h3.2L12.6 5.6v12.8L8.2 14.6H5z" vector-effect="non-scaling-stroke"/><path d="M15.8 9.6a3.4 3.4 0 0 1 0 4.8M18.4 7a7 7 0 0 1 0 10" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-mute" viewBox="0 0 24 24"><path d="M5 9.4h3.2L12.6 5.6v12.8L8.2 14.6H5z" vector-effect="non-scaling-stroke"/><path d="M16.4 9.8l4.2 4.4M20.6 9.8l-4.2 4.4" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7.6 10l4.4 4.4L16.4 10" vector-effect="non-scaling-stroke"/></symbol>
 </defs></svg>
   <div class="ambient" aria-hidden="true"></div>
   <div class="desktop-app">
     <header class="titlebar">
       <div class="brand"><span class="brand-mark"><i></i><i></i><i></i></span><b>VRCAST</b><span>BRIDGE</span><em id="appVersion"></em></div>
-      <span class="tool-progress" id="toolProgress" hidden></span><button class="update-badge" id="updateButton" hidden></button><div class="title-status"><span class="state-dot" id="stateDot"></span><span id="systemState">Проверка системы</span></div>
+      <span class="tool-progress" id="toolProgress" hidden></span><button class="update-badge" id="updateButton" hidden></button><div class="title-status"><span class="state-dot" id="stateDot"></span><span id="systemState">Проверка системы</span></div><button class="icon-btn title-settings" id="openSettings" type="button" title="Настройки" aria-label="Настройки" aria-haspopup="dialog"><svg class="ic" aria-hidden="true"><use href="#i-gear"/></svg></button>
     </header>
 
     <main class="workspace">
@@ -98,15 +103,7 @@
           </section>
 
           <section class="output-panel" id="tunnelOutput" hidden>
-            <span class="direct-caption">Через что</span>
-            <div class="seg wide" data-for="tunnelProviderSelect" role="radiogroup" aria-label="Провайдер быстрой ссылки"></div>
-            <select id="tunnelProviderSelect" hidden>
-              <option value="auto" data-short="Авто">Авто</option>
-              <option value="cloudflare" data-short="Cloudflare">Cloudflare</option>
-              <option value="pinggy" data-short="Pinggy">Pinggy</option>
-              <option value="localhostrun" data-short="localhost.run">localhost.run</option>
-            </select>
-            <p class="field-help">Бесплатная ссылка через чужой туннель — раздать можно за секунды, ничего не настраивая. Но задержка ~3&nbsp;секунды, тяжёлый поток рвётся, а адрес живёт только до закрытия программы. «Свой сервер» стабильнее и почти без задержки, зато нужен свой VPS.<br><br>«Авто» поднимает несколько туннелей сразу и берёт тот, что отзовётся первым. Cloudflare быстрее, но в строгих сетях и за VPN часто не подключается — тогда выручают Pinggy и localhost.run.</p>
+            <p class="field-help">Ссылка за секунды, без настройки. Задержка около 3&nbsp;секунд, адрес меняется при каждом запуске. Через что её получать — в&nbsp;настройках.</p>
           </section>
 
           <section class="output-panel" id="remoteOutput" hidden>
@@ -146,7 +143,6 @@
 
         <div class="rail-bottom">
           <div class="encoder"><span>Кодирует</span><b id="encoderLabel">проверка…</b><small id="streamHealth">поток запускается</small></div>
-          <button class="quiet-button" id="showLogs"><svg class="ic" aria-hidden="true"><use href="#i-log"/></svg>Журнал</button>
         </div>
       </aside>
 
@@ -198,15 +194,7 @@
                 <option value="4500" data-short="4,5">4500 Кбит/с</option>
                 <option value="8000" data-short="8">8000 Кбит/с</option>
               </select></div>
-            <div class="menu-row"><span>Кодирует</span>
-              <div class="seg" data-for="encoderMode" role="radiogroup" aria-label="Кодирует"></div>
-              <select id="encoderMode" hidden>
-                <option value="auto" data-short="Авто">Авто</option>
-                <option value="gpu" data-short="Видеокарта">Видеокарта</option>
-                <option value="cpu" data-short="Процессор">Процессор</option>
-              </select></div>
-            <p class="menu-note" id="encoderNote"></p>
-            <p class="menu-note" id="menuNote">На картинку в этом окне не влияет — только на то, что видят в VRChat.</p>
+            <p class="menu-note" id="menuNote">Меняет только то, что видят в VRChat.</p>
           </div>
         </div>
 
@@ -214,7 +202,7 @@
           <div class="now-cover" id="nowCover"><span><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg></span></div>
           <div class="now-copy"><small>В эфире</small><h1 id="nowTitle">Эфир не запущен</h1><p id="nowSource">Добавьте видео или выберите экран</p></div>
           <div class="action-buttons">
-            <button class="secondary" id="skipTrack" hidden>Следующее</button>
+            <button class="secondary icon-only" id="skipTrack" type="button" title="Следующее видео" aria-label="Следующее видео" hidden><svg class="ic" aria-hidden="true"><use href="#i-next"/></svg></button>
             <button class="go-live" id="goLive" hidden>Начать эфир</button>
             <button class="stop-live" id="stopLive" hidden>Остановить</button>
           </div>
@@ -231,21 +219,16 @@
           </form>
           <button class="drop-button" id="pickLocal"><span><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg></span><div><b>Файлы с компьютера</b><small>Или перетащите сюда</small></div></button>
           <label class="volume-control" for="mediaVolume"><span><b>Громкость в эфире</b><output id="mediaVolumeValue">100%</output></span><input id="mediaVolume" type="range" min="0" max="400" step="5" value="100"></label>
-          <div class="storage-box">
-            <div class="storage-head"><span><b>Место на диске</b></span><span id="cacheSize">0 МБ</span></div>
-            <label>Где хранить видео<select id="cacheRoot"></select></label>
-            <label>Сколько занимать<select id="cacheLimit"><option value="0">Авто</option><option value="1">1 ГБ</option><option value="2">2 ГБ</option><option value="4">4 ГБ</option><option value="8">8 ГБ</option><option value="16">16 ГБ</option></select></label>
-            <p class="field-help" id="cacheHint"></p>
-            <button id="clearCache" type="button">Удалить скачанное</button>
-          </div>
-          <div class="template-box">
-            <div class="template-head"><span><b>Наборы</b></span><span id="templateCount">0</span></div>
-            <select id="templateSelect" aria-label="Сохранённый набор"><option value="">Новый набор…</option></select>
-            <input id="templateName" type="text" maxlength="80" placeholder="Название набора">
-            <div class="template-actions">
-              <button id="saveTemplate">Сохранить</button><button id="loadTemplate" disabled>Загрузить</button><button id="appendTemplate" disabled title="Добавить набор к текущему списку"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg></button><button class="danger-mini" id="deleteTemplate" disabled title="Удалить набор"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
+          <details class="template-box" id="templateBox">
+            <summary class="template-head"><span><b>Сохранённые списки</b></span><span id="templateCount">0</span><svg class="ic chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+            <div class="template-body">
+              <select id="templateSelect" aria-label="Сохранённый список"><option value="">Новый список…</option></select>
+              <input id="templateName" type="text" maxlength="80" placeholder="Название списка" aria-label="Название списка">
+              <div class="template-actions">
+                <button id="saveTemplate" type="button">Сохранить</button><button id="loadTemplate" type="button" disabled title="Заменить текущий список сохранённым">Открыть</button><button id="appendTemplate" type="button" disabled title="Добавить в конец текущего списка" aria-label="Добавить в конец текущего списка"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg></button><button class="danger-mini" id="deleteTemplate" type="button" disabled title="Удалить сохранённый список" aria-label="Удалить сохранённый список"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
+              </div>
             </div>
-          </div>
+          </details>
           <div class="queue-toolbar"><span>Список</span><button id="clearQueue">Очистить</button></div>
           <div class="queue-list" id="queueList"><div class="empty-state">Пока пусто</div></div>
         </section>
@@ -291,9 +274,9 @@
               <option value="0.15">15%</option>
               <option value="0.05">5%</option>
             </select></label>
-            <p class="field-help">Тише только у вас. В эфире громкость прежняя.</p>
-            <button class="quiet-button" id="appSoundSettings">Не слышать приложение совсем</button>
-            <p class="field-help">Откроется страница Windows «Громкость и устройства приложений». Отправьте программу на другой выход — например на HDMI-монитор. У вас её станет не слышно, а в эфир звук уйдёт полностью: запись идёт с самой программы, а не с наушников.</p>
+            <p class="field-help">Тише только у вас, в эфире громкость прежняя.</p>
+            <button class="quiet-button" id="appSoundSettings" type="button">Не слышать приложение совсем</button>
+            <p class="field-help">В Windows отправьте приложение на другой выход, например HDMI. У вас станет тихо, в эфир звук пойдёт целиком.</p>
           </div>
           <div id="audioOutputFields" hidden><label>Какой выход<select id="audioOutput"></select></label></div>
           <div id="audioDeviceFields" hidden><label>Какой микрофон<select id="audioDevice"></select></label></div>
@@ -353,6 +336,59 @@
       <button class="update-later" id="updateLater">Позже</button>
       <button class="update-skip" id="updateSkip">Пропустить версию</button>
       <button class="update-now" id="updateNow">Обновить</button>
+    </div>
+  </dialog>
+  <!-- Настройки: всё редкое, что раньше занимало основной экран. Значения
+       живут в тех же скрытых select, что и раньше, — сохранение не менялось. -->
+  <dialog id="settingsDialog" aria-labelledby="settingsTitle">
+    <div class="dialog-head"><b id="settingsTitle">Настройки</b><button class="icon-btn" id="closeSettings" type="button" title="Закрыть" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+    <div class="settings-body">
+      <section class="settings-group" aria-labelledby="setLook">
+        <h3 id="setLook">Оформление</h3>
+        <div class="theme-picker" role="radiogroup" aria-label="Тема">
+          <button type="button" role="radio" aria-checked="true" data-theme-choice="night"><span class="swatch night"><i></i><i></i><i></i></span><b>Ночной мир</b></button>
+          <button type="button" role="radio" aria-checked="false" data-theme-choice="broadcast"><span class="swatch broadcast"><i></i><i></i><i></i></span><b>Эфирная</b></button>
+          <button type="button" role="radio" aria-checked="false" data-theme-choice="projector"><span class="swatch projector"><i></i><i></i><i></i></span><b>Проектор</b></button>
+        </div>
+      </section>
+
+      <section class="settings-group" aria-labelledby="setWindow">
+        <h3 id="setWindow">Окно программы</h3>
+        <div class="setting-row"><span><b>Крестик окна</b><small id="closeActionNote">Эфир продолжится, значок будет у часов</small></span>
+          <div class="seg" data-for="closeAction" role="radiogroup" aria-label="Крестик окна"></div>
+          <select id="closeAction" hidden><option value="tray" data-short="Прячет в трей">Прячет в трей</option><option value="exit" data-short="Закрывает">Закрывает программу</option></select></div>
+      </section>
+
+      <section class="settings-group" aria-labelledby="setStream">
+        <h3 id="setStream">Эфир</h3>
+        <div class="setting-row"><span><b>Кто кодирует</b><small id="encoderNote"></small></span>
+          <div class="seg" data-for="encoderMode" role="radiogroup" aria-label="Кто кодирует"></div>
+          <select id="encoderMode" hidden>
+            <option value="auto" data-short="Авто">Авто</option>
+            <option value="gpu" data-short="Видеокарта">Видеокарта</option>
+            <option value="cpu" data-short="Процессор">Процессор</option>
+          </select></div>
+        <div class="setting-row stacked"><span><b>Быстрая ссылка через</b><small>«Авто» берёт того, кто ответит первым. За VPN Cloudflare часто не подключается.</small></span>
+          <div class="seg wide" data-for="tunnelProviderSelect" role="radiogroup" aria-label="Быстрая ссылка через"></div>
+          <select id="tunnelProviderSelect" hidden>
+            <option value="auto" data-short="Авто">Авто</option>
+            <option value="cloudflare" data-short="Cloudflare">Cloudflare</option>
+            <option value="pinggy" data-short="Pinggy">Pinggy</option>
+            <option value="localhostrun" data-short="localhost.run">localhost.run</option>
+          </select></div>
+      </section>
+
+      <section class="settings-group" aria-labelledby="setDisk">
+        <h3 id="setDisk">Скачанные видео</h3>
+        <div class="setting-row"><span><b>Где хранить</b></span><select id="cacheRoot" aria-label="Где хранить скачанные видео"></select></div>
+        <div class="setting-row"><span><b>Сколько места занимать</b></span><select id="cacheLimit" aria-label="Сколько места занимать"><option value="0">Авто</option><option value="1">1 ГБ</option><option value="2">2 ГБ</option><option value="4">4 ГБ</option><option value="8">8 ГБ</option><option value="16">16 ГБ</option></select></div>
+        <div class="setting-row"><span><b id="cacheSize">0 МБ</b><small id="cacheHint"></small></span><button class="btn" id="clearCache" type="button"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg>Удалить скачанное</button></div>
+      </section>
+
+      <section class="settings-group" aria-labelledby="setHelp">
+        <h3 id="setHelp">Если что-то не так</h3>
+        <div class="setting-row"><span><b>Журнал</b><small>Что программа делала. Пригодится, чтобы разобраться со сбоем.</small></span><button class="btn" id="showLogs" type="button"><svg class="ic" aria-hidden="true"><use href="#i-log"/></svg>Открыть</button></div>
+      </section>
     </div>
   </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
