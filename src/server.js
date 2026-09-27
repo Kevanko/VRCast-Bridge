@@ -582,7 +582,10 @@ function recordStreamEvent(kind, detail, extra = {}, contextOverride = null) {
   logDetail(`[эфир] ${kind}: ${detail}${место}${хвост ? ` · ${хвост}` : ''}`);
 }
 
+let tunnelGeneration = 0;
+
 function stopPublicTunnel() {
+  tunnelGeneration++;
   const children = new Set([...tunnelCandidates, tunnelProcess].filter(Boolean));
   if (tunnelDeadlineTimer) clearTimeout(tunnelDeadlineTimer);
   if (tunnelFallbackTimer) clearTimeout(tunnelFallbackTimer);
@@ -721,7 +724,12 @@ async function lhrHostKey() {
 
 async function startSshTunnelCandidate() {
   if (!PLINK()) return;
+  const поколение = tunnelGeneration;
   const ключ = await lhrHostKey();
+  // Ключ ждём до 20 секунд. Если за это время туннель выключили (ушли в «Этот
+  // ПК» или сменили провайдера), подключаться уже нельзя: раньше plink всё
+  // равно поднимался, и публичная ссылка открывалась в режиме, где её не просили.
+  if (поколение !== tunnelGeneration || config.outputMode !== 'tunnel') return;
   if (!ключ) { log('SSH-туннель: сервер не отдал ключ, пропускаю'); return; }
   if (stopping || tunnelUrl) return;
   log('SSH-туннель: подключаюсь');
@@ -2305,6 +2313,7 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
       });
     }
     audioHelperKey = audioHelperSignature();
+    helperOwner.set(aux, child);
   }
   if (windowHelperArgs) {
     const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
@@ -2351,13 +2360,19 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
       });
     }
     windowHelperKey = [config.captureWindowHandle, windowHelperArgs[3], windowHelperArgs[5], windowHelperArgs[7]].join('|');
+    helperOwner.set(windowCapture, child);
   }
   attachProcessLogs(child, 'FFmpeg');
   child.on('close', code => {
     // Помощников гасим только если это конец захвата, а не пересборка
     // кодировщика: при пересборке их вывод сейчас перецепят на новый ffmpeg.
-    if (!keepAudioHelper && aux && activeAuxProcess === aux) { stopAudioHelper(aux); activeAuxProcess = null; audioHelperKey = ''; }
-    if (!keepWindowHelper && windowCapture && activeWindowProcess === windowCapture) { stopWindowHelper(windowCapture); activeWindowProcess = null; windowHelperKey = ''; }
+    // Флагов keep* мало: там, где запуск не ждёт PowerShell (весь экран,
+    // область, окно из свежего списка), новый ffmpeg успевает стартовать и
+    // флаги сбрасываются раньше, чем приходит close старого, — и он убивал
+    // помощника, уже перецепленного на новый. Эфир оставался без звука (или
+    // без картинки окна) до следующего запуска. Гасим только своих.
+    if (!keepAudioHelper && aux && activeAuxProcess === aux && helperOwner.get(aux) === child) { stopAudioHelper(aux); activeAuxProcess = null; audioHelperKey = ''; }
+    if (!keepWindowHelper && windowCapture && activeWindowProcess === windowCapture && helperOwner.get(windowCapture) === child) { stopWindowHelper(windowCapture); activeWindowProcess = null; windowHelperKey = ''; }
     const wasCurrent = activeProcess === child;
     if (wasCurrent) activeProcess = null;
     if (!stopping && code) log(`Захват остановился с кодом ${code}`);
@@ -2372,6 +2387,8 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
 // микшере Windows выставлялась заново. Если настройки самих помощников не
 // изменились, их вывод просто перецепляется на новый ffmpeg.
 let audioHelperKey = '';
+// Какому ffmpeg сейчас отдаёт поток каждый помощник.
+const helperOwner = new WeakMap();
 let windowHelperKey = '';
 let keepAudioHelper = false;
 let keepWindowHelper = false;
@@ -2400,6 +2417,8 @@ async function startScreen() {
       stopAudioHelper(activeAuxProcess); stopWindowHelper(activeWindowProcess);
       activeAuxProcess = null; activeWindowProcess = null; audioHelperKey = ''; windowHelperKey = '';
     }
+    // Запуск перебили «Стоп» или другой источник — это не ошибка, молча выходим.
+    if (ошибка.cancelled) return;
     throw ошибка;
   }
   finally { screenStarting = false; keepAudioHelper = false; keepWindowHelper = false; }
@@ -2415,6 +2434,14 @@ async function startScreenInner() {
   keepAudioHelper = тотЖеЗахват && Boolean(activeAuxProcess) && audioHelperSignature() === audioHelperKey;
   keepWindowHelper = тотЖеЗахват && Boolean(activeWindowProcess) && windowHelperSignature(текущийПрофиль) === windowHelperKey;
   stopActive(false, true, true);
+  // Список мониторов и окон спрашивается у PowerShell — это секунда и больше.
+  // Нажатый за это время «Стоп» или запуск очереди раньше ничего не отменял:
+  // захват всё равно поднимался поверх, и эфир показывал экран после «Стоп»
+  // или вместо только что запущенной очереди. Любой из них меняет поколение.
+  const поколение = playGeneration;
+  const проверитьОтмену = () => {
+    if (поколение !== playGeneration || shuttingDown) throw Object.assign(new Error('Запуск захвата отменён.'), { cancelled: true });
+  };
   currentId = null; currentStartedAt = null; currentDuration = null;
   const desired = streamProfile('screen');
   if (relayProcess && !sameProfile(relayProfile, desired) && !wasLive) restartRelaySession(desired);
@@ -2430,9 +2457,11 @@ async function startScreenInner() {
   if (config.captureMode === 'window') {
     if (!/^\d+$/.test(String(config.captureWindowHandle))) throw new Error('Выберите окно для захвата.');
     selectedWindow = (await listWindows()).find(item => item.handle === String(config.captureWindowHandle)) || null;
+    проверитьОтмену();
       windowCaptureState = !selectedWindow ? 'missing' : selectedWindow.minimized ? 'minimized' : 'visible';
   } else if (config.captureMode === 'monitor') {
     const monitors = await listMonitors();
+    проверитьОтмену();
     captureRect = monitors.find(item => item.id === config.captureMonitorId) || monitors.find(item => item.primary) || monitors[0];
     if (!captureRect) throw new Error('Windows не вернула список мониторов.');
   } else if (config.captureMode === 'region') {
@@ -2486,6 +2515,7 @@ async function startScreenInner() {
   args.push('-vf', `${fromGpu}scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
     '-af', `aresample=async=1:first_pts=0:min_hard_comp=0.100,volume=${captureVolume.toFixed(2)},alimiter=limit=0.97:level=disabled`,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile));
+  проверитьОтмену();
   runScreenProcess(args, audioHelperArgs, windowHelperArgs);
   startPublicTunnel();
 }
@@ -2762,7 +2792,9 @@ function pipeToRelay(child) {
   // Обработчик ошибок релея вешается один раз при его запуске: раньше он
   // добавлялся на каждый новый ролик, и за длинный эфир их набирались десятки
   // на одном сокете — Node предупреждал об утечке.
-  child.stdout.pipe(relayProcess.stdin, { end: false });
+  // Релея может не быть те доли секунды, пока он поднимается после падения:
+  // раньше здесь летел TypeError, и трек помечался «не удалось открыть».
+  if (relayProcess) child.stdout.pipe(relayProcess.stdin, { end: false });
   child.stdout.on('data', chunk => {
     trackRelayClock(chunk);
     for (const [id, pusher] of rtspPushProcesses) {
@@ -2777,6 +2809,28 @@ function pipeToRelay(child) {
       } else if (id === 'remote') noteRemoteCongestion();
     }
   });
+}
+
+let relayFailures = 0;
+let relayRecoveryTimer = null;
+
+function scheduleRelayRecovery() {
+  if (relayRecoveryTimer) return;
+  relayFailures += 1;
+  if (relayFailures > 5) {
+    log('Релей эфира падает раз за разом — перестаю поднимать сам. Запустите эфир заново.');
+    return;
+  }
+  relayRecoveryTimer = setTimeout(() => {
+    relayRecoveryTimer = null;
+    if (relayProcess || stopping || shuttingDown || !tools.ffmpeg) return;
+    try {
+      // Часы потока начинаются заново: прежний релей унёс их с собой.
+      if (activeKind) reanchorRelay();
+      else ensureRelay(streamProfile('queue'));
+    } catch (error) { log(`Восстановление канала: ${error.message}`); }
+  }, Math.min(10000, 800 * relayFailures));
+  relayRecoveryTimer.unref?.();
 }
 
 function startRelay(profile) {
@@ -2795,9 +2849,20 @@ function startRelay(profile) {
   attachProcessLogs(relayProcess, 'HLS relay');
   const relay = relayProcess;
   relay.on('close', code => {
-    if (relayProcess === relay) { relayProcess = null; relayStartedAt = 0; relayProfile = null; }
-    if (!stopping) log(`Релей эфира остановился с кодом ${code ?? 'нет'}`);
+    // Остановили сами (смена сессии, пересборка, выход) — к этому моменту
+    // relayProcess уже другой или пуст. Раньше и на это писалось «релей
+    // остановился», пугая человека на каждой смене качества.
+    if (relayProcess !== relay) return;
+    relayProcess = null; relayStartedAt = 0; relayProfile = null;
+    if (stopping || shuttingDown) return;
+    // Релей умер сам. Раньше его не поднимал никто: HLS и RTSP вставали
+    // насовсем, сторож перезапускал трек в пустоту («Cannot read properties of
+    // null»), и эфир останавливался. Спасало разве что автоснижение качества,
+    // заодно без нужды урезавшее кадры до конца эфира.
+    log(`Релей эфира неожиданно остановился (код ${code ?? 'нет'}) — поднимаю канал заново`);
+    scheduleRelayRecovery();
   });
+  setTimeout(() => { if (relayProcess === relay) relayFailures = 0; }, 20000).unref?.();
   // RTSP-пушер перезапускается вместе с сессией: у него свой muxer, поэтому
   // смена формата сессии не оставляет его со старыми параметрами потока.
   stopRtspPush();
@@ -3183,8 +3248,11 @@ function startCacheDownload(item) {
     const эфирИдёт = Boolean(activeKind);
     const args = ['--no-warnings', '--no-playlist', '--newline', '--retries', '8', '--fragment-retries', '8',
       '--concurrent-fragments', эфирИдёт ? '1' : '4', ...(эфирИдёт ? ['--limit-rate', '4M'] : []),
+      // «<=?» пропускает и форматы без известной высоты: у прямых файлов и
+      // страниц, разобранных общим разборщиком, её нет, и строгое «<=» давало
+      // «Requested format is not available» — такие ролики не кешировались никогда.
       '--socket-timeout', '20', '-f',
-      'bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/best[height<=1080]',
+      'bv*[vcodec^=avc1][height<=?1080]+ba[ext=m4a]/b[ext=mp4][height<=?1080]/best[height<=?1080]',
       '--merge-output-format', 'mp4', '--remux-video', 'mp4', '-o', join(directory, 'source.%(ext)s'), item.sourceUrl];
     const child = spawn(ytdlpPath(), args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
     mediaCacheProcesses.set(child, item.id);
@@ -3193,6 +3261,14 @@ function startCacheDownload(item) {
     child.on('error', reject);
     child.on('close', code => {
       mediaCacheProcesses.delete(child);
+      // Загрузку оборвали мы сами (старт эфира, переход по треку) — это не
+      // отказ источника. Раньше такой обрыв записывался в неудачи кеша, и
+      // ролик, прогревавшийся к эфиру, от нажатия «Старт» переставал качаться
+      // на 5 минут, потом на полчаса, потом до перезапуска — и шёл напрямую из сети.
+      if (cancelledCacheDownloads.has(child)) {
+        cancelledCacheDownloads.delete(child);
+        return reject(Object.assign(new Error('Загрузка остановлена.'), { cancelled: true }));
+      }
       if (code !== 0) return reject(new Error((stderr || `yt-dlp завершился с кодом ${code}`).trim().split(/\r?\n/).pop()));
       const file = cachedMediaPath(item.id);
       if (!file) return reject(new Error('Загруженный файл не найден.'));
@@ -3221,6 +3297,7 @@ function stableQueueMedia(item) {
   if (!готовый && cacheDeclinedNow(item.id)) return resolveItem(item);
   if (!готовый && Number(item.duration) > CACHE_MAX_SECONDS) return resolveItem(item);
   return downloadRemoteMedia(item).then(media => { clearMediaFailure(item.id); return media; }).catch(error => {
+    if (error.cancelled) return resolveItem(item);
     // Прямой поток YouTube живёт минуты и часто отдаёт 403 — на него
     // переключаемся молча, но причину пишем в файл для разбора.
     logDetail(`Буфер не собрался для «${item.title}»: ${error.message}`);
@@ -3230,9 +3307,12 @@ function stableQueueMedia(item) {
   });
 }
 
+const cancelledCacheDownloads = new WeakSet();
+
 function stopMediaCacheDownloads() {
   for (const [child, itemId] of mediaCacheProcesses) {
     mediaCacheJobs.delete(itemId);
+    cancelledCacheDownloads.add(child);
     try { child.kill('SIGTERM'); } catch {}
   }
   mediaCacheProcesses.clear();
@@ -3321,6 +3401,10 @@ async function buildUnityQueue(itemId = '') {
     if (generation !== unityBuildGeneration) throw new Error('Подготовка отменена.');
     unityBuild = { ...unityBuild, progress: 0.05, message: `Кодирование: ${selectedItem.title}`, updatedAt: Date.now() };
     const media = await stableQueueMedia(selectedItem);
+    // Отмену могли нажать, пока ролик качался. Без этой проверки после
+    // «Отменить» всё равно запускалось полное кодирование на минуты, а новая
+    // подготовка упиралась в «Очередь уже подготавливается».
+    if (generation !== unityBuildGeneration) throw new Error('Подготовка отменена.');
     const output = join(workDir, 'track.mp4');
     const canRemux = media.unityCompatible && (Number(config.playbackSpeed) || 1) === 1 && (Number(config.mediaVolume) || 0) === 1;
     await runUnityFfmpeg(canRemux ? unityFastRemuxArgs(media, output) : unityNormalizeArgs(media, output, profile), 'Трек', generation);
@@ -3406,8 +3490,13 @@ const ПАУЗА_ОЧЕРЕДИ = 25;
 const ПАУЗА_ПОВТОРА = 120;
 
 let prefetching = false;
+let prefetchPending = null;
 async function prefetchQueue(fromIndex = queueIndex) {
-  if (prefetching || !queue.length) return;
+  if (!queue.length) return;
+  // Просьбу прогреть, пришедшую посреди прогрева, не теряем: её шлёт старт
+  // трека, а старт эфира как раз обрывает текущие загрузки — и без повтора
+  // ближайшие ролики оставались некешированными до следующей смены трека.
+  if (prefetching) { prefetchPending = fromIndex; return; }
   prefetching = true;
   try {
     const ближайшие = [];
@@ -3423,7 +3512,14 @@ async function prefetchQueue(fromIndex = queueIndex) {
         log(`Прогрев «${item.title}»: ${error.message}`);
       }
     }
-  } finally { prefetching = false; }
+  } finally {
+    prefetching = false;
+    if (prefetchPending !== null && !shuttingDown) {
+      const следующий = prefetchPending;
+      prefetchPending = null;
+      prefetchQueue(следующий).catch(() => {});
+    }
+  }
 }
 
 // Декодирование отдаём видеокарте: при неудаче ffmpeg сам возвращается к
@@ -3514,6 +3610,14 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
   pausedPosition = sourcePosition;
   queuePaused = false;
   log(`Подготовка: ${item.title}`);
+  // Перемотка и переход заставку не поднимают — рассчитано на то, что источник
+  // откроется за доли секунды. Но разбор ссылки или докачка идут секундами, и
+  // всё это время релею нечего слать: край замирал, сторож принимал это за
+  // фриз — снижал качество до конца эфира и пересобирал канал. Если источник
+  // не готов быстро, на это время показываем заставку.
+  const заставка = setTimeout(() => {
+    if (generation === playGeneration && !activeProcess && !queuePaused && !stopping) startStandby(sessionProfile('queue'));
+  }, 500);
   try {
     // Ждать источник бесконечно нельзя: пока висит preparingNext, любое
     // переключение молча игнорируется — именно так эфир и «зависал намертво».
@@ -3521,6 +3625,10 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
     // Таймер обязательно снимается: без этого он срабатывал даже после
     // удачного старта — на каждом треке лишний разбор ссылки через yt-dlp,
     // строка в журнале и рывок в эфире ровно через двадцать секунд.
+    // Перемотка или продолжение трека, который уже играет напрямую, пока его
+    // докачка ещё идёт, не должны снова ждать эту докачку по 20 секунд: он
+    // уже доказал, что готовится долго, и прямая ссылка на него уже разобрана.
+    const ждать = sourcePosition > 0 && mediaCacheJobs.has(item.id) ? 1500 : 20000;
     let запасной = null;
     const media = await Promise.race([
       stableQueueMedia(item).then(результат => { clearTimeout(запасной); запасной = null; return результат; }),
@@ -3529,7 +3637,7 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
           запасной = null;
           log(`Источник «${item.title}» готовится дольше обычного — включаю напрямую`);
           resolveItem(item).then(resolvePromise, rejectPromise);
-        }, 20000);
+        }, ждать);
       }),
     ]).finally(() => { if (запасной) { clearTimeout(запасной); запасной = null; } });
     if (stopping || generation !== playGeneration || queuePaused) return;
@@ -3588,6 +3696,7 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
       else stopActive();
     }
   } finally {
+    clearTimeout(заставка);
     preparingNext = false;
     consumeManualTransition(generation);
   }
@@ -3613,6 +3722,10 @@ function stopActive(clearCurrent = true, keepTunnel = true, keepRelay = true) {
   if (!keepAudioHelper) stopAudioHelper(activeAuxProcess);
   if (!keepWindowHelper) stopWindowHelper(activeWindowProcess);
   stopProducer(activeProcess);
+  // На паузе в эфире стоит стоп-кадр трека — он живёт на месте заставки, и
+  // startStandby его не трогал: после «Стоп» зрители так и видели замерший
+  // кадр фильма вместо экрана ожидания.
+  if (queuePaused) stopStandby();
   if (!keepRelay) { stopStandby(); stopRtspPush(); relayProcess?.kill('SIGTERM'); relayProcess = null; relayStartedAt = 0; relayProfile = null; }
   if (!keepTunnel) stopPublicTunnel();
   activeProcess = null; activeKind = null;
@@ -4227,8 +4340,11 @@ function serveRangeMp4(req, res, filePath, public_ = false) {
     if (req.method === 'HEAD') res.end(); else createReadStream(filePath).pipe(res);
     return true;
   }
-  const start = range[1] ? Math.min(size - 1, Number(range[1])) : 0;
-  const end = range[2] ? Math.min(size - 1, Number(range[2])) : size - 1;
+  // «bytes=-N» — это последние N байт, а не первые: так плееры дочитывают
+  // индекс MP4 с конца файла, и раньше они получали вместо него начало.
+  const suffix = !range[1] && range[2];
+  const start = suffix ? Math.max(0, size - Number(range[2])) : range[1] ? Math.min(size - 1, Number(range[1])) : 0;
+  const end = !suffix && range[2] ? Math.min(size - 1, Number(range[2])) : size - 1;
   if (start > end || !Number.isFinite(start) || !Number.isFinite(end)) {
     res.writeHead(416, { 'Content-Range': `bytes */${size}` }); res.end(); return true;
   }
@@ -4677,7 +4793,9 @@ process.on('unhandledRejection', reason => {
 function killAllChildren() {
   const дети = [activeProcess, activeAuxProcess, activeWindowProcess, relayProcess, standbyProcess,
     pauseFrameProcess, mediaMtxProcess, tunnelProcess, unityBuildProcess, previewProcess, windowWatcher,
-    ...rtspPushProcesses.values(), ...mediaCacheProcesses.values(), ...tunnelCandidates, ...previewChildren];
+    // mediaCacheProcesses хранит процесс в ключе (значение — id трека): раньше
+    // здесь брались значения, и загрузки yt-dlp переживали выход программы.
+    ...rtspPushProcesses.values(), ...mediaCacheProcesses.keys(), ...tunnelCandidates, ...previewChildren];
   for (const child of дети) { try { child?.kill('SIGKILL'); } catch {} }
 }
 process.on('exit', killAllChildren);
