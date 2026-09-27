@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { request as httpRequest } from 'node:http';
+import { createServer as createHttpServer, request as httpRequest } from 'node:http';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -503,4 +504,156 @@ test('белый IP даёт другу прямую ссылку через и�
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ whiteIp: '' }),
   });
+});
+
+// Дочерние процессы тестового сервера: по ним видно, что реально запущено.
+function serverChildren() {
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    `Get-CimInstance Win32_Process -Filter "ParentProcessId=${server.pid}" | ForEach-Object { "$($_.ProcessId)|$($_.Name)|$($_.CommandLine)" }`],
+  { windowsHide: true, encoding: 'utf8', timeout: 20000 });
+  return String(result.stdout || '').split(/\r?\n/).filter(Boolean).map(line => {
+    const [pid, name, ...rest] = line.split('|');
+    return { pid: Number(pid), name, commandLine: rest.join('|') };
+  });
+}
+
+const api = (path, body) => fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: body === undefined ? undefined : JSON.stringify(body) });
+const currentStatus = () => fetch(`http://127.0.0.1:${port}/api/status`).then(response => response.json());
+
+test('«Стоп» во время запуска захвата не поднимает захват поверх остановки', async () => {
+  // Монитор: запуск ждёт список мониторов от PowerShell — именно в это окно
+  // раньше проваливался «Стоп», и захват всё равно выходил в эфир.
+  await api('/api/config', { outputMode: 'local', quality: '480p', fps: 30, captureMode: 'monitor', audioMode: 'none' });
+  const starting = api('/api/start/screen');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal((await api('/api/stop')).status, 200);
+  assert.equal((await starting).status, 200, 'отменённый запуск — не ошибка');
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  const state = await currentStatus();
+  assert.equal(state.running, false, `после «Стоп» эфир не должен идти (activeKind=${state.activeKind})`);
+  assert.ok(!serverChildren().some(child => /gdigrab|ddagrab/.test(child.commandLine)), 'процесс захвата экрана не должен остаться');
+  await api('/api/stop');
+});
+
+test('живая перенастройка захвата не убивает помощника системного звука', { skip: !existsSync(new URL('../tools/VRCast.AudioCapture.exe', import.meta.url)) }, async () => {
+  // Область запускается без ожидания PowerShell: новый ffmpeg стартует раньше,
+  // чем приходит close старого, и тот раньше гасил перецепленного помощника.
+  const settings = { outputMode: 'local', quality: '480p', fps: 30, captureMode: 'region', regionX: 0, regionY: 0, regionWidth: 320, regionHeight: 240, audioMode: 'system' };
+  await api('/api/config', settings);
+  assert.equal((await api('/api/start/screen')).status, 200);
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  const helpers = () => serverChildren().filter(child => /AudioCapture/i.test(child.name)).map(child => child.pid);
+  const before = helpers();
+  assert.equal(before.length, 1, 'помощник звука должен работать');
+  assert.equal((await api('/api/config', { ...settings, captureVolume: 1.2, applyLive: true })).status, 200);
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  assert.deepEqual(helpers(), before, 'тот же помощник звука обязан пережить перенастройку, а не умереть молча');
+  await api('/api/stop');
+  await api('/api/config', { ...settings, captureVolume: 1.5, audioMode: 'none' });
+});
+
+test('упавший релей поднимается сам, эфир не останавливается', async () => {
+  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  // Автоснижение качества выключено: раньше только оно случайно пересобирало
+  // релей, а без него эфир умирал с «Cannot read properties of null».
+  await api('/api/config', { outputMode: 'local', autoQuality: false });
+  await api('/api/queue/local', { paths: [join(dataDirectory, 'seek-stress.mp4')] });
+  await api('/api/config', { outputMode: 'local', loopMode: 'all', autoQuality: false });
+  assert.equal((await api('/api/start/queue')).status, 200);
+  await new Promise(resolve => setTimeout(resolve, 4000));
+  const relay = serverChildren().find(child => /-c copy/.test(child.commandLine) && /-f hls/.test(child.commandLine));
+  assert.ok(relay, 'релей должен работать');
+  process.kill(relay.pid);
+  let state;
+  const deadline = Date.now() + 12000;
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  while (Date.now() < deadline) {
+    state = await currentStatus();
+    if (state.stream.state === 'ready' && state.activeKind === 'queue') break;
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+  assert.equal(state.activeKind, 'queue', 'эфир не должен останавливаться из-за упавшего релея');
+  assert.equal(state.stream.state, 'ready', 'HLS должен подняться снова');
+  assert.ok(!state.logs.some(line => /Cannot read properties of null/.test(line)), 'без ошибок обращения к пустому релею');
+  await api('/api/stop');
+  await api('/api/config', { outputMode: 'local', loopMode: 'once', autoQuality: true });
+});
+
+test('«Стоп» на паузе возвращает заставку вместо стоп-кадра', async () => {
+  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  await api('/api/queue/local', { paths: [join(dataDirectory, 'seek-stress.mp4')] });
+  await api('/api/start/queue');
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  await api('/api/playback', { action: 'pause' });
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  assert.ok(serverChildren().some(child => /pause-frame\.png/.test(child.commandLine)), 'на паузе в эфире стоп-кадр');
+  await api('/api/stop');
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  const children = serverChildren();
+  assert.ok(!children.some(child => /pause-frame\.png/.test(child.commandLine)), 'после «Стоп» стоп-кадр трека не должен оставаться в эфире');
+  assert.ok(children.some(child => /standby\.png|color=c=0x17121f/.test(child.commandLine)), 'после «Стоп» в эфире заставка ожидания');
+});
+
+test('Range «bytes=-N» отдаёт последние N байт файла', async () => {
+  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  const file = join(dataDirectory, 'seek-stress.mp4');
+  const added = await api('/api/queue/local', { paths: [file] }).then(response => response.json());
+  const response = await fetch(`http://127.0.0.1:${port}/api/local-media/${added.added[0].id}`, { headers: { Range: 'bytes=-100' } });
+  assert.equal(response.status, 206);
+  const body = Buffer.from(await response.arrayBuffer());
+  const whole = readFileSync(file);
+  assert.equal(body.length, 100);
+  assert.ok(body.equals(whole.subarray(whole.length - 100)), 'должен прийти хвост файла, а не начало');
+  assert.equal(response.headers.get('content-range'), `bytes ${whole.length - 100}-${whole.length - 1}/${whole.length}`);
+});
+
+test('старт эфира не лишает прогреваемый ролик кеша', async () => {
+  // Медленный «сайт» с роликом без расширения в адресе: он идёт через yt-dlp.
+  const clip = join(dataDirectory, 'slow-remote.mp4');
+  const made = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30',
+    '-f', 'lavfi', '-i', 'sine=frequency=500', '-t', '40', '-b:v', '2500k', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-shortest', '-movflags', '+faststart', '-y', clip], { windowsHide: true, timeout: 60000 });
+  assert.equal(made.status, 0);
+  const data = readFileSync(clip);
+  const site = createHttpServer((req, res) => {
+    const range = /bytes=(\d+)-(\d*)/.exec(req.headers.range || '');
+    const from = range ? Number(range[1]) : 0, to = range && range[2] ? Number(range[2]) : data.length - 1;
+    res.writeHead(range ? 206 : 200, { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes', 'Content-Length': to - from + 1,
+      ...(range ? { 'Content-Range': `bytes ${from}-${to}/${data.length}` } : {}) });
+    if (req.method === 'HEAD') return res.end();
+    let position = from;
+    const pump = () => {
+      if (res.destroyed) return;
+      const chunk = data.subarray(position, Math.min(to + 1, position + 16384)); position += chunk.length;
+      if (!chunk.length) return res.end();
+      res.write(chunk); setTimeout(pump, 100);
+    };
+    pump();
+  });
+  await new Promise(resolve => site.listen(0, '127.0.0.1', resolve));
+  try {
+    await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+    await api('/api/queue/local', { paths: [join(dataDirectory, 'seek-stress.mp4')] });
+    const added = await api('/api/queue', { url: `http://127.0.0.1:${site.address().port}/watch/clip` });
+    assert.equal(added.status, 201);
+    const remoteId = (await added.json()).added[0].id;
+    const downloading = async timeout => {
+      const deadline = Date.now() + timeout;
+      while (Date.now() < deadline) {
+        if ((await currentStatus()).cache.downloading.includes(remoteId)) return true;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      return false;
+    };
+    assert.ok(await downloading(15000), 'ролик должен начать прогреваться сразу после добавления');
+    // Старт эфира обрывает фоновые загрузки — ради канала. Но это не отказ
+    // источника: как только трек заиграл, прогрев следующего обязан вернуться.
+    await api('/api/start/queue');
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    assert.ok(await downloading(15000), 'после старта эфира прогрев ролика должен продолжиться, а не откладываться на минуты');
+  } finally {
+    await api('/api/stop');
+    await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+    site.closeAllConnections?.(); site.close();
+  }
 });
