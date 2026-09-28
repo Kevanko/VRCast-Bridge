@@ -2,7 +2,7 @@
   /* Палитра «Ночной мир» — единственный источник цветов. Темы в ui.css
      переопределяют эти же токены через :root[data-theme=…]. */
   --bg:#0e0c18;--surface:#16132a;--raise:#201c38;--edge:#332d55;--edge-strong:#463e72;
-  --text:#f4f1ff;--muted:#a8a0cc;--faint:#6f6893;
+  --text:#f4f1ff;--muted:#a8a0cc;--faint:#827ca2;
   --accent:#8f6bff;--accent-strong:#a78bff;--accent-soft:rgba(143,107,255,.14);--on-accent:#0e0a1f;
   --second:#38e1ff;--live:#ff4d6d;--ok:#3ee6a3;--cue:#ffc15e;--danger:#ff4d6d;
   --r:8px;--ease:cubic-bezier(.2,.8,.2,1);

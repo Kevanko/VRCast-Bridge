@@ -7,13 +7,13 @@
    те же токены, поэтому перекрашивается всё приложение сразу. */
 :root[data-theme="broadcast"]{
   --bg:#0f1115;--surface:#161920;--raise:#1e222b;--edge:#2c313c;--edge-strong:#3b4250;
-  --text:#eef1f6;--muted:#9aa3b2;--faint:#6b7382;
+  --text:#eef1f6;--muted:#9aa3b2;--faint:#7b8392;
   --accent:#4d9fff;--accent-strong:#74b3ff;--accent-soft:rgba(77,159,255,.14);--on-accent:#06121f;
   --second:#4d9fff;--live:#ff4757;--ok:#2fd98a;--cue:#ffb020;--danger:#ff4757;
 }
 :root[data-theme="projector"]{
   --bg:#121110;--surface:#1b1a18;--raise:#252321;--edge:#3a3733;--edge-strong:#4c4843;
-  --text:#f5f1e8;--muted:#aaa398;--faint:#77716a;
+  --text:#f5f1e8;--muted:#aaa398;--faint:#8a837b;
   --accent:#ffb547;--accent-strong:#ffc76e;--accent-soft:rgba(255,181,71,.14);--on-accent:#1a1206;
   --second:#ffb547;--live:#ff5a4e;--ok:#6ee28f;--cue:#ffd166;--danger:#ff5a4e;
 }
@@ -86,6 +86,12 @@ details.template-box[open]>summary .chevron{transform:rotate(180deg)}
 .template-actions button{font-size:12px}
 .template-actions button:first-child{background:var(--accent);color:var(--on-accent)}
 .template-actions .danger-mini{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 40%,var(--edge));background:transparent}
+/* Строка очереди — две соседние кнопки: выбор трека (обложка и название) и
+   удаление. Раньше вся строка была role="button" с кнопкой внутри. */
+.queue-item{grid-template-columns:minmax(0,1fr) 28px}
+.queue-pick{min-width:0;display:grid;grid-template-columns:44px minmax(0,1fr);gap:8px;align-items:center;
+  padding:0;border:0;border-radius:var(--r);background:none;color:inherit;text-align:left}
+.queue-pick:active:not(:disabled){transform:none}
 .queue-toolbar{margin:14px 2px 8px;color:var(--muted);font:600 12px "Golos Text",system-ui,sans-serif}
 .queue-toolbar button{padding:2px 6px;border-radius:6px;font-size:12px}
 .queue-toolbar button:hover{background:var(--raise);color:var(--text)}
@@ -115,6 +121,13 @@ dialog{padding:18px;border:1px solid var(--edge-strong);border-radius:var(--r-lg
 .dialog-head .icon-btn,#serverDialog .dialog-head #serverDialogClose,.dialog-head #closeLogs{width:32px;height:32px;padding:0;display:grid;place-items:center;
   border:1px solid transparent;background:transparent;color:var(--muted);font-size:18px}
 .dialog-head .icon-btn:hover,#serverDialog .dialog-head #serverDialogClose:hover,.dialog-head #closeLogs:hover{background:var(--raise);color:var(--text)}
+/* Подтверждение: вопрос в заголовке, пояснение ниже, действие справа. */
+#confirmDialog{width:min(400px,92vw)}
+#confirmDialog .dialog-head{margin-bottom:8px}
+#confirmDialog .dialog-head b{font-size:15px;line-height:1.35}
+.confirm-text{margin:0;color:var(--muted);font-size:12px;line-height:1.5}
+#confirmDialog .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+#confirmDialog .btn{min-width:96px;font-size:12px}
 .update-actions button{font-size:12px}
 .update-actions .update-now{border-color:var(--accent);background:var(--accent);color:var(--on-accent)}
 

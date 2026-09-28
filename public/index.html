@@ -289,8 +289,8 @@
     </main>
   </div>
 
-  <dialog id="logDialog"><div class="dialog-head"><b>Журнал</b><button id="copyLogs" title="Скопировать весь журнал"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg>Скопировать</button><button id="openLogFolder" title="Открыть папку с журналом в проводнике"><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg>Папка</button><button id="closeLogs" title="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div><pre id="logs">Запуск…</pre></dialog>
-  <dialog id="serverDialog">
+  <dialog id="logDialog" aria-labelledby="logTitle"><div class="dialog-head"><b id="logTitle">Журнал</b><button id="copyLogs" title="Скопировать весь журнал"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg>Скопировать</button><button id="openLogFolder" title="Открыть папку с журналом в проводнике"><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg>Папка</button><button id="closeLogs" title="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div><pre id="logs">Запуск…</pre></dialog>
+  <dialog id="serverDialog" aria-labelledby="serverDialogTitle">
     <div class="dialog-head"><b id="serverDialogTitle">Сервер</b><button id="serverDialogClose" type="button" aria-label="Закрыть">×</button></div>
     <label>Название<input id="serverRename" type="text" maxlength="60" autocomplete="off"></label>
     <label>Адрес<input id="serverAddress" type="text" placeholder="123.45.67.89" autocomplete="off"></label>
@@ -327,8 +327,8 @@
     </div>
   </dialog>
 
-  <dialog id="updateDialog">
-    <div class="update-head"><b>Новая версия</b><span id="updateVersion"></span></div>
+  <dialog id="updateDialog" aria-labelledby="updateTitle">
+    <div class="update-head"><b id="updateTitle">Новая версия</b><span id="updateVersion"></span></div>
     <p class="update-note" id="updateNotes"></p>
     <div class="update-state" id="updateProgress">Скачиваю…</div>
     <div class="update-bar" id="updateBar"><i></i></div>
@@ -389,6 +389,16 @@
         <h3 id="setHelp">Если что-то не так</h3>
         <div class="setting-row"><span><b>Журнал</b><small>Что программа делала. Пригодится, чтобы разобраться со сбоем.</small></span><button class="btn" id="showLogs" type="button"><svg class="ic" aria-hidden="true"><use href="#i-log"/></svg>Открыть</button></div>
       </section>
+    </div>
+  </dialog>
+  <!-- Подтверждение для того, что не вернуть: очистка очереди, удаление
+       сервера, списка и скачанного. Одно окно на все случаи — подтвердить(). -->
+  <dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmText">
+    <div class="dialog-head"><b id="confirmTitle">Точно?</b></div>
+    <p class="confirm-text" id="confirmText" hidden></p>
+    <div class="dialog-actions">
+      <button class="btn" id="confirmCancel" type="button">Отмена</button>
+      <button class="btn danger" id="confirmOk" type="button">Удалить</button>
     </div>
   </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>

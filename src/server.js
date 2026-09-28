@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.14';
+const APP_VERSION = '0.54.15';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -412,10 +412,24 @@ async function listDrives() {
   return есть.filter(Boolean);
 }
 
+// Настройки, очередь и шаблоны пишем через временный файл и переименование:
+// сбой питания или полный диск посреди записи оставляют старый целый файл,
+// а не обрезанный JSON, который при следующем старте молча стал бы пустым.
+function writeJsonAtomic(file, value) {
+  mkdirSync(DATA_DIR, { recursive: true });
+  const temporary = `${file}.tmp`;
+  const text = JSON.stringify(value, null, 2);
+  writeFileSync(temporary, text, 'utf8');
+  // Антивирус или индексатор иногда держит файл, и Windows отказывает в
+  // замене (EPERM/EBUSY). Тогда пишем по-старому, прямо в файл, — лучше так,
+  // чем потерять изменение.
+  try { renameSync(temporary, file); }
+  catch { writeFileSync(file, text, 'utf8'); rmSync(temporary, { force: true }); }
+}
+
 function saveConfig(next) {
   config = { ...config, ...next };
-  mkdirSync(DATA_DIR, { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
+  writeJsonAtomic(CONFIG_FILE, config);
 }
 
 // Дочитывает то, чего не хватает, не блокируя работу: длительность, кодеки,
@@ -470,7 +484,15 @@ function normalizeQueueItem(raw, freshId = false) {
   if (!raw || typeof raw !== 'object' || typeof raw.sourceUrl !== 'string' || !raw.sourceUrl.trim()) return null;
   const local = Boolean(raw.local);
   const sourceUrl = local ? resolve(raw.sourceUrl) : raw.sourceUrl.trim();
-  if (local && (!existsSync(sourceUrl) || !statSync(sourceUrl).isFile())) return null;
+  // Пропавший файл не выбрасываем: внешний диск или сетевая папка могли быть
+  // просто не подключены, и следующее сохранение навсегда стёрло бы трек из
+  // очереди и шаблонов. Оставляем его недоступным — он краснеет в списке,
+  // эфир его пропускает, а вернётся диск — трек снова заиграет.
+  let пропал = false;
+  if (local) {
+    try { if (!statSync(sourceUrl).isFile()) return null; }
+    catch { пропал = true; }
+  }
   if (!local && !validWebUrl(sourceUrl)) return null;
   // Разбор файла тут больше не делается. Условие «нет кодека» истинно для
   // любого mp3, и шаблон из шестидесяти песен превращался в шестьдесят
@@ -485,7 +507,7 @@ function normalizeQueueItem(raw, freshId = false) {
     hasVideo: technical.hasVideo ?? raw.hasVideo !== false, hasAudio: technical.hasAudio ?? raw.hasAudio !== false,
     videoCodec: String(technical.videoCodec || raw.videoCodec || ''), audioCodec: String(technical.audioCodec || raw.audioCodec || ''),
     unityCompatible: Boolean(technical.unityCompatible ?? raw.unityCompatible),
-    unavailable: Boolean(raw.unavailable), probed: Boolean(raw.probed),
+    unavailable: пропал || Boolean(raw.unavailable), probed: Boolean(raw.probed),
     direct: Boolean(raw.direct), live: Boolean(raw.live),
   };
 }
@@ -498,8 +520,7 @@ function loadQueue() {
 }
 
 function saveQueue() {
-  mkdirSync(DATA_DIR, { recursive: true });
-  writeFileSync(QUEUE_FILE, JSON.stringify(queue, null, 2), 'utf8');
+  writeJsonAtomic(QUEUE_FILE, queue);
   warmQueueSoon();
 }
 
@@ -532,8 +553,7 @@ function loadTemplates() {
 }
 
 function saveTemplates() {
-  mkdirSync(DATA_DIR, { recursive: true });
-  writeFileSync(TEMPLATES_FILE, JSON.stringify(templates, null, 2), 'utf8');
+  writeJsonAtomic(TEMPLATES_FILE, templates);
 }
 
 function templateSummaries() {
@@ -1337,6 +1357,7 @@ async function downloadWithResume(url, target, onProgress, попыток = 4) {
     try { уже = statSync(target).size; } catch {}
     const headers = { 'User-Agent': 'VRCast-Bridge' };
     if (уже > 0) headers.Range = `bytes=${уже}-`;
+    let файл = null;
     try {
       const ответ = await fetch(url, { headers, signal: AbortSignal.timeout(600000) });
       // 206 — сервер отдаёт продолжение, 200 — не умеет и шлёт файл целиком.
@@ -1348,18 +1369,24 @@ async function downloadWithResume(url, target, onProgress, попыток = 4) {
       if (!продолжение) уже = 0;
       const остаток = Number(ответ.headers.get('content-length')) || 0;
       const всего = продолжение ? уже + остаток : остаток;
-      const файл = createWriteStream(target, продолжение ? { flags: 'a' } : { flags: 'w' });
+      файл = createWriteStream(target, продолжение ? { flags: 'a' } : { flags: 'w' });
+      // Постоянный обработчик: асинхронный ENOSPC/EIO после удачного write()
+      // иначе стал бы необработанным событием и уронил весь процесс.
+      let ошибкаЗаписи = null;
+      файл.on('error', error => { ошибкаЗаписи = error; });
       let принято = уже;
       let последнийПроцент = -1;
       for await (const кусок of ответ.body) {
         // Ждём и ошибку тоже: на переполненном диске drain не придёт никогда,
         // и загрузка висела бы вечно.
+        if (ошибкаЗаписи) throw ошибкаЗаписи;
         if (!файл.write(кусок)) await new Promise((ok, bad) => { файл.once('drain', ok); файл.once('error', bad); });
         принято += кусок.length;
         const процент = всего ? Math.round(принято / всего * 100) : 0;
         if (процент !== последнийПроцент) { последнийПроцент = процент; onProgress?.(принято, всего); }
       }
       await new Promise((resolvePromise, reject) => файл.end(error => error ? reject(error) : resolvePromise()));
+      if (ошибкаЗаписи) throw ошибкаЗаписи;
       if (всего && принято < всего) throw new Error('связь оборвалась');
       return;
     } catch (ошибка) {
@@ -1368,6 +1395,10 @@ async function downloadWithResume(url, target, onProgress, попыток = 4) {
         logDetail(`Загрузка ${url.slice(0, 80)}: ${последняя}, продолжу с места обрыва (попытка ${попытка + 1})`);
         await new Promise(r => setTimeout(r, 1500 * попытка));
       }
+    } finally {
+      // При сбое поток закрываем сами и ждём, пока отпустит файл: иначе
+      // следующая попытка докачки шла бы поверх ещё открытого дескриптора.
+      if (файл && !файл.closed) await new Promise(ok => { файл.once('close', ok); файл.destroy(); });
     }
   }
   throw new Error(последняя || 'не удалось скачать');
@@ -1489,17 +1520,28 @@ async function ensureTools() {
     process.env.PATH = `${TOOL_DIR};${process.env.PATH}`;
   }
   await refreshToolsAsync();
-  const нужно = [];
-  if (!existsSync(join(TOOL_DIR, 'yt-dlp.exe')) && !existsSync(YTDLP_UPDATED)) нужно.push('yt-dlp.exe');
-  if (!tools.mediamtx) нужно.push('mediamtx.exe');
-  if (!tools.ffmpeg) нужно.push('ffmpeg.exe');
-  if (!tools.cloudflared) нужно.push('cloudflared.exe');
-  for (const name of нужно) await downloadTool(name);
-  if (нужно.length) {
+  // Сначала то, без чего не работает сама ссылка, — FFmpeg и MediaMTX, оба
+  // сразу. Как только они есть, поднимаем локальный эфир и только потом
+  // догружаем yt-dlp (нужен лишь для роликов из сети) и cloudflared (туннель).
+  const важное = [];
+  if (!tools.ffmpeg) важное.push('ffmpeg.exe');
+  if (!tools.mediamtx) важное.push('mediamtx.exe');
+  const остальное = [];
+  if (!existsSync(join(TOOL_DIR, 'yt-dlp.exe')) && !existsSync(YTDLP_UPDATED)) остальное.push('yt-dlp.exe');
+  if (!tools.cloudflared) остальное.push('cloudflared.exe');
+  const поднять = async () => {
+    // Свежескачанный ffmpeg лежит в своей папке — без неё в PATH его не найти.
+    if (existsSync(join(TOOL_DIR, 'ffmpeg.exe')) && !process.env.PATH.includes(TOOL_DIR)) {
+      process.env.PATH = `${TOOL_DIR};${process.env.PATH}`;
+    }
     await refreshToolsAsync();
     if (tools.mediamtx && !mediaMtxProcess) startMediaMtx();
     if (tools.ffmpeg && !relayProcess) { try { ensureRelay(streamProfile('queue')); } catch {} }
-  }
+  };
+  await Promise.all(важное.map(name => downloadTool(name)));
+  if (важное.length) await поднять();
+  for (const name of остальное) await downloadTool(name);
+  if (остальное.length) await refreshToolsAsync();
 }
 
 let updateRetryTimer = null;
@@ -1516,7 +1558,10 @@ async function checkForUpdate() {
     const version = String(release.tag_name || '').replace(/^v/i, '');
     updateState = { ...updateState, checked: true, error: '' };
     if (!versionIsNewer(version, status().appVersion)) return;
-    const asset = (release.assets || []).find(item => /\.exe$/i.test(item.name));
+    // Берём файл по точному имени, а не первый попавшийся .exe: в релизе может
+    // появиться помощник или деинсталлятор. GitHub заменяет пробел в имени
+    // «VRCast Bridge.exe» точкой, поэтому годятся оба написания.
+    const asset = (release.assets || []).find(item => /^vrcast[ .]bridge\.exe$/i.test(String(item.name || '')));
     if (!asset) return;
     // Не качаем сразу: раньше загрузка стартовала сама, ещё до того как человек
     // нажал «Обновить», — выглядело криво. Теперь запоминаем ссылку, а качаем
@@ -1569,14 +1614,19 @@ async function downloadUpdate(url, expectedSize) {
 }
 
 // Совпадения размера мало: он ничего не говорит о том, чей это файл. Смотрим,
-// что скачанное подписано тем же издателем, что и сама программа. Полного
-// доверия к цепочке сертификатов здесь нет (сертификат свой), но подменить
-// файл на чужой или неподписанный уже не выйдет.
-const ИЗДАТЕЛЬ = 'CN=VRCast Bridge, O=VRCast Bridge';
+// что скачанное подписано ровно нашим сертификатом — сверяем отпечаток с
+// закреплённым (launcher/assets/vrcast-code-signing.cer). Одно имя в Subject
+// не годится: самоподписанный сертификат с тем же именем сделает кто угодно.
+// Полного доверия к цепочке нет (сертификат свой, в Root у людей его нет),
+// поэтому NotTrusted/UnknownError допустимы, а вот HashMismatch, NotSigned и
+// прочее — отказ: файл повреждён или подписан не тем.
+// При перевыпуске сертификата (sign.ps1, срок до 2031) отпечаток надо обновить.
+const ОТПЕЧАТОК = 'D1362EF2063676955579167816AC5856633D3A94';
+const ДОПУСТИМО = new Set(['Valid', 'NotTrusted', 'UnknownError']);
 
 async function проверитьПодпись(файл) {
   const скрипт = `(Get-AuthenticodeSignature -LiteralPath '${файл.replace(/'/g, "''")}') | `
-    + 'ForEach-Object { $_.Status.ToString() + [char]124 + $_.SignerCertificate.Subject }';
+    + 'ForEach-Object { $_.Status.ToString() + [char]124 + $_.SignerCertificate.Thumbprint }';
   // Powershell запускаем с чистым PSModulePath: у собранной программы он в
   // унаследованном окружении бывал пустым/битым, и модуль Microsoft.PowerShell
   // .Security не подгружался — Get-AuthenticodeSignature падал «команда найдена
@@ -1599,9 +1649,10 @@ async function проверитьПодпись(файл) {
     await new Promise(resolve => setTimeout(resolve, 800));
   }
   if (!строка) return { ok: false, причина: 'не удалось проверить (файл занят антивирусом)' };
-  const [состояние, издатель] = строка.split(String.fromCharCode(124));
+  const [состояние, отпечаток] = строка.split(String.fromCharCode(124));
   if (состояние === 'NotSigned') return { ok: false, причина: 'файл не подписан' };
-  if (!String(издатель || '').includes('VRCast Bridge')) return { ok: false, причина: 'чужой издатель' };
+  if (!ДОПУСТИМО.has(состояние)) return { ok: false, причина: `подпись недействительна: ${состояние}` };
+  if (String(отпечаток || '').trim().toUpperCase() !== ОТПЕЧАТОК) return { ok: false, причина: 'чужой издатель' };
   return { ok: true, причина: состояние };
 }
 
@@ -1613,6 +1664,9 @@ function applyUpdate() {
   const script = join(UPDATE_DIR, 'apply-update.cmd');
   const logFile = join(UPDATE_DIR, 'apply-update.log');
   const имя = basename(target);
+  // В .cmd знак % раскрывается даже внутри кавычек: папка «100% Games»
+  // превращалась в мусор, и обновление не ставилось. Удвоенный %% — буквальный.
+  const вКоманду = путь => String(путь).replace(/%/g, '%%');
   // Раньше скрипт ЖДАЛ, пока «VRCast Bridge.exe» закроется сам. Но при обновлении
   // сервер (node) завершался, а окно-оболочка оставалось открытым — скрипт ждал
   // его вечно и подмена не происходила («кнопка зависает»). А если оболочка
@@ -1623,15 +1677,15 @@ function applyUpdate() {
   writeFileSync(script, [
     '@echo off',
     'setlocal EnableExtensions',
-    `set "LOG=${logFile}"`,
+    `set "LOG=${вКоманду(logFile)}"`,
     '> "%LOG%" echo [%date% %time%] запуск установки',
     'timeout /t 1 /nobreak >nul',
-    `taskkill /f /im "${имя}" >nul 2>&1`,
+    `taskkill /f /im "${вКоманду(имя)}" >nul 2>&1`,
     '>> "%LOG%" echo закрыл оболочку (код %errorlevel%)',
     'set /a n=0',
     ':copy',
     'timeout /t 1 /nobreak >nul',
-    `copy /y "${UPDATE_FILE}" "${target}" >nul 2>&1`,
+    `copy /y "${вКоманду(UPDATE_FILE)}" "${вКоманду(target)}" >nul 2>&1`,
     'if not errorlevel 1 goto done',
     'set /a n+=1',
     '>> "%LOG%" echo попытка %n%: файл занят, жду',
@@ -1640,7 +1694,7 @@ function applyUpdate() {
     'goto end',
     ':done',
     '>> "%LOG%" echo скопировано, запускаю новую версию',
-    `start "" "${target}"`,
+    `start "" "${вКоманду(target)}"`,
     ':end',
     `del "%~f0"`,
     '',
@@ -2457,7 +2511,31 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
     if (!stopping && code) log(`Захват остановился с кодом ${code}`);
     if (wasCurrent && relayProcess) startStandby(sessionProfile('screen'));
     if (wasCurrent && !relayProcess) activeKind = null;
+    // Захват умер сам (сбой драйвера, устройства, ffmpeg), а не по «Стоп» или
+    // смене источника — те сначала снимают activeProcess. Раньше эфир молча
+    // оставался на заставке, а интерфейс показывал, что захват идёт.
+    if (wasCurrent && !stopping && !shuttingDown && code !== 0 && activeKind === 'screen') перезапуститьЗахват(code);
   });
+}
+
+// Самовосстановление захвата: не больше трёх попыток в минуту, с паузой,
+// растущей от попытки к попытке. Поколение сверяем при срабатывании таймера:
+// «Стоп» или переключение за это время отменяют перезапуск.
+let перезапускиЗахвата = [];
+function перезапуститьЗахват(code) {
+  const сейчас = Date.now();
+  перезапускиЗахвата = перезапускиЗахвата.filter(время => сейчас - время < 60000);
+  if (перезапускиЗахвата.length >= 3) {
+    log(`Захват экрана падает снова и снова (код ${code}) — остановлен. Ссылка работает, показывается заставка; запустите захват заново.`);
+    return stopActive();
+  }
+  перезапускиЗахвата.push(сейчас);
+  const поколение = playGeneration;
+  log(`Захват экрана неожиданно остановился (код ${code}) — перезапускаю`);
+  setTimeout(() => {
+    if (поколение !== playGeneration || stopping || shuttingDown || activeKind !== 'screen' || activeProcess || screenStarting) return;
+    startScreen().catch(error => log(`Перезапуск захвата: ${error.message}`));
+  }, 1000 * перезапускиЗахвата.length);
 }
 
 // Помощники звука и захвата окна переживают смену настроек кодировщика.
@@ -3712,8 +3790,22 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
   preparingNext = true;
   queueIndex = Math.max(0, Math.min(queue.length - 1, index));
   let item = queue[queueIndex];
+  // Локальный файл, помеченный недоступным, перед запуском проверяем заново
+  // (без блокировки: отключённый сетевой диск отвечает секундами). Нет файла —
+  // пропускаем, как и ролик, удалённый с сайта; появился — играем.
+  let файлаНет = false;
+  if (item?.local && item.unavailable) {
+    файлаНет = await access(item.sourceUrl).then(() => false, () => true);
+    // Пока ждали диск, могли нажать «Стоп», паузу или выбрать другой трек.
+    if (stopping || generation !== playGeneration || queuePaused || manualTransition) {
+      preparingNext = false;
+      return consumeManualTransition(generation);
+    }
+    if (файлаНет) log(`Файл недоступен и пропускается: ${item.title}`);
+    else { item.unavailable = false; saveQueue(); }
+  }
   // Недоступный ролик не пытаемся открыть: ищем ближайший рабочий дальше.
-  if (item && mediaFailure(item.id)?.permanent) {
+  if (item && (файлаНет || mediaFailure(item.id)?.permanent)) {
     const workable = queue.findIndex((entry, index) => index > queueIndex && !mediaFailure(entry.id)?.permanent);
     preparingNext = false;
     if (workable >= 0) return startQueueItem(workable, 0, generation);
@@ -3795,6 +3887,17 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
         playbackBusy = true;
         log(`Источник устарел — обновляю прямую ссылку: ${item.title}`);
         return setTimeout(() => startQueueItem(queueIndex, sourcePosition, generation, retry + 1), ПАУЗА_ПОВТОРА);
+      }
+      // Локальный файл, отыгравший уже какое-то время, с ненулевым кодом — это
+      // авария (ffmpeg упал или его убили), а не конец файла: штатный EOF даёт
+      // код 0. Раньше такой трек молча считался доигранным. Продолжаем тот же
+      // трек с места падения, но не больше двух раз подряд.
+      const позиция = sourcePosition + ranFor * (Number(config.playbackSpeed) || 1);
+      const доКонца = currentDuration ? currentDuration - позиция : Infinity;
+      if (code && code !== 255 && item.local && ranFor >= 2 && доКонца > 2 && retry < 2) {
+        playbackBusy = true;
+        log(`Трек прервался (код ${code}) — продолжаю с ${Math.floor(позиция)} с: ${item.title}`);
+        return setTimeout(() => startQueueItem(queueIndex, позиция, generation, retry + 1), ПАУЗА_ПОВТОРА);
       }
       if (code && code !== 255) log(`Трек завершился с кодом ${code}`);
       // Трек, который падает сразу (файл испорчен или пропал после добавления),

@@ -27,6 +27,9 @@ async function status() {
 async function waitForServer() {
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
+    // Наш процесс уже умер (обычно EADDRINUSE) — отвечать может только чужой
+    // сервер на том же порту. С ним тесты работать не должны.
+    if (server.exitCode !== null) throw new Error(`Тестовый сервер завершился с кодом ${server.exitCode}: порт ${port} занят?`);
     try { if ((await fetch(`http://127.0.0.1:${port}/api/status`)).ok) return; } catch {}
     await new Promise(resolve => setTimeout(resolve, 100));
   }
@@ -84,6 +87,9 @@ async function segmentStats() {
 
 test.before(async () => {
   dataDirectory = await mkdtemp(join(tmpdir(), 'vrcast-lat-'));
+  // Порт уже кто-то слушает — иначе тесты молча пошли бы к чужому серверу.
+  const занят = await fetch(`http://127.0.0.1:${port}/api/status`).then(() => true, () => false);
+  if (занят) throw new Error(`Порт ${port} уже занят другим процессом — задайте VRCAST_TEST_PORT`);
   server = launchServer();
   await waitForServer();
 });

@@ -23,6 +23,9 @@ function launchServer() {
 async function waitForServer() {
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
+    // Наш процесс уже умер (обычно EADDRINUSE) — отвечать может только чужой
+    // сервер на том же порту. С ним тесты работать не должны.
+    if (server.exitCode !== null) throw new Error(`Тестовый сервер завершился с кодом ${server.exitCode}: порт ${port} занят?`);
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/status`);
       if (response.ok) return;
@@ -34,6 +37,9 @@ async function waitForServer() {
 
 test.before(async () => {
   dataDirectory = await mkdtemp(join(tmpdir(), 'vrcast-test-'));
+  // Порт уже кто-то слушает — иначе тесты молча пошли бы к чужому серверу.
+  const занят = await fetch(`http://127.0.0.1:${port}/api/status`).then(() => true, () => false);
+  if (занят) throw new Error(`Порт ${port} уже занят другим процессом — задайте VRCAST_TEST_PORT`);
   server = launchServer();
   await waitForServer();
 });
@@ -714,6 +720,104 @@ test('неудачное переключение на захват не гас�
     assert.equal((await currentStatus()).activeKind, 'queue', 'эфир видео должен продолжиться');
   } finally {
     await api('/api/config', { captureMode: 'monitor', audioMode: 'system' });
+    await api('/api/stop');
+    await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  }
+});
+
+test('упавший продюсер локального ролика продолжает тот же трек с места', async () => {
+  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  const file = join(dataDirectory, 'crash-resume.mp4');
+  const made = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30',
+    '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '30', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-shortest', '-y', file], { windowsHide: true, timeout: 60000 });
+  assert.equal(made.status, 0);
+  const added = await api('/api/queue/local', { paths: [file] }).then(response => response.json());
+  const producer = () => serverChildren().find(child => /ffmpeg/i.test(child.name) && child.commandLine.includes('crash-resume.mp4') && /mpegts/.test(child.commandLine));
+  try {
+    assert.equal((await api('/api/start/queue')).status, 200);
+    let first;
+    for (let i = 0; i < 40 && !first; i++) { await new Promise(resolve => setTimeout(resolve, 250)); first = producer(); }
+    assert.ok(first, 'продюсер ролика должен запуститься');
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    process.kill(first.pid);
+    let second;
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      second = producer();
+      if (second && second.pid !== first.pid) break;
+    }
+    const state = await currentStatus();
+    assert.ok(second && second.pid !== first.pid, 'после аварии продюсер должен подняться заново');
+    assert.equal(state.activeKind, 'queue', 'эфир не должен останавливаться');
+    assert.equal(state.currentId, added.added[0].id, 'играет тот же трек, а не следующий');
+    assert.ok(state.progress.elapsed >= 2, `продолжение с места падения, а не с начала (позиция ${state.progress.elapsed})`);
+  } finally {
+    await api('/api/stop');
+    await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  }
+});
+
+test('упавший захват экрана поднимается сам, а после «Стоп» — нет', async () => {
+  const settings = { outputMode: 'local', quality: '480p', fps: 30, captureMode: 'region', regionX: 0, regionY: 0, regionWidth: 320, regionHeight: 240, audioMode: 'none' };
+  await api('/api/config', settings);
+  const capture = () => serverChildren().find(child => /gdigrab|ddagrab/.test(child.commandLine));
+  try {
+    assert.equal((await api('/api/start/screen')).status, 200);
+    let first;
+    for (let i = 0; i < 40 && !first; i++) { await new Promise(resolve => setTimeout(resolve, 250)); first = capture(); }
+    assert.ok(first, 'захват должен запуститься');
+    process.kill(first.pid);
+    let second;
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      second = capture();
+      if (second && second.pid !== first.pid) break;
+    }
+    assert.ok(second && second.pid !== first.pid, 'после аварии захват должен подняться заново');
+    assert.equal((await currentStatus()).activeKind, 'screen');
+    await api('/api/stop');
+    await new Promise(resolve => setTimeout(resolve, 3500));
+    assert.equal((await currentStatus()).running, false, '«Стоп» не должен перезапускать захват');
+    assert.ok(!capture(), 'после «Стоп» процесса захвата быть не должно');
+  } finally {
+    await api('/api/stop');
+    await api('/api/config', { ...settings, captureMode: 'monitor', audioMode: 'system' });
+  }
+});
+
+test('пропавший локальный файл остаётся в очереди недоступным, а не удаляется', async () => {
+  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  const present = join(dataDirectory, 'seek-stress.mp4');
+  const missing = join(dataDirectory, 'нет-диска', 'unplugged.mp4');
+  server.kill(); await once(server, 'exit');
+  const queueFile = join(dataDirectory, 'VRCastBridge', 'queue.json');
+  writeFileSync(queueFile, JSON.stringify([
+    { id: 'missing-1', title: 'unplugged.mp4', sourceUrl: missing, local: true, duration: 10 },
+    { id: 'present-1', title: 'seek-stress.mp4', sourceUrl: present, local: true },
+  ]), 'utf8');
+  server = launchServer(); await waitForServer();
+  let state = await currentStatus();
+  const пропавший = state.queue.find(item => item.id === 'missing-1');
+  assert.ok(пропавший, 'трек с отключённого диска не должен исчезать из очереди');
+  assert.equal(пропавший.unavailable, true, 'он помечен недоступным');
+  // Любое изменение очереди сохраняет файл — трек обязан пережить и это.
+  await api('/api/queue/local', { paths: [present] });
+  const saved = JSON.parse(readFileSync(queueFile, 'utf8'));
+  assert.ok(saved.some(item => item.id === 'missing-1'), 'сохранение очереди не должно стирать недоступный трек');
+  assert.ok(!existsSync(`${queueFile}.tmp`), 'временный файл после сохранения не остаётся');
+  // Эфир пропускает недоступный трек и играет следующий.
+  try {
+    assert.equal((await api('/api/start/queue')).status, 200);
+    for (let i = 0; i < 40; i++) {
+      state = await currentStatus();
+      if (state.currentId === 'present-1' && state.activeKind === 'queue') break;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    assert.equal(state.currentId, 'present-1', 'недоступный трек пропускается');
+    assert.equal(state.activeKind, 'queue');
+  } finally {
     await api('/api/stop');
     await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
   }
