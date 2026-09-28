@@ -77,7 +77,10 @@ if (uint.TryParse(pidText, out var processId) && processId > 0)
         ? new SessionMuter(processId, (float)localLevel) : null;
     ProcessLoopback.Gain = (float)(1.0 / localLevel);
     try { await ProcessLoopback.RunAsync(processId, Console.OpenStandardOutput(), shutdown.Token); }
-    catch (Exception error) { Console.Error.WriteLine($"Process loopback failed: {error.Message}"); Environment.Exit(1); }
+    // Не Environment.Exit: он завершал процесс прямо внутри using, Dispose
+    // не вызывался, и приложение оставалось тихим (или заглушённым) после сбоя.
+    // Код выхода ставим, а выходим обычным путём — громкость вернётся в Dispose.
+    catch (Exception error) { Console.Error.WriteLine($"Process loopback failed: {error.Message}"); Environment.ExitCode = 1; }
     return;
 }
 
@@ -361,7 +364,11 @@ internal sealed class SessionMuter : IDisposable
     private readonly uint _processId;
     private readonly string _processName;
     private readonly float _level;
-    private readonly List<(SimpleAudioVolume Volume, float Original)> _muted = new();
+    // Исходные громкость и мьют каждой сессии — по одному разу, при первом
+    // касании: раньше помнилась только громкость, а снятый мьют не возвращался,
+    // и повторные касания той же сессии дописывали в список уже наш уровень.
+    private readonly Dictionary<string, (SimpleAudioVolume Volume, float Level, bool Mute)> _muted = new();
+    private bool _disposed;
     private readonly Timer _watch;
     private readonly MMDeviceEnumerator _enumerator = new();
 
@@ -393,12 +400,18 @@ internal sealed class SessionMuter : IDisposable
                         var session = sessions[index];
                         if (!Matches(session)) continue;
                         var volume = session.SimpleAudioVolume;
-                        // Мьют снимаем всегда: он глушит и захват тоже, а тихо у себя
-                        // мы делаем именно уровнем громкости.
-                        if (volume.Mute) volume.Mute = false;
-                        if (Math.Abs(volume.Volume - _level) < 0.001f) continue;
-                        lock (_muted) _muted.Add((volume, volume.Volume));
-                        volume.Volume = _level;
+                        var mute = volume.Mute;
+                        if (!mute && Math.Abs(volume.Volume - _level) < 0.001f) continue;
+                        lock (_muted)
+                        {
+                            if (_disposed) return;
+                            var ключ = session.GetSessionInstanceIdentifier ?? $"{session.GetProcessID}";
+                            if (!_muted.ContainsKey(ключ)) _muted[ключ] = (volume, volume.Volume, mute);
+                            // Мьют снимаем всегда: он глушит и захват тоже, а тихо у себя
+                            // мы делаем именно уровнем громкости.
+                            if (mute) volume.Mute = false;
+                            volume.Volume = _level;
+                        }
                     }
                 }
             }
@@ -434,9 +447,11 @@ internal sealed class SessionMuter : IDisposable
         _watch.Dispose();
         lock (_muted)
         {
-            foreach (var (volume, original) in _muted)
+            _disposed = true;
+            foreach (var (volume, level, mute) in _muted.Values)
             {
-                try { volume.Volume = original; } catch { }
+                try { volume.Volume = level; } catch { }
+                try { volume.Mute = mute; } catch { }
             }
             _muted.Clear();
         }

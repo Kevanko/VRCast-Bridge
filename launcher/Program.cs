@@ -403,17 +403,21 @@ internal static class Program
     {
         // mediamtx может стоять у человека и сам по себе — убиваем только тот,
         // что лежит в нашей папке компонентов.
-        var наша = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge");
-        // mediamtx и ffmpeg человек может держать и для своих дел — трогаем
-        // только те, что запущены из нашей папки компонентов. Свои капчур-хелперы
-        // уникальны по имени, их можно снимать без проверки пути.
+        // Разделитель в конце: иначе «VRCastBridge» совпадал бы и с «VRCastBridgeOld».
+        var наша = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge") + Path.DirectorySeparatorChar;
+        var рядом = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        // Трогаем только то, что запущено из нашей папки компонентов (или рядом
+        // с самим EXE). Даже свои хелперы: одноимённый процесс мог запустить
+        // другой пользователь Windows, другая копия программы или вообще чужой
+        // бинарник — раньше их снимали по одному имени. Путь не прочитался
+        // (чужой сеанс, нет прав) — значит, не наш, не трогаем.
         foreach (var name in new[] { "VRCast.AudioCapture", "VRCast.WindowCapture", "mediamtx", "ffmpeg" })
         {
             foreach (var process in Process.GetProcessesByName(name))
             {
                 var путь = string.Empty;
                 try { путь = process.MainModule?.FileName ?? string.Empty; } catch { }
-                if ((name == "mediamtx" || name == "ffmpeg") && !путь.StartsWith(наша, StringComparison.OrdinalIgnoreCase)) { process.Dispose(); continue; }
+                if (!путь.StartsWith(наша, StringComparison.OrdinalIgnoreCase) && !путь.StartsWith(рядом, StringComparison.OrdinalIgnoreCase)) { process.Dispose(); continue; }
                 try { process.Kill(true); process.WaitForExit(1500); }
                 catch { }
                 finally { process.Dispose(); }
