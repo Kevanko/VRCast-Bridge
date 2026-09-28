@@ -822,3 +822,51 @@ test('пропавший локальный файл остаётся в оче�
     await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
   }
 });
+
+test('при повторе всей очереди недоступный трек в хвосте не останавливает эфир', async () => {
+  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  const short = join(dataDirectory, 'loop-short.wav');
+  const made = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '2', '-y', short], { windowsHide: true });
+  assert.equal(made.status, 0);
+  await api('/api/config', { outputMode: 'local', loopMode: 'all' });
+  server.kill(); await once(server, 'exit');
+  // Хвост очереди: пропавший файл и файл, который не прочитал ffprobe.
+  writeFileSync(join(dataDirectory, 'VRCastBridge', 'queue.json'), JSON.stringify([
+    { id: 'loop-ok', title: 'loop-short.wav', sourceUrl: short, local: true, duration: 2, probed: true, hasVideo: false, hasAudio: true },
+    { id: 'loop-missing', title: 'gone.wav', sourceUrl: join(dataDirectory, 'нет-диска', 'gone.wav'), local: true, duration: 5 },
+  ]), 'utf8');
+  server = launchServer(); await waitForServer();
+  try {
+    assert.equal((await api('/api/start/queue')).status, 200);
+    // Трек длиной 2 с успевает доиграть несколько раз: после него очередь
+    // обязана вернуться в начало, а не остановиться на пропавшем файле.
+    await new Promise(resolve => setTimeout(resolve, 8000));
+    const state = await currentStatus();
+    assert.equal(state.activeKind, 'queue', 'эфир не должен останавливаться');
+    assert.ok(!state.logs.some(line => /не осталось доступных треков/.test(line)), 'рабочий трек в начале очереди должен найтись');
+    const запусков = state.logs.filter(line => /Сейчас играет: loop-short\.wav/.test(line)).length;
+    assert.ok(запусков >= 2, `рабочий трек должен повторяться по кругу (запусков: ${запусков})`);
+  } finally {
+    await api('/api/stop');
+    await api('/api/config', { outputMode: 'local', loopMode: 'once' });
+    await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  }
+});
+
+test('пароль из адреса не попадает в журналы', async () => {
+  // Сервер отвечает 404 — ffprobe сдаётся сразу, и адрес уходит в журнал ошибок.
+  const заглушка = createHttpServer((req, res) => { res.statusCode = 404; res.end(); });
+  await new Promise(resolve => заглушка.listen(0, '127.0.0.1', resolve));
+  try {
+    const адрес = `http://vrcast:тайный-ключ-123@127.0.0.1:${заглушка.address().port}/clip.mp4`;
+    const response = await api('/api/queue', { url: адрес });
+    assert.notEqual(response.status, 201);
+    const журналы = ['vrcast.log', 'vrcast-errors.log']
+      .map(name => join(dataDirectory, 'VRCastBridge', name))
+      .filter(file => existsSync(file)).map(file => readFileSync(file, 'utf8')).join('\n');
+    assert.ok(журналы.includes('//***@127.0.0.1'), 'адрес должен попасть в журнал со скрытым паролем');
+    assert.ok(!журналы.includes('тайный-ключ-123'), 'пароль не должен оказаться в журнале');
+  } finally {
+    заглушка.close();
+  }
+});

@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.16';
+const APP_VERSION = '0.54.17';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -60,6 +60,13 @@ mkdirSync(HLS_DIR, { recursive: true });
 mkdirSync(THUMB_DIR, { recursive: true });
 mkdirSync(DEFAULT_CACHE_DIR, { recursive: true });
 mkdirSync(UNITY_ITEMS_DIR, { recursive: true });
+// Файлы с паролем root для SSH (.ssh-<uuid>) живут секунды, но если программа
+// упала посреди установки сервера, пароль так и оставался лежать на диске.
+try {
+  for (const name of readdirSync(DATA_DIR)) {
+    if (name.startsWith('.ssh-')) rmSync(join(DATA_DIR, name), { force: true });
+  }
+} catch {}
 for (const file of [DETAIL_LOG_FILE]) {
   try {
     if (existsSync(file) && statSync(file).size > 4 * 1024 * 1024) {
@@ -467,7 +474,7 @@ async function fillMissingInfo(items) {
         duration: item.duration || сведения.duration || null,
         hasVideo: сведения.hasVideo, hasAudio: сведения.hasAudio,
         videoCodec: сведения.videoCodec, audioCodec: сведения.audioCodec,
-        unityCompatible: Boolean(сведения.unityCompatible), probed: true, unavailable: false,
+        unityCompatible: Boolean(сведения.unityCompatible), probed: true, unavailable: false, missing: false,
       });
       if ((сведения.hasVideo || сведения.hasAudio) && !item.thumbnail) generateThumbnail(item);
     } catch {
@@ -507,7 +514,11 @@ function normalizeQueueItem(raw, freshId = false) {
     hasVideo: technical.hasVideo ?? raw.hasVideo !== false, hasAudio: technical.hasAudio ?? raw.hasAudio !== false,
     videoCodec: String(technical.videoCodec || raw.videoCodec || ''), audioCodec: String(technical.audioCodec || raw.audioCodec || ''),
     unityCompatible: Boolean(technical.unityCompatible ?? raw.unityCompatible),
-    unavailable: пропал || Boolean(raw.unavailable), probed: Boolean(raw.probed),
+    // missing — отдельная пометка «файла нет на месте»: её эфир перепроверяет
+    // перед запуском. Файл, который не прочитал ffprobe, остаётся недоступным,
+    // а вот вернувшийся с диска трек снимает старую пометку сам.
+    unavailable: пропал || (Boolean(raw.unavailable) && !raw.missing), probed: Boolean(raw.probed),
+    missing: пропал,
     direct: Boolean(raw.direct), live: Boolean(raw.live),
   };
 }
@@ -601,19 +612,37 @@ function trimDetailLog() {
   if (Date.now() - последняяПодрезка < 600000) return;
   последняяПодрезка = Date.now();
   try {
-    if (statSync(DETAIL_LOG_FILE).size < 4 * 1024 * 1024) return;
-    const перенос = String.fromCharCode(10);
-    const строки = readFileSync(DETAIL_LOG_FILE, 'utf8').split(перенос);
-    writeFileSync(DETAIL_LOG_FILE, строки.slice(-4000).join(перенос), 'utf8');
+    if (statSync(DETAIL_LOG_FILE).size >= 4 * 1024 * 1024) {
+      const перенос = String.fromCharCode(10);
+      const строки = readFileSync(DETAIL_LOG_FILE, 'utf8').split(перенос);
+      writeFileSync(DETAIL_LOG_FILE, строки.slice(-4000).join(перенос), 'utf8');
+    }
+  } catch {}
+  // Основной журнал подрезался только при старте: недели в трее раздували
+  // его без предела. Та же мерка, что и при старте, — 2 МБ, оставляем 512 КБ.
+  try {
+    if (statSync(LOG_FILE).size > 2 * 1024 * 1024) {
+      const contents = readFileSync(LOG_FILE);
+      writeFileSync(LOG_FILE, contents.subarray(Math.max(0, contents.length - 512 * 1024)));
+    }
   } catch {}
 }
 
+// Пароли и ключи в адресах (rtsp://vrcast:ключ@сервер) в журнал не попадают:
+// его прикладывают к жалобам, а ключ публикации — это доступ к чужому серверу.
+function скрытьПароли(message) {
+  return String(message).replace(/\/\/[^\/@\s]+@/g, '//***@');
+}
+
 function logDetail(message) {
+  message = скрытьПароли(message);
   trimDetailLog();
   try { appendFileSync(DETAIL_LOG_FILE, `${new Date().toISOString()}  ${message}\n`, 'utf8'); } catch {}
 }
 
 function log(message) {
+  message = скрытьПароли(message);
+  trimDetailLog();
   const line = `${new Date().toLocaleTimeString('ru-RU')}  ${message}`;
   logLines = [...logLines.slice(-99), line];
   console.log(line);
@@ -866,20 +895,34 @@ function rtspAddress() {
 // публикации. Отпечаток ключа хоста запоминается при первом подключении и
 // проверяется дальше — подменённый сервер наш пароль уже не получит.
 
+// Версия MediaMTX на сервере прибита к той же, что у программы: настройки ниже
+// пишутся под неё (ключи вроде moq появились недавно), а «latest» через API
+// GitHub упирался в его лимит запросов и мог принести несовместимый выпуск.
+const SERVER_MEDIAMTX_VERSION = 'v1.20.1';
+
 // Скрипт трогает ровно три вещи: каталог /opt/vrcast-relay, юнит
-// vrcast-relay.service и одно правило ufw. Удаление снимает ровно их же.
+// vrcast-relay.service и правила ufw/firewalld для двух портов. Удаление
+// снимает ровно их же.
 const DEPLOY_SCRIPT = `
 set -eu
 PORT="\${VRCAST_PORT_ARG:-8554}"
 DIR=/opt/vrcast-relay
 KEY_FILE="$DIR/publish.key"
+MTX_VERSION=${SERVER_MEDIAMTX_VERSION}
 [ "$(id -u)" -eq 0 ] || { echo "VRCAST_ERR нужны права root"; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "VRCAST_ERR на сервере нет curl"; exit 1; }
+command -v systemctl >/dev/null 2>&1 || { echo "VRCAST_ERR на сервере нет systemd (systemctl) — нужен обычный Linux-сервер с systemd"; exit 1; }
+case "$(uname -m)" in
+  x86_64|amd64) ARCH=linux_amd64 ;;
+  aarch64|arm64) ARCH=linux_arm64 ;;
+  armv7*) ARCH=linux_armv7 ;;
+  *) echo "VRCAST_ERR процессор сервера не поддерживается: $(uname -m)"; exit 1 ;;
+esac
 mkdir -p "$DIR"
-if [ ! -x "$DIR/mediamtx" ]; then
-  URL=$(curl -fsSL https://api.github.com/repos/bluenviron/mediamtx/releases/latest 2>/dev/null | grep -oE 'https://[^"]+linux_amd64[.]tar[.]gz' | head -1)
-  [ -n "$URL" ] || { echo "VRCAST_ERR не удалось узнать адрес MediaMTX"; exit 1; }
-  curl -fsSL "$URL" -o /tmp/vrcast-mtx.tar.gz || { echo "VRCAST_ERR не скачался MediaMTX"; exit 1; }
+if [ ! -x "$DIR/mediamtx" ] || [ "$("$DIR/mediamtx" --version 2>/dev/null)" != "$MTX_VERSION" ]; then
+  URL="https://github.com/bluenviron/mediamtx/releases/download/$MTX_VERSION/mediamtx_\${MTX_VERSION}_$ARCH.tar.gz"
+  curl -fsSL "$URL" -o /tmp/vrcast-mtx.tar.gz || { echo "VRCAST_ERR не скачался MediaMTX ($URL)"; exit 1; }
+  systemctl stop vrcast-relay >/dev/null 2>&1 || true
   tar xzf /tmp/vrcast-mtx.tar.gz -C "$DIR" mediamtx
   rm -f /tmp/vrcast-mtx.tar.gz
 fi
@@ -940,8 +983,19 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
   ufw allow "$PORT/tcp" >/dev/null 2>&1 || true
   ufw allow "$HLSPORT/tcp" >/dev/null 2>&1 || true
 fi
+if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+  firewall-cmd --permanent --add-port="$PORT/tcp" >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port="$HLSPORT/tcp" >/dev/null 2>&1 || true
+  firewall-cmd --reload >/dev/null 2>&1 || true
+fi
 sleep 2
-systemctl is-active --quiet vrcast-relay || { echo "VRCAST_ERR служба не запустилась"; exit 1; }
+if ! systemctl is-active --quiet vrcast-relay; then
+  BUSY=""
+  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$PORT$"; then BUSY="порт $PORT занят другой программой; "; fi
+  WHY=$(journalctl -u vrcast-relay -n 5 --no-pager 2>/dev/null | tr '\\n' ' ' | tail -c 700)
+  echo "VRCAST_ERR служба не запустилась: $BUSY$WHY"
+  exit 1
+fi
 IP=$(curl -fsS --max-time 6 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 echo "VRCAST_OK ip=$IP port=$PORT hls=$HLSPORT key=$KEY"
 `;
@@ -958,8 +1012,26 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
   ufw delete allow "$PORT/tcp" >/dev/null 2>&1 || true
   ufw delete allow "$(( PORT + 10 ))/tcp" >/dev/null 2>&1 || true
 fi
+if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+  firewall-cmd --permanent --remove-port="$PORT/tcp" >/dev/null 2>&1 || true
+  firewall-cmd --permanent --remove-port="$(( PORT + 10 ))/tcp" >/dev/null 2>&1 || true
+  firewall-cmd --reload >/dev/null 2>&1 || true
+fi
 echo "VRCAST_OK removed"
 `;
+
+// Адрес уходит в plink отдельным аргументом: начнись он с «-», plink принял бы
+// его за свой ключ. Поэтому первым символом — только буква или цифра.
+const АДРЕС_СЕРВЕРА = /^[a-z0-9][a-z0-9.-]*$/i;
+
+// Порт подставляется в скрипт установки и в адрес публикации — только целое
+// 1..65535, иначе в скрипт попала бы любая строка из запроса.
+function портСервера(value, запасной) {
+  if (value === undefined || value === null || String(value).trim() === '' || Number(value) === 0) return запасной;
+  const порт = Number(value);
+  if (!Number.isInteger(порт) || порт < 1 || порт > 65535) throw new Error('Порт сервера: целое число от 1 до 65535.');
+  return порт;
+}
 
 function sshArgs(server, passwordFile) {
   return ['-batch', '-ssh', '-P', String(server.sshPort || 22), '-l', String(server.user || 'root'),
@@ -1085,7 +1157,7 @@ function editServer(id, body) {
   if (body.host !== undefined) {
     const адрес = String(body.host).trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0];
     if (!адрес) throw new Error('Укажите адрес сервера.');
-    if (!/^[a-z0-9.-]+$/i.test(адрес)) throw new Error('Адрес сервера: только буквы, цифры, точки и дефис.');
+    if (!АДРЕС_СЕРВЕРА.test(адрес)) throw new Error('Адрес сервера: только буквы, цифры, точки и дефис.');
     next.host = адрес;
   }
   if (body.permanentLink !== undefined) {
@@ -1115,9 +1187,9 @@ async function attachServer(body) {
   const адрес = String(body.host || '').trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0];
   const ключ = String(body.key || '').trim();
   if (!адрес) throw new Error('Укажите адрес сервера.');
-  if (!/^[a-z0-9.-]+$/i.test(адрес)) throw new Error('Адрес сервера: только буквы, цифры, точки и дефис.');
+  if (!АДРЕС_СЕРВЕРА.test(адрес)) throw new Error('Адрес сервера: только буквы, цифры, точки и дефис.');
   if (!ключ) throw new Error('Укажите ключ публикации — его выдаёт сервер при установке.');
-  const порт = Number(body.rtspPort) || SERVER_RTSP_PORT;
+  const порт = портСервера(body.rtspPort, SERVER_RTSP_PORT);
   const канал = String(body.channel || 'live').replace(/[^a-z0-9_-]/gi, '') || 'live';
   // Проверяем, что там вообще кто-то отвечает: адрес с опечаткой не должен
   // молча ложиться в список и всплывать только при запуске эфира.
@@ -1146,13 +1218,13 @@ async function deployServer(body) {
   const password = String(body.password || '');
   if (!hostName) throw new Error('Укажите адрес сервера.');
   // Годится и домен, и IP — проверяем только форму записи.
-  if (!/^[a-z0-9.-]+$/i.test(hostName)) throw new Error('Адрес сервера: только буквы, цифры, точки и дефис.');
+  if (!АДРЕС_СЕРВЕРА.test(hostName)) throw new Error('Адрес сервера: только буквы, цифры, точки и дефис.');
   if (!password) throw new Error('Укажите пароль root.');
   const existing = savedServers().find(item => item.host === hostName);
-  const server = { host: hostName, sshPort: Number(sshPortRaw) || existing?.sshPort || 22,
+  const server = { host: hostName, sshPort: портСервера(sshPortRaw, existing?.sshPort || 22),
     user: String(body.user || existing?.user || 'root').trim() || 'root', hostKey: existing?.hostKey || '' };
+  const rtspPort = портСервера(body.rtspPort, Number(existing?.rtspPort) || SERVER_RTSP_PORT);
   if (!server.hostKey) server.hostKey = await sshDiscoverHostKey(server);
-  const rtspPort = Number(body.rtspPort) || Number(existing?.rtspPort) || SERVER_RTSP_PORT;
   log(`Свой сервер: разворачиваю на ${hostName}…`);
   const output = await sshRun(server, password, `VRCAST_PORT_ARG=${rtspPort}\n${DEPLOY_SCRIPT}`);
   const result = /VRCAST_OK ip=(\S+) port=(\d+) hls=(\d+) key=(\S+)/.exec(output);
@@ -1186,8 +1258,9 @@ async function removeServer(id, password = '') {
   const nextActive = config.activeServerId === server.id ? (servers[0]?.id || '') : config.activeServerId;
   const nextMode = !servers.length && config.outputMode === 'remote' ? 'local' : config.outputMode;
   saveConfig({ servers, activeServerId: nextActive, outputMode: nextMode });
-  stopRtspPush();
-  if (relayProcess) startRtspPush();
+  // Рвём только то, что поменялось: удаление запасного сервера не должно
+  // обрывать зрителей локального канала и активного сервера.
+  syncRtspPush();
   log(cleaned ? `Сервер ${server.host} очищен и удалён из списка`
     : `Сервер ${server.host} удалён из списка${reason ? ` (на сервере не убрано: ${reason})` : ''}`);
   return { cleaned, reason };
@@ -1380,7 +1453,15 @@ async function downloadWithResume(url, target, onProgress, попыток = 4) {
         // Ждём и ошибку тоже: на переполненном диске drain не придёт никогда,
         // и загрузка висела бы вечно.
         if (ошибкаЗаписи) throw ошибкаЗаписи;
-        if (!файл.write(кусок)) await new Promise((ok, bad) => { файл.once('drain', ok); файл.once('error', bad); });
+        // Одноразовый обработчик ошибки снимается, как только пришёл drain:
+        // раньше на каждое ожидание вешался новый, и за большой файл их
+        // набирались сотни на одном потоке.
+        if (!файл.write(кусок)) await new Promise((ok, bad) => {
+          const сбой = error => { файл.off('drain', готово); bad(error); };
+          const готово = () => { файл.off('error', сбой); ok(); };
+          файл.once('drain', готово);
+          файл.once('error', сбой);
+        });
         принято += кусок.length;
         const процент = всего ? Math.round(принято / всего * 100) : 0;
         if (процент !== последнийПроцент) { последнийПроцент = процент; onProgress?.(принято, всего); }
@@ -1674,8 +1755,12 @@ function applyUpdate() {
   // падал — программа перезапускалась старой («не обновилось»). Теперь: сами
   // закрываем оболочку, копируем с повтором, пока файл не освободится, и всё
   // пишем в лог — чтобы неудача больше не была немой.
+  // Файл пишется в UTF-8 без BOM, а cmd читает его в OEM-кодировке: путь с
+  // кириллицей («Документы») превращался в мусор, и copy не находил файлы.
+  // chcp 65001 переключает разбор на UTF-8; первая строка остаётся ASCII.
   writeFileSync(script, [
     '@echo off',
+    'chcp 65001 >nul',
     'setlocal EnableExtensions',
     `set "LOG=${вКоманду(logFile)}"`,
     '> "%LOG%" echo [%date% %time%] запуск установки',
@@ -2037,7 +2122,11 @@ function startHlsHealthMonitor() {
   // 250 мс круглосуточно только затем, чтобы узнать, что ещё рано.
   const следующая = () => {
     if (shuttingDown) return;
-    setTimeout(() => { watchChannel().catch(() => {}).finally(следующая); }, channelLive ? 5000 : 500).unref?.();
+    // В режиме «свой сервер» пауза выбирается по его каналу, а не по
+    // локальному: иначе, пока VPS ещё не принял поток (или эфира нет вовсе),
+    // опрос шёл дважды в секунду на чужую машину.
+    const готово = config.outputMode === 'remote' ? remoteChannelLive || !relayProcess : channelLive;
+    setTimeout(() => { watchChannel().catch(() => {}).finally(следующая); }, готово ? 5000 : 500).unref?.();
   };
   следующая();
 }
@@ -2106,7 +2195,9 @@ function restartRelaySession(profile) {
   const вид = activeKind;
   const позиция = вид === 'queue' ? currentSourcePosition() : 0;
   stopStandby();
-  stopRtspPush();
+  // Пушеры тут не гасятся: startRelay сам решит, нужен ли им перезапуск
+  // (только при смене разрешения). Кормит их любой продюсер через pipeToRelay,
+  // так что заставка, поднятая ниже, подхватывает их без паузы.
   const relay = relayProcess;
   relayProcess = null;
   stopProducer(activeProcess);
@@ -2122,12 +2213,16 @@ function restartRelaySession(profile) {
 // «сейчас», накопленная задержка возвращается к нулю. В отличие от
 // restartRelaySession, здесь relayStartedAt и lastRelayPts обнуляются — ценой
 // одного resync у плеера, но зато задержка не растёт бесконечно.
-function reanchorRelay() {
+// keepPushers — для подъёма после падения релея: пушеров кормят продюсеры, а
+// не релей, они пережили его смерть, и глушить их — значит зря оборвать всех
+// зрителей. Скачок часов назад ffmpeg пушера сглаживает сам (разрыв меток в
+// MPEG-TS). Осознанная пересборка по-прежнему пересоздаёт их — это и есть resync.
+function reanchorRelay(keepPushers = false) {
   const вид = activeKind;
   const позиция = вид === 'queue' ? currentSourcePosition() : 0;
   const profile = streamProfile(вид);
   stopStandby();
-  stopRtspPush();
+  if (!keepPushers) stopRtspPush();
   const relay = relayProcess;
   relayProcess = null;
   stopProducer(activeProcess);
@@ -2441,6 +2536,7 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
         // ещё идёт — перезапускаем захват целиком один раз.
         if (activeAuxProcess !== aux || stopping || !activeProcess || !code) return;
         activeAuxProcess = null; audioHelperKey = '';
+        if (!захватМожноПерезапустить(code)) return;
         log(`Компонент звука неожиданно остановился (код ${code}) — перезапускаю захват`);
         startScreen().catch(error => log(`Перезапуск захвата: ${error.message}`));
       });
@@ -2488,6 +2584,7 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
         // перезапуск есть — теперь он есть и здесь.
         if (activeWindowProcess !== windowCapture || stopping || shuttingDown || !activeProcess || !code) return;
         activeWindowProcess = null; windowHelperKey = '';
+        if (!захватМожноПерезапустить(code)) return;
         log(`Захват окна неожиданно остановился (код ${code}) — перезапускаю`);
         startScreen().catch(error => log(`Перезапуск захвата: ${error.message}`));
       });
@@ -2522,14 +2619,23 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
 // растущей от попытки к попытке. Поколение сверяем при срабатывании таймера:
 // «Стоп» или переключение за это время отменяют перезапуск.
 let перезапускиЗахвата = [];
-function перезапуститьЗахват(code) {
+// Один предел на все причины перезапуска захвата (сам ffmpeg, помощник звука,
+// помощник окна): не больше трёх в минуту. Раньше помощники перезапускали
+// захват без счёта, и падающий в цикле звук крутил его бесконечно.
+function захватМожноПерезапустить(code) {
   const сейчас = Date.now();
   перезапускиЗахвата = перезапускиЗахвата.filter(время => сейчас - время < 60000);
   if (перезапускиЗахвата.length >= 3) {
     log(`Захват экрана падает снова и снова (код ${code}) — остановлен. Ссылка работает, показывается заставка; запустите захват заново.`);
-    return stopActive();
+    stopActive();
+    return false;
   }
   перезапускиЗахвата.push(сейчас);
+  return true;
+}
+
+function перезапуститьЗахват(code) {
+  if (!захватМожноПерезапустить(code)) return;
   const поколение = playGeneration;
   log(`Захват экрана неожиданно остановился (код ${code}) — перезапускаю`);
   setTimeout(() => {
@@ -2813,7 +2919,9 @@ async function watchChannel() {
     channelLive = mediaMtxProcess ? await probeRtsp('127.0.0.1', RTSP_PORT, 'live') : false;
     // Свой сервер спрашиваем тем же способом: человек вставляет в VRChat
     // именно его адрес, и «готово» должно означать «оттуда уже играет».
-    const цель = config.outputMode === 'remote' ? remoteRtspTarget() : null;
+    // Без релея публиковать туда нечего — и чужую машину не дёргаем зря:
+    // раньше в простое на неё уходило по два DESCRIBE в секунду без конца.
+    const цель = config.outputMode === 'remote' && relayProcess ? remoteRtspTarget() : null;
     remoteChannelLive = цель ? await probeRtsp(цель.host, цель.port, цель.channel || 'live') : false;
   } finally { channelProbeBusy = false; }
 }
@@ -2834,13 +2942,19 @@ function rtspTargets() {
 
 const rtspPushFailures = new Map();
 const rtspPushUrls = new Map();
+const rtspPushStartedAt = new Map();
+// Под какое разрешение запущены пушеры. Пока оно то же, смена сессии релея
+// (fps, кодировщик, автоснижение, падение релея) их не трогает: пушер кормят
+// продюсеры напрямую, а его перезапуск рвёт всех зрителей канала — MediaMTX
+// сбрасывает читателей пути, а AVPro в VRChat сам не переподключается.
+let rtspPushQuality = '';
 
 // Переключение получателя без лишнего простоя: локальный пушер, который уже
 // работает, не трогаем — рвётся только то, что реально изменилось (новый свой
 // сервер, другой канал, уход в «этот ПК»). Раньше при каждой смене глушились
 // все пушеры разом, и локальный канал с предпросмотром моргал на пару секунд.
 function syncRtspPush() {
-  if (!mediaMtxProcess || !relayProcess) { stopRtspPush(); return; }
+  if (!relayProcess) { stopRtspPush(); return; }
   const нужные = new Map(rtspTargets().map(t => [t.id, t.url]));
   for (const [id, child] of [...rtspPushProcesses]) {
     if (нужные.get(id) === rtspPushUrls.get(id)) continue; // адрес не менялся — оставляем
@@ -2854,9 +2968,11 @@ function syncRtspPush() {
 }
 
 function startRtspPush() {
-  if (!mediaMtxProcess) return;
   for (const target of rtspTargets()) {
     if (rtspPushProcesses.has(target.id)) continue;
+    // Локальный MediaMTX нужен только локальному получателю. Раньше без него
+    // не стартовал и пушер на свой сервер — хотя тот от этого ПК не зависит.
+    if (target.id === 'local' && !mediaMtxProcess) continue;
     // Видео копируется как есть (нулевая нагрузка и нулевая потеря качества).
     // Звук переупаковывается энкодером: RTSP-муксеру нужен AAC с global headers,
     // а из MPEG-TS он приходит в ADTS — с «-c copy» публикация просто не стартует
@@ -2873,9 +2989,14 @@ function startRtspPush() {
       // Пакеты уходят сразу, без придержки в муксере: каждая такая задержка
       // складывается с буфером плеера и в VRChat видна как отставание.
       '-muxdelay', '0', '-muxpreload', '0', '-flush_packets', '1', '-max_delay', '0',
-      '-f', 'rtsp', '-rtsp_transport', 'tcp', '-rw_timeout', '5000000', target.url], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] }));
+      // -rw_timeout муксер RTSP не читает вовсе (проверено: на молчащем сервере
+      // пушер висел бесконечно). Свой сокет он настраивает опцией -timeout —
+      // с ней зависший сервер отпускает пушера через 5 секунд, и тот
+      // переподключается сам.
+      '-f', 'rtsp', '-rtsp_transport', 'tcp', '-timeout', '5000000', target.url], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] }));
     rtspPushProcesses.set(target.id, child);
     rtspPushUrls.set(target.id, target.url);
+    rtspPushStartedAt.set(target.id, Date.now());
     child.stdin.on('error', () => {});
     if (target.id === 'remote') {
       // Ошибки публикации на свой сервер пишем целиком: без этого причина
@@ -2942,6 +3063,10 @@ function stopRtspPush() {
 let remoteDropStreak = 0;
 let remoteCongestionAt = 0;
 function noteRemoteCongestion() {
+  // Пушер, который ещё подключается к серверу, stdin не читает вовсе — это не
+  // перегруженный аплинк. Раньше каждый старт эфира на свой сервер и каждый
+  // переподключенный пушер давали ложное «аплинк не тянет».
+  if (!remoteChannelLive || Date.now() - (rtspPushStartedAt.get('remote') || 0) < 10000) return;
   remoteDropStreak++;
   if (remoteDropStreak < 40 || Date.now() - remoteCongestionAt < 20000) return;
   remoteCongestionAt = Date.now();
@@ -2998,8 +3123,10 @@ function scheduleRelayRecovery() {
     if (relayProcess || stopping || shuttingDown || !tools.ffmpeg) return;
     try {
       // Часы потока начинаются заново: прежний релей унёс их с собой.
-      if (activeKind) reanchorRelay();
-      else ensureRelay(streamProfile('queue'));
+      if (activeKind) reanchorRelay(true);
+      // Заставка, пережившая релей, писала в его мёртвый stdin, а новому
+      // релею startStandby её не давал («уже идёт») — канал вставал пустым.
+      else { stopStandby(); ensureRelay(streamProfile('queue')); }
     } catch (error) { log(`Восстановление канала: ${error.message}`); }
   }, Math.min(10000, 800 * relayFailures));
   relayRecoveryTimer.unref?.();
@@ -3035,11 +3162,16 @@ function startRelay(profile) {
     scheduleRelayRecovery();
   });
   setTimeout(() => { if (relayProcess === relay) relayFailures = 0; }, 20000).unref?.();
-  // RTSP-пушер перезапускается вместе с сессией: у него свой muxer, поэтому
-  // смена формата сессии не оставляет его со старыми параметрами потока.
-  stopRtspPush();
+  // Пушеры перезапускаются вместе с сессией только при смене разрешения: у них
+  // свой muxer, и с другим размером кадра он остался бы со старыми параметрами
+  // потока. Во всех остальных случаях (fps, кодировщик, падение релея) они
+  // продолжают работать — иначе каждый зритель канала отваливался бы.
+  const тотЖеКадр = rtspPushQuality === profile.quality && rtspPushProcesses.size > 0;
+  if (!тотЖеКадр) stopRtspPush();
+  rtspPushQuality = profile.quality;
   startMediaMtx();
-  startRtspPush();
+  if (тотЖеКадр) syncRtspPush();
+  else startRtspPush();
 }
 
 function stopStandby() {
@@ -3696,7 +3828,10 @@ async function prefetchQueue(fromIndex = queueIndex) {
     for (let шаг = 0; шаг <= PREFETCH_AHEAD; шаг++) ближайшие.push(queue[(Math.max(0, fromIndex) + шаг) % queue.length]);
     for (const item of ближайшие) {
       if (shuttingDown) return;
-      if (!item || item.local || item.direct || item.live || item.id === currentId) continue;
+      // Пометка «недоступен» живёт в queue.json, а память об ошибках — только до
+      // перезапуска: без этой проверки каждый запуск заново гонял yt-dlp по
+      // удалённому ролику.
+      if (!item || item.local || item.direct || item.live || item.unavailable || item.id === currentId) continue;
       if (cachedMediaPath(item.id) || cacheDeclinedNow(item.id) || mediaFailure(item.id)) continue;
       if (!queue.some(entry => entry.id === item.id)) continue;
       try { await stableQueueMedia(item); }
@@ -3790,23 +3925,41 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
   preparingNext = true;
   queueIndex = Math.max(0, Math.min(queue.length - 1, index));
   let item = queue[queueIndex];
-  // Локальный файл, помеченный недоступным, перед запуском проверяем заново
-  // (без блокировки: отключённый сетевой диск отвечает секундами). Нет файла —
-  // пропускаем, как и ролик, удалённый с сайта; появился — играем.
+  // Пропавший локальный файл перед запуском проверяем заново (без блокировки:
+  // отключённый сетевой диск отвечает секундами). Нет файла — пропускаем, как
+  // и ролик, удалённый с сайта; появился — играем. Перепроверяется только
+  // пометка «файла нет»: файл, который не прочитал ffprobe, от повторного
+  // access() целым не станет, и раньше он снова срывал эфир.
   let файлаНет = false;
-  if (item?.local && item.unavailable) {
-    файлаНет = await access(item.sourceUrl).then(() => false, () => true);
-    // Пока ждали диск, могли нажать «Стоп», паузу или выбрать другой трек.
-    if (stopping || generation !== playGeneration || queuePaused || manualTransition) {
-      preparingNext = false;
-      return consumeManualTransition(generation);
-    }
-    if (файлаНет) log(`Файл недоступен и пропускается: ${item.title}`);
-    else { item.unavailable = false; saveQueue(); }
+  try {
+    if (item?.local && item.missing) {
+      // Заставку поднимаем до ожидания диска: сетевая папка может молчать
+      // десятки секунд, и всё это время у релея не было бы источника.
+      if (!activeProcess && !queuePaused) startStandby(sessionProfile('queue'));
+      файлаНет = await access(item.sourceUrl).then(() => false, () => true);
+      // Пока ждали диск, могли нажать «Стоп», паузу или выбрать другой трек.
+      if (stopping || generation !== playGeneration || queuePaused || manualTransition) {
+        preparingNext = false;
+        return consumeManualTransition(generation);
+      }
+      if (файлаНет) log(`Файл недоступен и пропускается: ${item.title}`);
+      else { item.missing = false; item.unavailable = false; saveQueue(); }
+    } else if (item?.local && item.unavailable) файлаНет = true;
+  } catch (error) {
+    // Без этого исключение здесь оставляло preparingNext навсегда поднятым,
+    // и очередь молча переставала реагировать на любые переключения.
+    preparingNext = false;
+    log(`Подготовка трека: ${error.message}`);
+    return;
   }
-  // Недоступный ролик не пытаемся открыть: ищем ближайший рабочий дальше.
+  // Недоступный трек не пытаемся открыть: ищем ближайший рабочий дальше, а при
+  // повторе всей очереди — по кругу. Раньше недоступные треки в хвосте
+  // останавливали эфир, хотя в начале очереди было что играть.
   if (item && (файлаНет || mediaFailure(item.id)?.permanent)) {
-    const workable = queue.findIndex((entry, index) => index > queueIndex && !mediaFailure(entry.id)?.permanent);
+    const рабочий = entry => !mediaFailure(entry.id)?.permanent && !(entry.local && entry.unavailable);
+    const порядок = queue.map((entry, index) => index).filter(index => index > queueIndex);
+    if (config.loopMode === 'all') порядок.push(...queue.map((entry, index) => index).filter(index => index < queueIndex));
+    const workable = порядок.find(index => рабочий(queue[index])) ?? -1;
     preparingNext = false;
     if (workable >= 0) return startQueueItem(workable, 0, generation);
     log('В очереди не осталось доступных треков');
@@ -3893,12 +4046,19 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
       // EOF даёт код 0. Раньше такой трек молча считался доигранным. Продолжаем
       // тот же трек с места падения, но не больше двух раз подряд; у ролика из
       // сети заодно берём свежую прямую ссылку — старая могла протухнуть.
-      const позиция = sourcePosition + ranFor * (Number(config.playbackSpeed) || 1);
-      const доКонца = currentDuration ? currentDuration - позиция : Infinity;
+      // Прямой эфир (или ролик из сети без длительности — так yt-dlp отдаёт
+      // трансляции) продолжать «с места» нельзя: перемотка по живому потоку
+      // уводила в прошлое или в никуда. Его поднимаем с живого края.
+      const живой = Boolean(item.live || media.live || (!item.local && !currentDuration));
+      const позиция = живой ? 0 : sourcePosition + ranFor * (Number(config.playbackSpeed) || 1);
+      const доКонца = currentDuration && !живой ? currentDuration - позиция : Infinity;
       if (code && code !== 255 && ranFor >= 2 && доКонца > 2 && retry < 2) {
         if (!item.local) resolvedMedia.delete(item.id);
         playbackBusy = true;
-        log(`Трек прервался (код ${code}) — продолжаю с ${Math.floor(позиция)} с: ${item.title}`);
+        // Трек отыграл больше двух секунд — это не «мгновенное падение».
+        мгновенныхПадений = 0;
+        log(живой ? `Эфир прервался (код ${code}) — подключаюсь заново: ${item.title}`
+          : `Трек прервался (код ${code}) — продолжаю с ${Math.floor(позиция)} с: ${item.title}`);
         return setTimeout(() => startQueueItem(queueIndex, позиция, generation, retry + 1), ПАУЗА_ПОВТОРА);
       }
       if (code && code !== 255) log(`Трек завершился с кодом ${code}`);
@@ -4731,7 +4891,9 @@ const server = http.createServer(async (req, res) => {
       const list = savedServers().map(item => item.id === id ? { ...item, channel } : item);
       saveConfig({ servers: list });
       remoteChannelRejected = false;
-      if (config.outputMode === 'remote') { stopRtspPush(); if (relayProcess) startRtspPush(); }
+      // Перезапускается только пушер, чей адрес поменялся (тот же канал —
+      // никто из зрителей не отваливается).
+      if (config.outputMode === 'remote') syncRtspPush();
       log(`Свой сервер: канал ${channel}`);
       return json(res, 200, status());
     }
@@ -4932,6 +5094,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/stop') { stopActive(); return json(res, 200, status()); }
     if (req.method === 'POST' && url.pathname === '/api/shutdown') {
       shuttingDown = true;
+      // Без этой строки штатный выход в журнале не отличить от падения.
+      log('Программа закрывается');
       if (hlsHealthTimer) clearInterval(hlsHealthTimer);
       stopUnityBuild();
       if (unityCaptureProcess) { try { unityCaptureProcess.stdin.write('q\n'); } catch {} }
