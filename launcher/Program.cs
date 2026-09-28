@@ -405,9 +405,10 @@ internal static class Program
         // что лежит в нашей папке компонентов.
         // Разделитель в конце: иначе «VRCastBridge» совпадал бы и с «VRCastBridgeOld».
         var наша = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge") + Path.DirectorySeparatorChar;
-        var рядом = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        // Трогаем только то, что запущено из нашей папки компонентов (или рядом
-        // с самим EXE). Даже свои хелперы: одноимённый процесс мог запустить
+        // Трогаем только то, что запущено из нашей папки компонентов. Не «рядом
+        // с EXE»: программу держат и в Загрузках, и на рабочем столе, и там
+        // проверка по префиксу снимала бы чужой ffmpeg из любой подпапки.
+        // Даже свои хелперы: одноимённый процесс мог запустить
         // другой пользователь Windows, другая копия программы или вообще чужой
         // бинарник — раньше их снимали по одному имени. Путь не прочитался
         // (чужой сеанс, нет прав) — значит, не наш, не трогаем.
@@ -417,7 +418,7 @@ internal static class Program
             {
                 var путь = string.Empty;
                 try { путь = process.MainModule?.FileName ?? string.Empty; } catch { }
-                if (!путь.StartsWith(наша, StringComparison.OrdinalIgnoreCase) && !путь.StartsWith(рядом, StringComparison.OrdinalIgnoreCase)) { process.Dispose(); continue; }
+                if (!путь.StartsWith(наша, StringComparison.OrdinalIgnoreCase)) { process.Dispose(); continue; }
                 try { process.Kill(true); process.WaitForExit(1500); }
                 catch { }
                 finally { process.Dispose(); }

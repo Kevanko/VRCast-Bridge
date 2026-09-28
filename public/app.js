@@ -384,7 +384,7 @@ async function openServerDialog(id){
   // к чему. Точки, пока не нажмут «показать»; настоящее значение — в data-key.
   const плашка=$('#serverKeyValue');
   плашка.dataset.key=''; плашка.dataset.shown='0'; плашка.textContent='••••••••••••';
-  if(!serverDialog.open)serverDialog.showModal();
+  if(!serverDialog.open||serverDialog.classList.contains('closing'))serverDialog.showModal();
   // Запоздалый ответ по прошлому серверу не должен показать его ключ в окне
   // другого: пишем, только если это всё ещё последний запрос и тот же сервер.
   const номер=ui.keyRequest=(ui.keyRequest||0)+1;
@@ -1120,7 +1120,7 @@ $('#goLive').addEventListener('click',async()=>{const button=$('#goLive');button
   $('#monitor').classList.remove('source-preview','window-paused');
   render(await api(`/api/start/${ui.source}`,{method:'POST',body:тело}));ui.localPreviewId='';ui.localNote=null;toast(ui.output==='tunnel'?'Запускаю эфир и получаю публичную ссылку':'Эфир запускается');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
 $('#stopLive').addEventListener('click',async()=>{try{render(await api('/api/stop',{method:'POST'}));}catch(error){toast(error.message,true);}});
-$('#updateButton').addEventListener('click',()=>{const update=ui.status?.update;if(!update?.available)return;ui.offeredVersion=update.version;paintUpdateDialog(update);if(!updateDialog.open)updateDialog.showModal();});
+$('#updateButton').addEventListener('click',()=>{const update=ui.status?.update;if(!update?.available)return;ui.offeredVersion=update.version;paintUpdateDialog(update);if(!updateDialog.open||updateDialog.classList.contains('closing'))updateDialog.showModal();});
 $('#showLogs').addEventListener('click',()=>{закрытьНастройки(true);paintLogs();$('#logDialog').showModal();const журнал=$('#logs');журнал.scrollTop=журнал.scrollHeight;schedulePoll(0);});
 $('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast://open-folder';});
 $('#appSoundSettings').addEventListener('click',()=>{window.location.href='vrcast://app-sound';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
@@ -1155,7 +1155,9 @@ async function refresh(){
     // Ничего не поменялось — и рисовать нечего. На простое это почти каждый опрос.
     if(text===ui.lastPollText&&ui.status)return;
     const state=JSON.parse(text);
-    render(state);
+    // Ошибка отрисовки — не обрыв связи: раньше она попадала в тот же catch,
+    // и при живом сервере висело «Нет связи».
+    try{ render(state); }catch(error){ console.error(error); }
     ui.lastPollText=text;
   }catch{
     // Одно сообщение на обрыв, а не тост на каждый опрос.
@@ -1481,9 +1483,15 @@ function подтвердить(вопрос, действие='Удалить',
 function ответПодтверждения(да){ const ответ=ответитьПодтверждению; ответитьПодтверждению=null; ответ?.(да); }
 $('#confirmOk').addEventListener('click',()=>{ ответПодтверждения(true); confirmDialog.close(); });
 $('#confirmCancel').addEventListener('click',()=>{ ответПодтверждения(false); confirmDialog.close(); });
-confirmDialog.addEventListener('close',()=>ответПодтверждения(false));
+// Запоздалое close от прошлого закрытия приходит, когда окно уже открыто
+// заново, — на новый вопрос оно отвечать не должно.
+confirmDialog.addEventListener('close',()=>{ if(!confirmDialog.open)ответПодтверждения(false); });
 let подтверждениеНажалиНаФон=false;
-confirmDialog.addEventListener('mousedown',event=>{ подтверждениеНажалиНаФон=(event.target===confirmDialog); });
-confirmDialog.addEventListener('click',event=>{ if(event.target===confirmDialog&&подтверждениеНажалиНаФон){ ответПодтверждения(false); confirmDialog.close(); } });
+// Фон — только то, что снаружи рамки окна: у dialog нет внутренней обёртки,
+// и event.target===confirmDialog срабатывал и на его внутренних отступах —
+// промах мимо «Удалить» превращался в «Отмену».
+const наФоне=event=>{ const r=confirmDialog.getBoundingClientRect(); return event.target===confirmDialog&&(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom); };
+confirmDialog.addEventListener('mousedown',event=>{ подтверждениеНажалиНаФон=наФоне(event); });
+confirmDialog.addEventListener('click',event=>{ if(подтверждениеНажалиНаФон&&наФоне(event)){ ответПодтверждения(false); confirmDialog.close(); } });
 // «1 ролик», «2 ролика», «5 роликов».
 function штук(n, формы){ const d=n%10, dd=n%100; return `${n} ${формы[d===1&&dd!==11?0:d>=2&&d<=4&&(dd<12||dd>14)?1:2]}`; }
