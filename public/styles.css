@@ -101,11 +101,7 @@ option{background:var(--menu);color:var(--text)}
 .app{height:100vh;display:grid;grid-template-rows:60px minmax(0,1fr) 36px}
 .topbar{position:relative;display:flex;align-items:center;gap:16px;padding:0 20px;border-bottom:1px solid var(--edge);background:var(--bar)}
 .brand{display:flex;align-items:center;gap:10px;flex:none}
-.brand-mark{width:32px;height:32px;padding:8px;display:flex;align-items:flex-end;justify-content:center;gap:3px;border-radius:9px;background:var(--raise)}
-.brand-mark i{display:block;width:4px;border-radius:2px}
-.brand-mark i:nth-child(1){height:7px;background:var(--second)}
-.brand-mark i:nth-child(2){height:16px;background:var(--accent)}
-.brand-mark i:nth-child(3){height:11px;background:var(--accent-strong)}
+.brand-mark{width:32px;height:32px;flex:none;display:block}
 .brand b{font-size:16px;font-weight:700;letter-spacing:-.01em;white-space:nowrap}
 .brand em{font:400 11px var(--mono);color:var(--faint);font-style:normal}
 
@@ -285,13 +281,13 @@ option{background:var(--menu);color:var(--text)}
 .panel{min-height:0;flex:1;display:flex;flex-direction:column}
 .panel-head{height:76px;flex:none;display:flex;align-items:center;gap:10px;padding:20px 20px 16px}
 .panel-head h2{font-size:18px;font-weight:700;line-height:24px}
-.count{height:22px;min-width:22px;display:inline-grid;place-items:center;padding:0 7px;border-radius:6px;background:var(--raise);color:var(--muted);font:500 12px var(--mono);font-variant-numeric:tabular-nums}
+.count{flex:none;height:22px;min-width:22px;display:inline-grid;place-items:center;padding:0 7px;border-radius:6px;background:var(--raise);color:var(--muted);font:500 12px var(--mono);font-variant-numeric:tabular-nums}
 .count.mini{height:18px;min-width:18px;padding:0 5px;font-size:11px}
 .templates-anchor{position:relative}
 #templatesButton[aria-expanded="true"]{border-color:var(--accent-line);background:var(--raise)}
 .panel-add{flex:none;display:flex;flex-direction:column;gap:8px;padding:0 20px 16px;border-bottom:1px solid var(--edge)}
 .add-media{display:flex;gap:8px}
-.add-media input{flex:1;min-width:0}
+.add-media input{flex:1;min-width:0;text-overflow:ellipsis}
 .add-media .btn{height:40px;padding:0 16px;border-radius:10px;font-size:14px}
 .drop-button{width:100%;height:40px;display:flex;align-items:center;justify-content:center;gap:8px;border:1px dashed var(--edge-strong);border-radius:10px;background:transparent;color:var(--muted);font-size:13px}
 .drop-button:hover{border-color:var(--accent-line);color:var(--text)}

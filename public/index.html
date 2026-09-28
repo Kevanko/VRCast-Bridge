@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <link rel="icon" type="image/png" href="/logo.png?v=0.29.0">
+  <link rel="icon" type="image/png" href="/logo.png?v=0.54.18">
   <meta name="theme-color" content="#0e0c18">
   <title>VRCast Bridge</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -54,7 +54,7 @@
     <!-- Шапка: марка слева, ссылка для плеера по центру, состояние справа.
          Ссылка — главное, что человек делает с программой, поэтому она на виду всегда. -->
     <header class="topbar">
-      <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><b>VRCast Bridge</b><em id="appVersion"></em></div>
+      <div class="brand"><img class="brand-mark" src="/logo.png?v=0.54.18" alt="" aria-hidden="true"><b>VRCast Bridge</b><em id="appVersion"></em></div>
 
       <div class="linkbar">
         <label class="player-kind" title="Тип плеера в мире"><span class="sr">Тип плеера</span>
@@ -209,7 +209,7 @@
           <div class="panel-add">
             <form id="addForm" class="add-media">
               <label for="mediaUrl" class="sr">Ссылка на видео</label>
-              <input id="mediaUrl" type="url" placeholder="Вставьте ссылку на видео" required>
+              <input id="mediaUrl" type="url" placeholder="Ссылка на видео" required>
               <button class="btn primary" id="addButton" type="submit">Добавить</button>
             </form>
             <button class="drop-button" id="pickLocal" type="button"><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg><span>Файлы с компьютера или перетащите сюда</span></button>
