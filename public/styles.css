@@ -101,7 +101,11 @@ option{background:var(--menu);color:var(--text)}
 .app{height:100vh;display:grid;grid-template-rows:60px minmax(0,1fr) 36px}
 .topbar{position:relative;display:flex;align-items:center;gap:16px;padding:0 20px;border-bottom:1px solid var(--edge);background:var(--bar)}
 .brand{display:flex;align-items:center;gap:10px;flex:none}
-.brand-mark{width:32px;height:32px;flex:none;display:block}
+.brand-mark{width:32px;height:32px;padding:8px;display:flex;align-items:flex-end;justify-content:center;gap:3px;border-radius:9px;background:var(--raise)}
+.brand-mark i{display:block;width:4px;border-radius:2px}
+.brand-mark i:nth-child(1){height:7px;background:var(--second)}
+.brand-mark i:nth-child(2){height:16px;background:var(--accent)}
+.brand-mark i:nth-child(3){height:11px;background:var(--accent-strong)}
 .brand b{font-size:16px;font-weight:700;letter-spacing:-.01em;white-space:nowrap}
 .brand em{font:400 11px var(--mono);color:var(--faint);font-style:normal}
 
