@@ -112,14 +112,21 @@ impl Scaler {
             self.video_context.VideoProcessorSetStreamDestRect(&self.processor, 0, true,
                 Some(&RECT { left: отступ_x as i32, top: отступ_y as i32,
                     right: (отступ_x + вписано_ш) as i32, bottom: (отступ_y + вписано_в) as i32 }));
-            let поток = D3D11_VIDEO_PROCESSOR_STREAM {
+            // Представление входа отдаём в структуру без clone и сами освобождаем
+            // после Blt. Раньше clone() добавлял ссылку, а ManuallyDrop её не
+            // отпускал: на каждом кадре (60 в секунду) в драйвере оставался
+            // живой объект вместе со ссылкой на текстуру кадра — память росла
+            // весь эфир.
+            let mut потоки = [D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: true.into(),
                 OutputIndex: 0,
                 InputFrameOrField: 0,
-                pInputSurface: std::mem::ManuallyDrop::new(input_view.clone()),
+                pInputSurface: std::mem::ManuallyDrop::new(input_view),
                 ..Default::default()
-            };
-            self.video_context.VideoProcessorBlt(&self.processor, &self.output_view, 0, &[поток])?;
+            }];
+            let итог = self.video_context.VideoProcessorBlt(&self.processor, &self.output_view, 0, &потоки);
+            std::mem::ManuallyDrop::drop(&mut потоки[0].pInputSurface);
+            итог?;
             context.CopyResource(&self.staging, &self.output);
         }
 
