@@ -1850,6 +1850,8 @@ function status(withLogs = true) {
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
     cache: { ready: cachedReadyCount(), total: queue.length, downloading: [...mediaCacheJobs.keys()],
+      // Какие ролики уже скачаны — очередь помечает их «Готово».
+      readyIds: queue.filter(item => !item.local && готовыеВКеше.has(item.id) && !mediaCacheJobs.has(item.id)).map(item => item.id),
       root: config.cacheRoot || '', path: mediaCacheDir(), drives: storageInfo.drives, sizeMb: storageInfo.sizeMb,
       limitGb: Number(config.cacheLimitGb) || 0 },
     audio: { levelDb: audioLevelDb, silent: audioLevelDb < -70 },
@@ -4879,6 +4881,11 @@ const server = http.createServer(async (req, res) => {
         }
       } catch {}
       cleanupStorage();
+      return json(res, 200, status());
+    }
+    if (req.method === 'POST' && url.pathname === '/api/update/check') {
+      // Кнопка «Проверить» в настройках: спрашиваем GitHub сейчас.
+      await checkForUpdate();
       return json(res, 200, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/update/apply') {
