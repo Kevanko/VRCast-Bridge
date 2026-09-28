@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.15';
+const APP_VERSION = '0.54.16';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -3888,13 +3888,15 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
         log(`Источник устарел — обновляю прямую ссылку: ${item.title}`);
         return setTimeout(() => startQueueItem(queueIndex, sourcePosition, generation, retry + 1), ПАУЗА_ПОВТОРА);
       }
-      // Локальный файл, отыгравший уже какое-то время, с ненулевым кодом — это
-      // авария (ffmpeg упал или его убили), а не конец файла: штатный EOF даёт
-      // код 0. Раньше такой трек молча считался доигранным. Продолжаем тот же
-      // трек с места падения, но не больше двух раз подряд.
+      // Трек, отыгравший уже какое-то время, с ненулевым кодом — это авария
+      // (ffmpeg упал или его убили, оборвалась сеть), а не конец файла: штатный
+      // EOF даёт код 0. Раньше такой трек молча считался доигранным. Продолжаем
+      // тот же трек с места падения, но не больше двух раз подряд; у ролика из
+      // сети заодно берём свежую прямую ссылку — старая могла протухнуть.
       const позиция = sourcePosition + ranFor * (Number(config.playbackSpeed) || 1);
       const доКонца = currentDuration ? currentDuration - позиция : Infinity;
-      if (code && code !== 255 && item.local && ranFor >= 2 && доКонца > 2 && retry < 2) {
+      if (code && code !== 255 && ranFor >= 2 && доКонца > 2 && retry < 2) {
+        if (!item.local) resolvedMedia.delete(item.id);
         playbackBusy = true;
         log(`Трек прервался (код ${code}) — продолжаю с ${Math.floor(позиция)} с: ${item.title}`);
         return setTimeout(() => startQueueItem(queueIndex, позиция, generation, retry + 1), ПАУЗА_ПОВТОРА);
@@ -4692,7 +4694,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/update/apply') {
       // Качаем и ставим по кнопке. Отвечаем сразу (202), прогресс — в статусе;
       // когда файл готов, сервер сам подменит exe и перезапустится.
-      void startUpdateInstall().catch(error => log(`Установка обновления: ${error.message}`));
+      // Версия могла выйти после последней проверки — спрашиваем GitHub заново.
+      void (updateState.available ? Promise.resolve() : checkForUpdate())
+        .then(startUpdateInstall)
+        .catch(error => log(`Установка обновления: ${error.message}`));
       return json(res, 202, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/servers') {
@@ -4799,7 +4804,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/config') {
       const body = await readBody(req);
       const next = {
-        outputMode: ['local', 'tunnel', 'remote'].includes(body.outputMode) ? body.outputMode : 'local',
+        outputMode: ['local', 'tunnel', 'remote'].includes(body.outputMode) ? body.outputMode : (config.outputMode || 'local'),
         cacheRoot: typeof body.cacheRoot === 'string' ? body.cacheRoot.trim().slice(0, 300) : config.cacheRoot,
         videoBitrate: Math.max(0, Math.min(20000, Number(body.videoBitrate ?? config.videoBitrate ?? 0) || 0)),
         autoQuality: body.autoQuality === undefined ? config.autoQuality !== false : Boolean(body.autoQuality),
@@ -5005,6 +5010,9 @@ server.listen(PORT, HOST, () => {
   setTimeout(() => { repairLibrary().catch(() => {}); }, 1500);
   // Проверяем не сразу: пусть эфир поднимется первым, обновление подождёт.
   setTimeout(() => { checkForUpdate(); }, 8000);
+  // Программа живёт в трее неделями — одной проверки при запуске мало:
+  // вышедшую позже версию она бы так и не увидела.
+  setInterval(() => { if (!updateState.available) checkForUpdate(); }, 6 * 3600 * 1000).unref();
   if (tools.mediamtx) { startMediaMtx(); log(`Мгновенный канал RTSP: rtspt://127.0.0.1:${RTSP_PORT}/live`); }
   if (tools.ffmpeg) ensureRelay(streamProfile('queue'));
   if (config.outputMode === 'tunnel') setTimeout(startPublicTunnel, 250);
