@@ -1,14 +1,14 @@
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { constants as osConstants, networkInterfaces, setPriority } from 'node:os';
+import { availableParallelism, constants as osConstants, networkInterfaces, setPriority } from 'node:os';
 import { basename, dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { connect as netConnect } from 'node:net';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 
-const APP_VERSION = '0.54.17';
+const APP_VERSION = '0.54.18';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -265,6 +265,12 @@ function setChildPriority(child, priority) {
 }
 const onAir = child => setChildPriority(child, ПРИОРИТЕТ_ЭФИРА);
 const inBackground = child => setChildPriority(child, ПРИОРИТЕТ_ФОНА);
+// Продюсеры кодируют видео. На видеокарте процессор им почти не нужен, и
+// ступень выше обычного лишь страхует темп. А libx264 занимает ядра целиком:
+// с приоритетом выше обычного он вытеснял бы саму игру. Поэтому кодирование
+// на процессоре идёт с обычным приоритетом и на половине ядер (см. X264_THREADS).
+const onAirProducer = child => setChildPriority(child,
+  encoder.hardware ? ПРИОРИТЕТ_ЭФИРА : osConstants.priority.PRIORITY_NORMAL);
 
 try { setPriority(process.pid, ПРИОРИТЕТ_ЭФИРА); } catch {}
 
@@ -316,6 +322,17 @@ const TOOL_SOURCES = {
 };
 let toolDownloads = {};
 
+// Своя папка с ffmpeg должна попасть в PATH до первых проверок ниже. Раньше
+// её добавлял ensureTools уже после старта: проверка видеокарты на старте не
+// находила ffmpeg, запоминала «видеокарты нет», и у всех, у кого ffmpeg не
+// стоит в системе, кодировал процессор. Заставка на старте тоже не поднималась.
+function addToolDirToPath() {
+  if (existsSync(join(TOOL_DIR, 'ffmpeg.exe')) && !String(process.env.PATH || '').includes(TOOL_DIR)) {
+    process.env.PATH = `${TOOL_DIR};${process.env.PATH || ''}`;
+  }
+}
+addToolDirToPath();
+
 function toolPath(name) {
   const own = join(TOOL_DIR, name);
   if (existsSync(own)) return own;
@@ -354,6 +371,9 @@ const CPU_ENCODER = { name: 'libx264', label: 'Процессор', family: 'x26
 let hardwareEncoder; // undefined — ещё не проверяли; объект или null — проверили
 function detectHardwareEncoder() {
   if (hardwareEncoder !== undefined) return hardwareEncoder;
+  // Без ffmpeg проверять нечем — ответ «нет» не запоминаем, иначе после
+  // докачки ffmpeg видеокарта так и не нашлась бы до перезапуска.
+  if (!tools.ffmpeg) return null;
   const варианты = [
     { name: 'h264_nvenc', label: 'Видеокарта NVIDIA', family: 'nvenc' },
     { name: 'h264_amf', label: 'Видеокарта AMD', family: 'amf' },
@@ -1560,14 +1580,19 @@ async function refreshToolsAsync() {
   tools.pinggy = Boolean(PINGGY());
   tools.mediamtx = Boolean(MEDIAMTX());
   tools.plink = Boolean(PLINK());
+  // ffmpeg только что появился (докачан) — теперь есть чем проверить видеокарту.
+  // Во время эфира не проверяем: проба синхронная и остановила бы поток.
+  if (tools.ffmpeg && hardwareEncoder === undefined && !activeKind) {
+    const прежний = encoder;
+    encoder = pickEncoder(config.encoderMode);
+    if (encoder !== прежний) log(`Кодировщик: ${encoder.label}`);
+  }
 }
 
 function refreshTools() {
   // ffmpeg зовут по имени из десятка мест — проще добавить свою папку в PATH,
   // чем тащить путь через все вызовы.
-  if (existsSync(join(TOOL_DIR, 'ffmpeg.exe')) && !process.env.PATH.includes(TOOL_DIR)) {
-    process.env.PATH = `${TOOL_DIR};${process.env.PATH}`;
-  }
+  addToolDirToPath();
   tools.ffmpeg = toolAvailable('ffmpeg', ['-version']);
   tools.ytdlp = toolAvailable(ytdlpPath());
   tools.cloudflared = Boolean(CLOUDFLARED()) && toolAvailable(CLOUDFLARED());
@@ -1597,9 +1622,7 @@ async function ensureTools() {
   // Свою папку с ffmpeg добавляем в PATH сразу — это не требует запуска утилит.
   // А сами проверки версий делаем без блокировки event loop: sync-вариант
   // тормозил старт на секунду (yt-dlp распаковывается ~1 с на запуск).
-  if (existsSync(join(TOOL_DIR, 'ffmpeg.exe')) && !process.env.PATH.includes(TOOL_DIR)) {
-    process.env.PATH = `${TOOL_DIR};${process.env.PATH}`;
-  }
+  addToolDirToPath();
   await refreshToolsAsync();
   // Сначала то, без чего не работает сама ссылка, — FFmpeg и MediaMTX, оба
   // сразу. Как только они есть, поднимаем локальный эфир и только потом
@@ -1612,9 +1635,7 @@ async function ensureTools() {
   if (!tools.cloudflared) остальное.push('cloudflared.exe');
   const поднять = async () => {
     // Свежескачанный ffmpeg лежит в своей папке — без неё в PATH его не найти.
-    if (existsSync(join(TOOL_DIR, 'ffmpeg.exe')) && !process.env.PATH.includes(TOOL_DIR)) {
-      process.env.PATH = `${TOOL_DIR};${process.env.PATH}`;
-    }
+    addToolDirToPath();
     await refreshToolsAsync();
     if (tools.mediamtx && !mediaMtxProcess) startMediaMtx();
     if (tools.ffmpeg && !relayProcess) { try { ensureRelay(streamProfile('queue')); } catch {} }
@@ -2296,6 +2317,10 @@ function rateControlArgs(rate) {
   return ['-rc', 'vbr', '-b:v', rate, '-maxrate', `${Math.round(число * 1.5)}k`, '-bufsize', `${Math.round(число * 2)}k`];
 }
 
+// Сколько потоков отдаём libx264: половину ядер, но не меньше двух и не
+// больше восьми (дальше выигрыша у zerolatency почти нет). Остальное — игре.
+const X264_THREADS = Math.max(2, Math.min(8, Math.floor((availableParallelism?.() || 4) / 2)));
+
 function producerEncodeArgs(profile = streamProfile()) {
   const keyframes = Math.max(8, Math.round(profile.fps * 0.5));
   const rate = bitrate(profile);
@@ -2318,7 +2343,7 @@ function producerEncodeArgs(profile = streamProfile()) {
   // На слабой машине даже veryfast не успевает: тогда переходим на ultrafast,
   // это заметно дешевле по процессору ценой чуть большего размера потока.
   return ['-c:v', 'libx264', '-preset', lightMode ? 'ultrafast' : 'veryfast', '-tune', 'zerolatency',
-    ...proff, '-b:v', rate, '-maxrate', rate, '-bufsize', rate,
+    '-threads', String(X264_THREADS), ...proff, '-b:v', rate, '-maxrate', rate, '-bufsize', rate,
     ...gop, '-sc_threshold', '0', '-bf', '0', '-pix_fmt', 'yuv420p'];
 }
 
@@ -2506,7 +2531,7 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
   log(`Захват экрана · ${encoder.label} · ${config.quality}/${config.fps} FPS`);
   stopStandby();
   const stdio = ['ignore', 'pipe', 'pipe', audioHelperArgs ? 'pipe' : 'ignore', windowHelperArgs ? 'pipe' : 'ignore'];
-  const child = onAir(spawn('ffmpeg', args, { windowsHide: true, stdio }));
+  const child = onAirProducer(spawn('ffmpeg', args, { windowsHide: true, stdio }));
   let aux = null;
   let windowCapture = null;
   activeProcess = child;
@@ -3243,7 +3268,7 @@ function startPausedFrameProducer(frameFile) {
   const args = ['-hide_banner', '-loglevel', 'warning', '-i', frameFile,
     '-re', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0',
     '-vf', stillFrameFilter(profile.fps), '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile)];
-  const child = onAir(spawn('ffmpeg', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
+  const child = onAirProducer(spawn('ffmpeg', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
   standbyProcess = child;
   pipeToRelay(child);
   attachProcessLogs(child, 'Paused frame');
@@ -3292,7 +3317,7 @@ function startStandby(profile = sessionProfile()) {
     '-re', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0',
     '-vf', hasImage ? `${fit},${stillFrameFilter(profile.fps)}` : fit,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile)];
-  const child = onAir(spawn('ffmpeg', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
+  const child = onAirProducer(spawn('ffmpeg', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
   standbyProcess = child;
   pipeToRelay(child);
   attachProcessLogs(child, 'Standby');
@@ -3859,6 +3884,12 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   const height = profileHeight(profile);
   const width = Math.round(height * 16 / 9 / 2) * 2;
   const args = ['-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts'];
+  // Темп чтения обязан совпадать со скоростью воспроизведения: setpts и atempo
+  // ниже сжимают время в speed раз. С «-re» (темп 1×) на скорости 2× поток шёл
+  // вдвое медленнее реального времени — фризы и ложное снижение качества, а на
+  // 0,5× убегал вперёд, и каждые 45 с срабатывала пересборка канала с resync.
+  const speed = Math.max(0.5, Math.min(2, Number(config.playbackSpeed) || 1));
+  const pace = speed === 1 ? ['-re'] : ['-readrate', String(speed)];
   let inputIndex = 0, videoIndex = null, audioIndex = null;
 
   // Заголовки должны стоять перед каждым сетевым входом
@@ -3871,10 +3902,10 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   }
   if (media.videoUrl && media.audioUrl && media.videoUrl !== media.audioUrl) {
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
-    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', ...HWACCEL, '-re', '-i', media.videoUrl);
+    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', ...HWACCEL, ...pace, '-i', media.videoUrl);
     videoIndex = inputIndex++;
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
-    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', '-re', '-i', media.audioUrl);
+    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', ...pace, '-i', media.audioUrl);
     audioIndex = inputIndex++;
   } else {
     const source = media.combinedUrl || media.videoUrl || media.audioUrl;
@@ -3886,7 +3917,7 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
     // видео просто игнорируется) и всегда держим темп реального времени:
     // без него готовый плейлист проглатывается вдвое быстрее и эфир уезжает.
     if (media.live) args.push('-live_start_index', '-1');
-    args.push(...HWACCEL, '-re', '-i', source);
+    args.push(...HWACCEL, ...pace, '-i', source);
     if (media.hasVideo) videoIndex = inputIndex;
     if (media.hasAudio) audioIndex = inputIndex;
     inputIndex++;
@@ -3895,15 +3926,14 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   if (videoIndex === null) {
     // -re обязателен: без него lavfi-подложка генерируется со скоростью CPU и
     // разносит таймлайн (аудио-треки без видео ломали плеер именно так).
-    args.push('-re', '-f', 'lavfi', '-i', `color=c=0x080611:s=${width}x${height}:r=${profile.fps}`);
+    args.push(...pace, '-f', 'lavfi', '-i', `color=c=0x080611:s=${width}x${height}:r=${profile.fps}`);
     videoIndex = inputIndex++;
   }
   if (audioIndex === null) {
-    args.push('-re', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000');
+    args.push(...pace, '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000');
     audioIndex = inputIndex++;
   }
 
-  const speed = Math.max(0.5, Math.min(2, Number(config.playbackSpeed) || 1));
   const mediaVolume = Math.max(0, Math.min(4, Number(config.mediaVolume) || 0));
   // Заглавная V берёт только настоящее видео и пропускает обложку альбома.
   // Субтитры и служебные дорожки VRChat не понимает вовсе — отрезаем их явно,
@@ -4007,7 +4037,7 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
     if (manualTransition) return;
     currentDuration = media.duration || item.duration || null;
     stopStandby();
-    const child = onAir(spawn('ffmpeg', queueProducerArgs(media, markProducerTimestamp(nextProducerTimestamp()), sourcePosition), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
+    const child = onAirProducer(spawn('ffmpeg', queueProducerArgs(media, markProducerTimestamp(nextProducerTimestamp()), sourcePosition), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
     activeProcess = child;
     pipeToRelay(child);
     currentStartedAt = Date.now();
