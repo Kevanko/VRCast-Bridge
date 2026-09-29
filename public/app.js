@@ -231,6 +231,11 @@ function paintPreviewToggle() {
 // выключенном предпросмотре — «Ничего не выбрано», хотя дело в выключателе.
 function paintMonitorPlaceholder(state) {
   const monitor=$('#monitor');
+  // Пауза ради экономии — как в Discord: говорим честно, а не «ничего не выбрано».
+  if (ui.previewOn&&(ui.windowHidden||ui.windowBlurred)&&!monitor.classList.contains('previewing')) {
+    monitorPlaceholder('Предпросмотр на паузе',state.running?'Эфир идёт как обычно — картинка вернётся, когда откроете окно':'Окно не в фокусе — так не тратится процессор','eye-off');
+    return;
+  }
   if (monitor.classList.contains('window-paused')||monitor.classList.contains('source-preview')) return;
   if (state.running) {
     if (!ui.previewOn) monitorPlaceholder('Картинка выключена','Эфир идёт, окно не тратит процессор','eye-off');
@@ -534,13 +539,17 @@ function renderTemplates(state) {
     :'<p class="template-empty">Пока пусто. Соберите очередь и сохраните её ниже — потом откроете одним нажатием.</p>';
   setHtml($('#templateList'),html);
   setText($('#templateCount'),String(templates.length));
+  // Пустой список — один: если он уже есть, кнопка подсказывает, какой открыть.
+  const пустой=templates.find(item=>!Number(item.count));
+  setDisabled($('#newEmptyTemplate'),Boolean(пустой));
+  setTitle($('#newEmptyTemplate'),пустой?`Пустой список уже есть — «${пустой.name}»`:'Начать новый список с чистой очереди');
   setDisabled($('#saveTemplate'),!state.queue.length);
   // Открытый список — в заголовке очереди; кнопка внизу сохраняет в него.
   setHidden($('#currentList'),!текущий);
   setText($('#currentListName'),текущий?`· ${текущий.name}`:'');
   setHidden($('#currentListDirty'),!текущий?.dirty);
   const кнопка=$('#saveTemplateQuick');
-  setText(кнопка,текущий?(текущий.dirty?'Сохранить изменения':'Сохранено'):'Сохранить список');
+  setText(кнопка,текущий&&!текущий.dirty?'Сохранено':'Сохранить');
   setTitle(кнопка,текущий?`Сохранить очередь в список «${текущий.name}»`:'Сохранить очередь как новый список');
   setDisabled(кнопка,!state.queue.length||Boolean(текущий&&!текущий.dirty));
 }
@@ -559,14 +568,17 @@ function источник(item){
 }
 function queueRowHtml(item,index,state,{готовые,качаются,unityВыбор,подсказкаТрека}){
   const играет=state.currentId===item.id&&state.running, смотрим=ui.localPreviewId===item.id&&!state.running;
+  // Выбранный без эфира ролик — с него начнётся эфир.
+  const выбран=!state.running&&ui.selectedId===item.id;
   const метка=item.unavailable?'<span class="q-bad">недоступен — пропускается</span>'
     :играет?'<span class="q-live">В эфире</span>'
+    :выбран?'<span class="q-live">Эфир начнётся с него</span>'
     :смотрим?'<span class="q-ready">Смотрите здесь</span>'
     :качаются.has(item.id)?'<span class="q-load">Скачиваю…</span>'
     :item.local||готовые.has(item.id)?`<span class="q-ready">${icon('check')}Готово</span>`
     :'<span class="q-wait">В очереди</span>';
   const длина=item.duration?formatTime(item.duration):'';
-  const классы=['queue-item',играет?'playing':'',item.unavailable?'unavailable':'',unityВыбор&&ui.unitySelectedId===item.id?'unity-selected':''].filter(Boolean).join(' ');
+  const классы=['queue-item',играет?'playing':'',выбран?'selected':'',item.unavailable?'unavailable':'',unityВыбор&&ui.unitySelectedId===item.id?'unity-selected':''].filter(Boolean).join(' ');
   return `<div class="${классы}" data-id="${escapeHtml(item.id)}"${item.unavailable?' data-unavailable="1"':''}>`
     +`<button type="button" class="queue-pick" title="${подсказкаТрека}">`
     +(играет?'<span class="q-bars" aria-label="В эфире"><i></i><i></i><i></i></span>':`<span class="q-index">${index+1}</span>`)
@@ -654,13 +666,16 @@ function paintMonitorTags(state){
   if(state.running){
     const готов=Boolean(state.stream?.ready);
     текст=готов?'ЭФИР':'ЗАПУСК'; класс=готов?'live':'cue';
-    пояснение=!ui.previewOn?'Эфир идёт, картинка выключена':ui.source!==(state.activeKind==='screen'?'screen':'queue')?`В эфире ${state.activeKind==='screen'?'экран':'видео'}`:'Так видят в VRChat';
+    // Без дублей: «идёт эфир» уже говорят метка ЭФИР и строка статуса, про
+    // выключенную картинку — сам кадр. Подпись нужна, только если в эфире не то,
+    // что открыто на вкладке.
+    пояснение=ui.source!==(state.activeKind==='screen'?'screen':'queue')?`В эфире ${state.activeKind==='screen'?'экран':'видео'}`:'';
   } else if(кадр.classList.contains('source-preview')||кадр.classList.contains('window-paused')){
     текст='ПРЕДПРОСМОТР'; класс='cue'; пояснение=ui.captureBadge||'Эфир не запущен';
   } else if(ui.localPreviewId){
     текст='ПРОСМОТР'; класс='plain'; пояснение='Только у вас — в эфир не идёт';
   }
-  setHidden(метка,!текст); setHidden(подпись,false);
+  setHidden(метка,!текст); setHidden(подпись,!пояснение);
   if(текст){ setText(метка,текст); setClass(метка,`tag-chip ${класс}`); }
   setText(подпись,пояснение);
 }
@@ -776,6 +791,7 @@ function render(state) {
   }
   setText($('#playbackUrl'),shownUrl||(linkError?'Ссылка пока недоступна':'Подготовка ссылки…')); setText($('#trustHint'),hint);
   paintNetInfo(state); paintAdapters(state); paintTunnelSpeeds(state);
+  document.documentElement.classList.toggle('on-air',Boolean(state.running));
   setDisabled($('#copyUrl'),!shownUrl);
   const linkState=$('#linkState'); setClass(linkState,`link-state ${linkGood?'public':linkError?'error':''}`); setText(linkState.querySelector('span'),linkText);
   // Транспорт имеет смысл только для RTSP-ссылки
@@ -850,7 +866,9 @@ function render(state) {
   const здоровье=streamStalled||congested||тяжело?'bad':!streamReady?'warn':ratio&&ratio<0.97?'warn':'ok';
   setClass($('#healthDot'),`dot ${здоровье}`);
   // Метка на кадре — только в эфире: без эфира о потоке говорить нечего.
-  setHidden($('#healthChip'),!state.running);
+  // «Поток вовремя» уже пишет строка статуса — на кадре только то, что важно:
+  // проблемы и задержка у зрителей быстрой ссылки.
+  setHidden($('#healthChip'),!state.running||(здоровье==='ok'&&!hasAudienceLatency&&!(drift>0.3)));
   if(state.running){
     setClass($('#healthChip'),`tag-chip soft health-chip ${здоровье==='ok'?'':здоровье}`);
     setText($('#healthChipText'),здоровье==='ok'?(hasAudienceLatency?`У зрителя ≈ ${задержкаТекст}`:drift>0.3?`Дрейф ${drift.toFixed(1).replace('.',',')} с`:'Поток вовремя'):здоровье==='warn'?'Набирает буфер':'Не успевает');
@@ -860,7 +878,12 @@ function render(state) {
     :'');
   setText($('#queueCount'),state.queue.length);
   const всегоСекунд=state.queue.reduce((sum,item)=>sum+(Number(item.duration)||0),0);
-  setHtml($('#queueSummary'),`${штук(state.queue.length,['видео','видео','видео'])}${всегоСекунд?` · <b>${formatTime(всегоСекунд)}</b>`:''}`);
+  // Общая длительность — коротко, по-человечески: «10 ч 42 мин», а не
+  // «10:42:17»: длинное время переносилось на три строки в подвале очереди.
+  const часы=Math.floor(всегоСекунд/3600), минуты=Math.round((всегоСекунд%3600)/60);
+  const всего=всегоСекунд?(часы?`${часы} ч${минуты?` ${минуты} мин`:''}`:`${Math.max(1,минуты)} мин`):'';
+  setHtml($('#queueSummary'),`${штук(state.queue.length,['видео','видео','видео'])}${всего?` · <b>${всего}</b>`:''}`);
+  setTitle($('#queueSummary'),всегоСекунд?`Всего ${formatTime(всегоСекунд)}`:'');
   setHidden($('#pickLocal'),!state.queue.length);
   setDisabled($('#clearQueue'),!state.queue.length);
   // Журнал в сотню строк переписываем, только пока его окно открыто: иначе
@@ -899,7 +922,9 @@ function render(state) {
   const unityВыбор=$('#playerMode').value==='unity';
   const подсказкаТрека=unityВыбор?'Выбрать для подготовки Unity':state.running?'Включить этот трек в эфире':'Посмотреть здесь, без эфира';
   const готовые=new Set(state.cache?.readyIds||[]), качаются=new Set(state.cache?.downloading||[]);
-  const queueSignature=JSON.stringify([state.currentId,state.running,ui.localPreviewId,ui.unitySelectedId,подсказкаТрека,[...качаются],[...готовые],state.queue.map(item=>[item.id,item.title,item.thumbnail,item.duration,item.unavailable,item.local])]);
+  // Выбранный ролик удалили — выбор снимается.
+  if(ui.selectedId&&!state.queue.some(item=>item.id===ui.selectedId))ui.selectedId='';
+  const queueSignature=JSON.stringify([state.currentId,state.running,ui.localPreviewId,ui.unitySelectedId,ui.selectedId,подсказкаТрека,[...качаются],[...готовые],state.queue.map(item=>[item.id,item.title,item.thumbnail,item.duration,item.unavailable,item.local])]);
   if(!ui.dragging&&queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>queueRowHtml(item,index,state,{готовые,качаются,unityВыбор,подсказкаТрека})).join(''):queueEmptyHtml();}
   const screenSource=ui.source==='screen';
   setHidden($('#menuMediaQuality'),screenSource); setHidden($('#menuMediaFps'),screenSource);
@@ -1330,9 +1355,11 @@ $('#queueList').addEventListener('click',async event=>{
     if($('#playerMode').value==='unity'){ ui.unitySelectedId=id; if(ui.status)render(ui.status); toast('Трек выбран — нажмите «Подготовить».'); return; }
     // Эфир идёт — переключаемся на этот трек прямо в эфире.
     if(ui.status?.running){ await playback('jump',{id}); return; }
-    // Эфира нет — открываем трек в предпросмотре, ничего не вещая. Стрим
-    // начнётся только по кнопке «Начать эфир видео».
+    // Эфира нет — ролик становится выбранным (подсвечен, эфир начнётся с него)
+    // и открывается в предпросмотре, ничего не вещая.
+    ui.selectedId=id;
     показатьЛокальныйПредпросмотр(id);
+    if(ui.status)render(ui.status);
   }catch(error){toast(error.message,true);}
 });
 // Enter/пробел выбирают трек сами: выбор — настоящая кнопка .queue-pick рядом
@@ -1349,13 +1376,21 @@ $('#templateSaveForm').addEventListener('submit',async event=>{
   if(тот&&!await подтвердить(`Список «${тот.name}» уже есть — перезаписать?`,'Перезаписать',`Сейчас в нём ${ролики(тот.count)}. Их заменит текущая очередь — ${ролики(очередь)}.`))return;
   try{await сохранитьСписок(тот?.id||'',name);$('#templateName').value='';toast(тот?'Список перезаписан':'Список сохранён');}catch(error){toast(error.message,true);}
 });
+$('#newEmptyTemplate').addEventListener('click',async()=>{
+  const очередь=ui.status?.queue?.length||0;
+  if(очередь&&!ui.status?.queueSaved&&!await подтвердить('Начать новый пустой список?','Начать',`Текущая очередь (${ролики(очередь)}) нигде не сохранена и очистится. Если она нужна — сначала сохраните её как список.`))return;
+  const name=$('#templateName').value.trim()||'Новый список';
+  try{ render(await api('/api/templates/empty',{method:'POST',body:JSON.stringify({name})})); $('#templateName').value=''; toast(`Создан пустой список «${name}» — добавляйте видео`); openTemplateMenu(false); }
+  catch(error){ toast(error.message,true); }
+});
 $('#templateList').addEventListener('click',async event=>{
   const button=event.target.closest('[data-t]'), row=event.target.closest('[data-template]'); if(!button||!row)return;
   const список=ui.status?.templates?.find(item=>item.id===row.dataset.template); if(!список)return;
   const очередь=ui.status?.queue?.length||0, путь=`/api/templates/${encodeURIComponent(список.id)}`;
   try{
     if(button.dataset.t==='open'){
-      if(очередь&&!await подтвердить(`Открыть «${список.name}» вместо текущей очереди?`,'Открыть',`Текущая очередь (${ролики(очередь)}) будет заменена. Если она нужна — сначала сохраните её как список.`))return;
+      // Спрашиваем, только если текущая очередь нигде не сохранена.
+      if(очередь&&!ui.status?.queueSaved&&!await подтвердить(`Открыть «${список.name}» вместо текущей очереди?`,'Открыть',`Текущая очередь (${ролики(очередь)}) будет заменена. Если она нужна — сначала сохраните её как список.`))return;
       render(await api(`${путь}/load`,{method:'POST',body:JSON.stringify({append:false})}));toast(`Открыт список «${список.name}»`);openTemplateMenu(false);
     }else if(button.dataset.t==='append'){
       render(await api(`${путь}/load`,{method:'POST',body:JSON.stringify({append:true})}));toast(`В конец очереди добавлено: ${ролики(список.count)}`);
@@ -1491,12 +1526,28 @@ $('#previewToggle').addEventListener('click',()=>{
 // Свёрнутое окно программы не должно ничего декодировать, анимировать и
 // часто опрашивать сервер. WebView2 при сворачивании не всегда скрывает
 // страницу для браузера, поэтому оболочка шлёт свои vrcast-hidden/-shown.
+// Окно свернули или ушли в другое окно — предпросмотр на паузу. Вернулись —
+// всё поднимается одним путём: и эфир, и кадры захвата экрана, и локальный
+// трек (если он играл). Раньше при возврате фокуса возвращалась только
+// перерисовка, и кадр оставался пустым.
+function приостановитьПредпросмотр(){
+  const видео=$('#streamPreview');
+  ui.локальныйИграл=Boolean(ui.localPreviewId&&!видео.paused);
+  stopPreview();
+  if(ui.status)paintMonitorPlaceholder(ui.status);
+}
+function возобновитьПредпросмотр(){
+  if(!previewAllowed()||!ui.status)return;
+  render(ui.status);
+  if(ui.source==='screen'&&!ui.status.running)refreshCapturePreview(false).catch(()=>{});
+  if(ui.localPreviewId&&ui.локальныйИграл)$('#streamPreview').play().catch(()=>{});
+  scheduleCaptureFrames();
+}
 function setWindowHidden(hidden) {
   if (ui.windowHidden===hidden) return;
   ui.windowHidden=hidden;
   document.documentElement.classList.toggle('window-hidden',hidden);
-  if (hidden) stopPreview();
-  else if (ui.status) { render(ui.status); if (ui.source==='screen'&&!ui.status.running) refreshCapturePreview(false).catch(()=>{}); }
+  if (hidden) приостановитьПредпросмотр(); else возобновитьПредпросмотр();
   scheduleCaptureFrames();
   // Вернулись — сразу свежее состояние, а не через пять секунд.
   schedulePoll(hidden?undefined:0);
@@ -1505,7 +1556,8 @@ document.addEventListener('visibilitychange',()=>setWindowHidden(document.hidden
 function setWindowBlurred(blurred){
   if(ui.windowBlurred===blurred)return;
   ui.windowBlurred=blurred;
-  if(blurred)stopPreview(); else if(ui.status)render(ui.status);
+  if(blurred)приостановитьПредпросмотр(); else возобновитьПредпросмотр();
+  scheduleCaptureFrames();
 }
 document.addEventListener('vrcast-blur',()=>setWindowBlurred(true));
 document.addEventListener('vrcast-focus',()=>setWindowBlurred(false));
@@ -1617,7 +1669,7 @@ $('#captureVolume').addEventListener('change',async()=>{
   catch(error){ toast(error.message,true); }
 });
 
-async function начатьЭфир(){const button=$('#goLive'),карточка=$('#applyCapture');if(ui.status&&!ui.status.running&&ссылкаНеГотова(ui.status))return toast(ui.status?.delivery?.error||'Ссылка ещё готовится. Дождитесь статуса «Готово».',true);button.disabled=true;карточка.disabled=true;try{await saveConfig();const тело=ui.source==='queue'&&ui.localPreviewId?JSON.stringify({id:ui.localPreviewId}):undefined;
+async function начатьЭфир(){const button=$('#goLive'),карточка=$('#applyCapture');if(ui.status&&!ui.status.running&&ссылкаНеГотова(ui.status))return toast(ui.status?.delivery?.error||'Ссылка ещё готовится. Дождитесь статуса «Готово».',true);button.disabled=true;карточка.disabled=true;try{await saveConfig();const выбран=ui.selectedId||ui.localPreviewId;const тело=ui.source==='queue'&&выбран?JSON.stringify({id:выбран}):undefined;ui.selectedId='';
   $('#monitor').classList.remove('source-preview','window-paused');
   if(ui.source==='queue')очиститьЛокальныйПредпросмотр();
   render(await api(`/api/start/${ui.source}`,{method:'POST',body:тело}));ui.localPreviewId='';ui.localNote=null;ui.captureDirty=false;toast(ui.output==='tunnel'?'Запускаю эфир и получаю публичную ссылку':'Эфир запускается');}catch(error){toast(error.message,true);}finally{button.disabled=false;карточка.disabled=false;if(ui.status)render(ui.status);}}
@@ -1798,9 +1850,10 @@ function тикФона(время){
   requestAnimationFrame(тикФона);
   if(время-прошлыйКадр<33||document.hidden)return; // ~30 раз в секунду хватает глазу
   прошлыйКадр=время;
-  // Быстро вспыхивает, плавно гаснет — как индикатор на пульте.
-  энергия=цельЭнергии>энергия?энергия+(цельЭнергии-энергия)*0.6:энергия*0.9;
-  const округл=Math.round(энергия*50)/50;
+  // Огибающая, как у VU-метра: нарастает за ~0,1 с, спадает за ~1 с — фон
+  // «дышит» вместе с музыкой, а не мигает на каждый удар.
+  энергия+=(цельЭнергии-энергия)*(цельЭнергии>энергия?0.3:0.045);
+  const округл=Math.round(энергия*100)/100;
   if(округл!==показано){ показано=округл; фон.style.setProperty('--energy',String(округл)); }
 }
 requestAnimationFrame(тикФона);

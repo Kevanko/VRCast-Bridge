@@ -60,14 +60,19 @@ body{margin:0;min-width:960px;height:100vh;overflow:hidden;background:var(--bg);
     color-mix(in srgb,var(--glow-a) 70%,transparent));
   -webkit-mask:radial-gradient(closest-side,#000 30%,rgba(0,0,0,.55) 62%,transparent 100%);
   mask:radial-gradient(closest-side,#000 30%,rgba(0,0,0,.55) 62%,transparent 100%);
-  filter:blur(70px);opacity:calc(.58 + var(--energy) * .3);scale:calc(1 + var(--energy) * .08);
-  transition:opacity .2s linear,scale .2s linear;animation:flow-spin 120s linear infinite}
+  filter:blur(70px);opacity:calc(.55 + var(--energy) * .35);scale:calc(1 + var(--energy) * .14);
+  animation:flow-spin 48s linear infinite}
 @keyframes flow-spin{to{rotate:1turn}}
-.ambient .blob{position:absolute;border-radius:50%;will-change:translate,opacity;opacity:calc(.5 + var(--energy) * .4);transition:opacity .2s linear}
-.ambient .b1{width:62vmax;height:62vmax;left:-20vmax;top:-26vmax;background:radial-gradient(closest-side,color-mix(in srgb,var(--glow-a) 45%,transparent),transparent);animation:blob-1 40s ease-in-out infinite alternate}
-.ambient .b2{width:56vmax;height:56vmax;right:-22vmax;bottom:-28vmax;background:radial-gradient(closest-side,color-mix(in srgb,var(--glow-b) 40%,transparent),transparent);animation:blob-2 52s ease-in-out infinite alternate}
-@keyframes blob-1{to{translate:24vw 18vh}}
-@keyframes blob-2{to{translate:-20vw -16vh}}
+/* Пятна плывут по большой петле — движение видно глазом, но спокойно. На
+   громкой музыке они плавно раздуваются (огибающую сглаживает app.js). */
+.ambient .blob{position:absolute;border-radius:50%;will-change:translate,scale,opacity;
+  opacity:calc(.5 + var(--energy) * .4);scale:calc(1 + var(--energy) * .22)}
+.ambient .b1{width:60vmax;height:60vmax;left:-18vmax;top:-24vmax;background:radial-gradient(closest-side,color-mix(in srgb,var(--glow-a) 48%,transparent),transparent);animation:blob-1 22s ease-in-out infinite}
+.ambient .b2{width:54vmax;height:54vmax;right:-20vmax;bottom:-26vmax;background:radial-gradient(closest-side,color-mix(in srgb,var(--glow-b) 44%,transparent),transparent);animation:blob-2 28s ease-in-out infinite}
+.ambient .b3{width:40vmax;height:40vmax;left:30vw;top:40vh;background:radial-gradient(closest-side,color-mix(in srgb,var(--glow-c) 36%,transparent),transparent);animation:blob-3 34s ease-in-out infinite}
+@keyframes blob-1{0%,100%{translate:0 0}33%{translate:30vw 12vh}66%{translate:12vw 34vh}}
+@keyframes blob-2{0%,100%{translate:0 0}33%{translate:-26vw -20vh}66%{translate:-8vw -36vh}}
+@keyframes blob-3{0%,100%{translate:0 0}25%{translate:-28vw -14vh}50%{translate:-8vw -30vh}75%{translate:22vw -8vh}}
 .ambient .grain{position:absolute;inset:0;opacity:.05;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>")}
 .ambient.off{display:none}
 .ambient.still .flow,.ambient.still .blob{animation-play-state:paused}
@@ -153,6 +158,19 @@ option{background:var(--menu);color:var(--text)}
 .brand-mark i:nth-child(1){height:7px;background:var(--second)}
 .brand-mark i:nth-child(2){height:16px;background:var(--accent)}
 .brand-mark i:nth-child(3){height:11px;background:var(--accent-strong)}
+/* Полоски логотипа — живой эквалайзер: каждая растёт от основания в своём
+   ритме. Во время эфира танцуют быстрее. Только scale — нагрузки ноль. */
+.brand-mark i{transform-origin:50% 100%;animation:logo-eq 1.6s ease-in-out infinite}
+.brand-mark i:nth-child(1){animation-duration:1.3s;animation-delay:-.4s}
+.brand-mark i:nth-child(2){animation-duration:1.7s;animation-delay:-1.1s}
+.brand-mark i:nth-child(3){animation-duration:1.45s;animation-delay:-.7s}
+.on-air .brand-mark i{animation-duration:.8s}
+.on-air .brand-mark i:nth-child(2){animation-duration:.95s}
+.on-air .brand-mark i:nth-child(3){animation-duration:.7s}
+/* Своё имя: «eq» уже занят полосками «в эфире» в очереди (они идут только
+   вверх), и одноимённая анимация перебивала эту — полоска резко падала вниз. */
+@keyframes logo-eq{0%,100%{scale:1 .5}20%{scale:1 1.1}40%{scale:1 .7}60%{scale:1 1}80%{scale:1 .6}}
+.window-hidden .brand-mark i{animation-play-state:paused}
 .brand b{font-size:16px;font-weight:700;letter-spacing:-.01em;white-space:nowrap}
 .brand em{font:400 11px var(--mono);color:var(--faint);font-style:normal}
 
@@ -248,6 +266,10 @@ option{background:var(--menu);color:var(--text)}
 .template-row .t-delete:hover{color:var(--live-text);background:color-mix(in srgb,var(--live) 12%,transparent)}
 .template-empty{padding:8px 10px;color:var(--muted);font-size:13px;line-height:1.5}
 .template-save{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}
+#setLook .switch-row{margin-top:20px;padding-top:18px;border-top:1px solid var(--edge)}
+.new-template{justify-content:flex-start;gap:8px;margin-top:4px;padding:0 6px;height:34px;color:var(--accent-strong)}
+.new-template .ic{width:16px;height:16px}
+.new-template:disabled{color:var(--faint)}
 .template-save input{width:100%}
 .template-save .btn{height:36px}
 .row-actions{display:flex;align-items:center;gap:6px}
@@ -386,10 +408,14 @@ option{background:var(--menu);color:var(--text)}
 .add-media .btn{height:40px;padding:0 16px;border-radius:10px;font-size:14px}
 .drop-button{width:100%;height:40px;display:flex;align-items:center;justify-content:center;gap:8px;border:1px dashed var(--edge-strong);border-radius:10px;background:transparent;color:var(--muted);font-size:13px}
 .drop-button:hover{border-color:var(--accent-line);color:var(--text)}
+.drop-button span,.vol-head span{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .queue-list{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:4px;padding:12px}
 .queue-item{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 32px;align-items:center;height:60px;flex:none;padding:0 4px 0 7px;border:1px solid transparent;border-radius:12px}
 .queue-item:hover{background:var(--surface)}
 .queue-item.playing{border-color:color-mix(in srgb,var(--accent) 40%,transparent);background:var(--accent-soft)}
+/* Выбранный без эфира ролик: рамка акцентом и полоса слева — с него начнётся эфир. */
+.queue-item.selected{border-color:var(--accent-line);background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent)}
+.queue-item.selected .q-live{color:var(--accent-strong)}
 .queue-item.unity-selected{border-color:var(--accent-line);background:var(--accent-soft)}
 .queue-pick{min-width:0;height:100%;display:grid;grid-template-columns:16px 64px minmax(0,1fr);gap:12px;align-items:center;padding:0;border:0;background:none;color:inherit;text-align:left}
 .q-index{width:16px;text-align:center;font:500 12px var(--mono);color:var(--faint)}
@@ -439,7 +465,9 @@ option{background:var(--menu);color:var(--text)}
 .source-chips{display:flex;flex-wrap:wrap;justify-content:center;gap:6px}
 .source-chips span{height:24px;display:inline-flex;align-items:center;padding:0 8px;border-radius:6px;background:var(--raise);color:var(--muted);font-size:12px}
 .panel-foot{height:56px;flex:none;display:flex;align-items:center;gap:4px;padding:0 12px 0 20px;border-top:1px solid var(--edge);color:var(--muted);font-size:13px}
+#queueSummary{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #queueSummary b{font:500 12px var(--mono);font-weight:500}
+.panel-foot .btn{flex:none;white-space:nowrap}
 
 .panel-body{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:16px;padding:0 20px 16px}
 .mode-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}

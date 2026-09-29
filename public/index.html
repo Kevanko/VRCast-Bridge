@@ -51,7 +51,7 @@
 </defs></svg>
 
   <!-- Живой фон: плавный перелив цветов темы, дышит под музыку. -->
-  <div class="ambient" id="ambient" aria-hidden="true"><div class="flow"></div><i class="blob b1"></i><i class="blob b2"></i><div class="grain"></div></div>
+  <div class="ambient" id="ambient" aria-hidden="true"><div class="flow"></div><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><div class="grain"></div></div>
   <div class="app">
     <!-- Шапка: марка слева, ссылка для плеера по центру, состояние справа.
          Ссылка — главное, что человек делает с программой, поэтому она на виду всегда. -->
@@ -175,7 +175,7 @@
               <button class="chip-button" id="speedSelect" type="button" title="Скорость" aria-haspopup="menu" aria-expanded="false" data-value="1">1×</button>
               <button class="chip-button icon" id="loopSelect" type="button" title="Повтор" aria-haspopup="menu" aria-expanded="false" data-value="once"><svg class="ic" aria-hidden="true"><use href="#i-repeat"/></svg></button>
             </div>
-            <label class="deck-volume" for="mediaVolume"><svg class="ic" aria-hidden="true"><use href="#i-broadcast"/></svg><span class="vol-body"><span class="vol-head"><span>Громкость в эфире</span><output id="mediaVolumeValue">100%</output></span><input id="mediaVolume" class="range" type="range" min="0" max="400" step="5" value="100"></span></label>
+            <label class="deck-volume" for="mediaVolume"><svg class="ic" aria-hidden="true"><use href="#i-broadcast"/></svg><span class="vol-body"><span class="vol-head"><span title="Громкость в эфире">Громкость</span><output id="mediaVolumeValue">100%</output></span><input id="mediaVolume" class="range" type="range" min="0" max="400" step="5" value="100"></span></label>
           </div>
         </div>
 
@@ -206,6 +206,7 @@
                   <input id="templateName" type="text" maxlength="80" placeholder="Название нового списка" aria-label="Название нового списка">
                   <button class="btn primary" id="saveTemplate" type="submit">Сохранить</button>
                 </form>
+                <button class="btn text new-template" id="newEmptyTemplate" type="button"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>Новый пустой список</button>
               </div>
             </div>
           </div>
@@ -215,7 +216,7 @@
               <input id="mediaUrl" type="url" placeholder="Ссылка на видео" required>
               <button class="btn primary" id="addButton" type="submit">Добавить</button>
             </form>
-            <button class="drop-button" id="pickLocal" type="button"><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg><span>Файлы с компьютера или перетащите сюда</span></button>
+            <button class="drop-button" id="pickLocal" type="button" title="Выбрать файлы — или просто перетащите их в окно"><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg><span>Файлы с компьютера</span></button>
           </div>
           <div class="queue-list" id="queueList"></div>
           <div class="panel-foot"><span id="queueSummary">0 видео</span><span class="grow"></span><button class="btn text" id="saveTemplateQuick" type="button">Сохранить список</button><button class="btn text danger-text" id="clearQueue" type="button">Очистить</button></div>
