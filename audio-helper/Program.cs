@@ -11,12 +11,24 @@ using NAudio.Wave.SampleProviders;
 // и глох; (2) чисто событийная запись молчала при тишине источника — ffmpeg
 // вечно ждал первые байты и эфир вообще не стартовал.
 const int sampleRate = 48000;
+// Сообщения в stderr сервер читает как UTF-8.
+Console.OutputEncoding = System.Text.Encoding.UTF8;
 
 if (args.Contains("--list-devices", StringComparer.OrdinalIgnoreCase))
 {
     using var enumerator = new MMDeviceEnumerator();
+    string? main = null;
+    try { using var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia); main = device.ID; } catch { }
     Console.WriteLine(JsonSerializer.Serialize(enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
-        .Select(device => new { id = device.ID, name = device.FriendlyName }).ToArray()));
+        .Select(device => new { id = device.ID, name = device.FriendlyName, isDefault = device.ID == main }).ToArray()));
+    return;
+}
+
+// Вернуть звук приложениям, которые остались уведёнными на беззвучный выход
+// после аварийного завершения (помощник убили — Dispose не успел).
+if (args.Contains("--unroute-pending", StringComparer.OrdinalIgnoreCase))
+{
+    AppRouting.RestorePending();
     return;
 }
 
@@ -42,40 +54,79 @@ if (args.Contains("--session-volume", StringComparer.OrdinalIgnoreCase))
     return;
 }
 
-var shutdown = new CancellationTokenSource();
-_ = Task.Run(async () =>
-{
-    try
-    {
-        await using var input = Console.OpenStandardInput();
-        var probe = new byte[1];
-        while (await input.ReadAsync(probe) > 0) { }
-    }
-    catch { }
-    shutdown.Cancel();
-});
-
 string? ValueAfter(string option)
 {
     var index = Array.FindIndex(args, value => value.Equals(option, StringComparison.OrdinalIgnoreCase));
     return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
 }
 
+var shutdown = new CancellationTokenSource();
+SessionMuter? localSession = null;
+AudioControl.StreamGain = float.TryParse(ValueAfter("--stream-gain"), System.Globalization.NumberStyles.Float,
+    System.Globalization.CultureInfo.InvariantCulture, out var initialGain) ? Math.Clamp(initialGain, 0f, 6f) : 1f;
+var requestedLocalLevel = float.TryParse(ValueAfter("--local-volume"), System.Globalization.NumberStyles.Float,
+    System.Globalization.CultureInfo.InvariantCulture, out var initialLocal) ? Math.Clamp(initialLocal, 0.02f, 1f) : 1f;
+var requestedLocalMute = args.Contains("--local-mute", StringComparer.OrdinalIgnoreCase);
+
+// stdin — не только сигнал завершения, но и канал горячих настроек. Так
+// громкость эфира и локальное приглушение меняются без остановки WASAPI и без
+// единого пропущенного аудиоблока.
+_ = Task.Run(async () =>
+{
+    try
+    {
+        using var input = new StreamReader(Console.OpenStandardInput());
+        while (await input.ReadLineAsync() is { } line)
+        {
+            var parts = line.Trim().Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length != 2) continue;
+            if (parts[0].Equals("stream-gain", StringComparison.OrdinalIgnoreCase)
+                && float.TryParse(parts[1], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var gain))
+                AudioControl.StreamGain = Math.Clamp(gain, 0f, 6f);
+            else if (parts[0].Equals("local-volume", StringComparison.OrdinalIgnoreCase)
+                && float.TryParse(parts[1], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var level))
+                localSession?.Update(Math.Clamp(level, 0.02f, 1f), localSession.Muted);
+            else if (parts[0].Equals("local-mute", StringComparison.OrdinalIgnoreCase))
+                localSession?.Update(localSession.Level, parts[1] is "1" or "true" or "on");
+        }
+    }
+    catch { }
+    shutdown.Cancel();
+});
+
 var pidText = ValueAfter("--pid");
+if (args.Contains("--silence", StringComparer.OrdinalIgnoreCase))
+{
+    var silenceOutput = Console.OpenStandardOutput();
+    var zeros = new byte[sampleRate * 4 / 2];
+    var silenceClock = System.Diagnostics.Stopwatch.StartNew();
+    long silenceFrames = 0;
+    try
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(20));
+        while (await timer.WaitForNextTickAsync(shutdown.Token))
+        {
+            var expected = (long)(silenceClock.Elapsed.TotalSeconds * sampleRate);
+            var due = Math.Min(sampleRate / 2, expected - silenceFrames);
+            if (due <= 0) continue;
+            await silenceOutput.WriteAsync(zeros.AsMemory(0, checked((int)due * 4)), shutdown.Token);
+            silenceFrames += due;
+        }
+    }
+    catch (IOException) { }
+    catch (OperationCanceledException) { }
+    return;
+}
+
 if (uint.TryParse(pidText, out var processId) && processId > 0)
 {
-    // Захват процесса идёт до микшера Windows, поэтому приложение можно
-    // приглушить локально — в эфир звук продолжит уходить полным.
-    // Полное приглушение глушит и захват (он идёт уже после регулятора
-    // громкости Windows), поэтому громкость только понижается, а в эфире
-    // потеря компенсируется усилением.
-    var localLevel = double.TryParse(ValueAfter("--local-volume"), System.Globalization.NumberStyles.Float,
-        System.Globalization.CultureInfo.InvariantCulture, out var parsed) ? Math.Clamp(parsed, 0.02, 1.0) : 1.0;
-    // Уровень 1.0 тоже применяем: Windows запоминает громкость приложения
-    // между запусками, и без этого однажды приглушённое так и осталось бы тихим.
+    // Захват процесса идёт ПОСЛЕ громкости сессии Windows. Приглушение у себя
+    // SessionMuter делает уровнем, а потерю в эфире компенсирует усилением.
     using var localMute = args.Contains("--local-volume", StringComparer.OrdinalIgnoreCase)
-        ? new SessionMuter(processId, (float)localLevel) : null;
-    ProcessLoopback.Gain = (float)(1.0 / localLevel);
+        ? new SessionMuter(processId, requestedLocalLevel, requestedLocalMute, ValueAfter("--route-device")) : null;
+    localSession = localMute;
     try { await ProcessLoopback.RunAsync(processId, Console.OpenStandardOutput(), shutdown.Token); }
     // Не Environment.Exit: он завершал процесс прямо внутри using, Dispose
     // не вызывался, и приложение оставалось тихим (или заглушённым) после сбоя.
@@ -125,6 +176,7 @@ while (streaming)
     if (samples.WaveFormat.Channels == 1) samples = new MonoToStereoSampleProvider(samples);
     else if (samples.WaveFormat.Channels > 2) samples = new MultiplexingSampleProvider(new[] { samples }, 2);
     if (samples.WaveFormat.SampleRate != sampleRate) samples = new WdlResamplingSampleProvider(samples, sampleRate);
+    samples = new DynamicGainSampleProvider(samples);
     var pcm = new SampleToWaveProvider16(samples);
     var deviceSwap = false;
     capture.StartRecording();
@@ -200,16 +252,13 @@ internal static class ProcessLoopback
         finally { Marshal.FreeHGlobal(activationPointer); }
     }
 
-    // Компенсация локального приглушения: во float, без потери разрядности.
-    internal static float Gain = 1f;
-
     private static async Task CaptureAsync(IAudioClient client, Stream output, CancellationToken token)
     {
-        // Забираем звук в 32-битном float. Если приложение приглушено, тихий
-        // сигнал приходится усиливать, и в 16 битах вылезал бы шум квантования
-        // — в VRChat это слышно как шипение. Во float усиление чистое, а в
-        // 16 бит сигнал переводится уже ПОСЛЕ усиления, на полной громкости.
-        var format = new WaveFormatEx { FormatTag = 3, Channels = 2, SamplesPerSec = 48000, AvgBytesPerSec = 384000, BlockAlign = 8, BitsPerSample = 32, ExtraSize = 0 };
+        // Виртуальное process-loopback устройство не обязано отдавать IEEE
+        // float: на части Windows Initialize формально успешен, но пакеты затем
+        // приходят как вечная тишина. Официальный Microsoft sample запрашивает
+        // обычный PCM16 — используем тот же совместимый формат.
+        var format = new WaveFormatEx { FormatTag = 1, Channels = 2, SamplesPerSec = 48000, AvgBytesPerSec = 384000, BlockAlign = 8, BitsPerSample = 32, ExtraSize = 0 };
         var formatPointer = Marshal.AllocHGlobal(Marshal.SizeOf<WaveFormatEx>());
         Marshal.StructureToPtr(format, formatPointer, false);
         try
@@ -227,8 +276,8 @@ internal static class ProcessLoopback
                 var ring = new PcmRingBuffer(192000 * 400 / 1000);
                 // Два буфера на весь сеанс вместо новых на каждый пакет:
                 // в звуковом тракте пауза сборщика мусора слышна сразу.
-                float[] samples = new float[8192];
-                byte[] packet = new byte[16384];
+                byte[] packet = new byte[32768];
+                byte[] pcm16 = new byte[16384];
                 var outputBlock = new byte[48000 * 2];
                 var clock = System.Diagnostics.Stopwatch.StartNew();
                 long framesWritten = 0;
@@ -239,21 +288,23 @@ internal static class ProcessLoopback
                     while (frames > 0)
                     {
                         Marshal.ThrowExceptionForHR(capture.GetBuffer(out var data, out frames, out var flags, out _, out _));
-                        var нужно = checked((int)frames * 2);
-                        if (samples.Length < нужно) samples = new float[нужно];
-                        if (packet.Length < нужно * 2) packet = new byte[нужно * 2];
-                        if ((flags & 2) == 0 && data != IntPtr.Zero) Marshal.Copy(data, samples, 0, нужно);
-                        else Array.Clear(samples, 0, нужно);
+                        var нужноБайт = checked((int)frames * 8);
+                        if (packet.Length < нужноБайт) { packet = new byte[нужноБайт]; pcm16 = new byte[нужноБайт / 2]; }
+                        if ((flags & 2) == 0 && data != IntPtr.Zero) Marshal.Copy(data, packet, 0, нужноБайт);
+                        else Array.Clear(packet, 0, нужноБайт);
                         Marshal.ThrowExceptionForHR(capture.ReleaseBuffer(frames));
-                        for (var index = 0; index < нужно; index++)
+                        // 32 бита, а не 16: при «не слышать у себя» приложение
+                        // звучит на −60 дБ, и в 16 битах от сигнала остались бы
+                        // единицы разрядов. В 32 битах усиление обратно чистое,
+                        // а в 16 бит переводим уже на полной громкости.
+                        var gain = AudioControl.StreamGain / AudioControl.LocalLevel / 65536f;
+                        for (int from = 0, to = 0; from < нужноБайт; from += 4, to += 2)
                         {
-                            var value = samples[index] * Gain;
-                            if (value > 1f) value = 1f; else if (value < -1f) value = -1f;
-                            var pcm = (short)(value * 32767f);
-                            packet[index * 2] = (byte)(pcm & 0xFF);
-                            packet[index * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
+                            var value = Math.Clamp((int)MathF.Round(BitConverter.ToInt32(packet, from) * gain), short.MinValue, short.MaxValue);
+                            pcm16[to] = (byte)(value & 0xFF);
+                            pcm16[to + 1] = (byte)((value >> 8) & 0xFF);
                         }
-                        ring.Write(packet);
+                        ring.Write(pcm16.AsSpan(0, нужноБайт / 2));
                         Marshal.ThrowExceptionForHR(capture.GetNextPacketSize(out frames));
                     }
                     var expected = (long)(clock.Elapsed.TotalSeconds * 48000);
@@ -355,6 +406,28 @@ internal sealed class PcmRingBuffer
     }
 }
 
+internal static class AudioControl
+{
+    internal static volatile float StreamGain = 1f;
+    // Во сколько раз приложение приглушено у пользователя: захват идёт после
+    // этого регулятора, и в эфире потерю возвращаем усилением.
+    internal static volatile float LocalLevel = 1f;
+}
+
+internal sealed class DynamicGainSampleProvider(ISampleProvider source) : ISampleProvider
+{
+    public WaveFormat WaveFormat => source.WaveFormat;
+
+    public int Read(float[] buffer, int offset, int count)
+    {
+        var read = source.Read(buffer, offset, count);
+        var gain = AudioControl.StreamGain;
+        for (var index = offset; index < offset + read; index++)
+            buffer[index] = Math.Clamp(buffer[index] * gain, -1f, 1f);
+        return read;
+    }
+}
+
 // Глушит звук выбранного приложения только на этом компьютере: в эфир он идёт
 // как был. Нужно, чтобы в наушниках не двоился звук — свой напрямую и он же
 // с задержкой из VRChat. Сессии перепроверяются: приложение может создать
@@ -363,7 +436,8 @@ internal sealed class SessionMuter : IDisposable
 {
     private readonly uint _processId;
     private readonly string _processName;
-    private readonly float _level;
+    private float _level;
+    private bool _mute;
     // Исходные громкость и мьют каждой сессии — по одному разу, при первом
     // касании: раньше помнилась только громкость, а снятый мьют не возвращался,
     // и повторные касания той же сессии дописывали в список уже наш уровень.
@@ -371,15 +445,51 @@ internal sealed class SessionMuter : IDisposable
     private bool _disposed;
     private readonly Timer _watch;
     private readonly MMDeviceEnumerator _enumerator = new();
+    // «Не слышать у себя» по-настоящему: сессии приложения уводятся на
+    // беззвучный виртуальный выход (как «Параметры → Громкость приложений»).
+    // В наушники не идёт ничего, а захват процесса от выхода не зависит —
+    // в эфир звук идёт как шёл (замер на Edge: увод на Steam Streaming, захват
+    // не изменился). Нет такого выхода — остаётся приглушение до −60 дБ.
+    private readonly string? _silentDevice;
+    private readonly HashSet<uint> _routed = new();
 
-    internal SessionMuter(uint processId, float level)
+    internal float Level => _level;
+    internal bool Muted => _mute;
+    // Захват процесса идёт ПОСЛЕ регулятора громкости сессии (проверено: 10% у
+    // себя = −20 дБ в эфире, мьют = тишина в эфире). Поэтому «не слышать у себя»
+    // — это не мьют, а минимальная громкость, которую помощник компенсирует
+    // усилением. −60 дБ у себя — на слух тишина; захват 32-битный, так что
+    // в эфир звук возвращается без потери разрядов (замер: шум не вырос).
+    internal const float MinLevel = 0.001f;
+    // Звук уведён на беззвучный выход — громкость не трогаем вовсе: это
+    // настоящее выключение, а не затухание. Приглушение — только запасной путь.
+    private bool _routingBroken;
+    private float Effective => _mute && (_silentDevice is null || _routingBroken) ? MinLevel : _level;
+
+    internal SessionMuter(uint processId, float level, bool mute, string? routeDevice = null)
     {
         _processId = processId;
         _level = level;
+        _mute = mute;
+        AudioControl.LocalLevel = Effective;
         try { _processName = System.Diagnostics.Process.GetProcessById((int)processId).ProcessName; }
         catch { _processName = string.Empty; }
+        // Выход, выбранный в настройках, — если он сейчас подключён; иначе
+        // рекомендованный беззвучный.
+        _silentDevice = AppRouting.Usable(_enumerator, routeDevice) ?? AppRouting.SilentDevice(_enumerator);
+        Console.Error.WriteLine(_silentDevice is null
+            ? "Беззвучного виртуального выхода нет — «не слышать у себя» приглушает до −60 дБ"
+            : "«Не слышать у себя»: звук приложения уводится на беззвучный виртуальный выход");
         Apply();
         _watch = new Timer(_ => Apply(), null, 1000, 1000);
+    }
+
+    internal void Update(float level, bool mute)
+    {
+        _level = level;
+        _mute = mute;
+        AudioControl.LocalLevel = Effective;
+        Apply();
     }
 
     private void Apply()
@@ -388,8 +498,14 @@ internal sealed class SessionMuter : IDisposable
         // Приложение вполне может играть в гарнитуру или в HDMI-монитор — тогда
         // на устройстве по умолчанию его сессии просто нет, и громкость
         // «в наушниках» не менялась вообще ничем.
+        // Компенсируем по РЕАЛЬНОЙ громкости приложения, а не по той, что сами
+        // выставили: уходящий помощник при смене источника возвращал «исходную»
+        // громкость поверх нового, и эфир становился то оглушительным (делили
+        // на 0,35 при фактических 100%), то тихим.
+        float? фактическая = null;
         try
         {
+            if (!_mute) Unroute();
             foreach (var device in _enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
             {
                 using (device)
@@ -399,24 +515,49 @@ internal sealed class SessionMuter : IDisposable
                     {
                         var session = sessions[index];
                         if (!Matches(session)) continue;
+                        // Уводим процесс, который реально играет звук: у браузеров
+                        // это отдельный процесс аудиосервиса, а не главное окно.
+                        var sessionPid = session.GetProcessID;
+                        if (_mute && _silentDevice is not null && !_routingBroken && sessionPid != 0 && !_routed.Contains(sessionPid))
+                        {
+                            // Сначала записываем «вернуть», потом уводим: если помощник
+                            // упадёт между этими шагами, звук вернётся при следующем запуске.
+                            // Раньше было наоборот, и увод, совпавший с закрытием,
+                            // оставлял приложение (Spotify) без звука навсегда.
+                            if (_disposed) return;
+                            AppRouting.RememberPending(_processName);
+                            if (AppRouting.Set(sessionPid, _silentDevice))
+                            {
+                                bool поздно;
+                                lock (_muted) { поздно = _disposed; if (!поздно) _routed.Add(sessionPid); }
+                                if (поздно) { AppRouting.Set(sessionPid, null); return; }
+                            }
+                            else
+                            {
+                                _routingBroken = true;
+                                AudioControl.LocalLevel = Effective;
+                                Console.Error.WriteLine("Увести звук приложения не вышло — приглушаю до −60 дБ");
+                            }
+                        }
                         var volume = session.SimpleAudioVolume;
                         var mute = volume.Mute;
-                        if (!mute && Math.Abs(volume.Volume - _level) < 0.001f) continue;
+                        if (!mute && Math.Abs(volume.Volume - Effective) < 0.001f) { фактическая ??= volume.Volume; continue; }
                         lock (_muted)
                         {
                             if (_disposed) return;
                             var ключ = session.GetSessionInstanceIdentifier ?? $"{session.GetProcessID}";
                             if (!_muted.ContainsKey(ключ)) _muted[ключ] = (volume, volume.Volume, mute);
-                            // Мьют снимаем всегда: он глушит и захват тоже, а тихо у себя
-                            // мы делаем именно уровнем громкости.
-                            if (mute) volume.Mute = false;
-                            volume.Volume = _level;
+                            // Настоящий мьют глушит и захват — снимаем его всегда.
+                            volume.Mute = false;
+                            volume.Volume = Effective;
+                            фактическая ??= volume.Volume;
                         }
                     }
                 }
             }
         }
         catch { }
+        if (фактическая is { } уровень && !_disposed) AudioControl.LocalLevel = Math.Max(0.001f, уровень);
     }
 
     // Имя процесса по его номеру запоминаем: раньше это спрашивалось у Windows
@@ -442,9 +583,18 @@ internal sealed class SessionMuter : IDisposable
         catch { return false; }
     }
 
+    private void Unroute()
+    {
+        uint[] pids;
+        lock (_muted) { pids = _routed.ToArray(); _routed.Clear(); }
+        foreach (var pid in pids) AppRouting.Set(pid, null);
+        if (pids.Length > 0) AppRouting.ForgetPending(_processName);
+    }
+
     public void Dispose()
     {
         _watch.Dispose();
+        Unroute();
         lock (_muted)
         {
             _disposed = true;
@@ -457,4 +607,122 @@ internal sealed class SessionMuter : IDisposable
         }
         _enumerator.Dispose();
     }
+}
+
+// Выход приложения по умолчанию задаётся тем же недокументированным API, что и
+// «Параметры → Звук → Громкость приложений» (им же пользуются EarTrumpet и
+// SoundSwitch). Любая ошибка — просто «не вышло»: тогда остаётся приглушение.
+// Windows запоминает выбор для exe, поэтому уведённые приложения записываются
+// в файл и возвращаются при следующем запуске, если помощник убили.
+internal static class AppRouting
+{
+    private static IntPtr _factory;
+    private static readonly string PendingFile = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "routed-apps.txt");
+
+    internal static unsafe bool Set(uint pid, string? deviceId)
+    {
+        try
+        {
+            if (_factory == IntPtr.Zero)
+            {
+                const string name = "Windows.Media.Internal.AudioPolicyConfig";
+                WindowsCreateString(name, name.Length, out var hName);
+                var iid = Environment.OSVersion.Version.Build >= 21390
+                    ? new Guid("ab3d4648-e242-459f-b02f-541c70306324") : new Guid("2a59116d-6c4f-45e0-a74f-707e3fef9258");
+                var hr = RoGetActivationFactory(hName, ref iid, out _factory);
+                WindowsDeleteString(hName);
+                if (hr != 0) { _factory = IntPtr.Zero; return false; }
+            }
+            var full = string.IsNullOrEmpty(deviceId) ? "" : @"\\?\SWD#MMDEVAPI#" + deviceId + "#{e6327cad-dcec-4949-ae8a-991e976a79d2}";
+            var hDevice = IntPtr.Zero;
+            if (full.Length > 0) WindowsCreateString(full, full.Length, out hDevice);
+            try
+            {
+                // IInspectable (6 методов) + 19 до SetPersistedDefaultAudioEndpoint.
+                var set = (delegate* unmanaged[Stdcall]<IntPtr, uint, int, int, IntPtr, int>)(*(IntPtr**)_factory)[25];
+                var console = set(_factory, pid, 0, 0, hDevice);
+                var multimedia = set(_factory, pid, 0, 1, hDevice);
+                return console == 0 && multimedia == 0;
+            }
+            finally { if (hDevice != IntPtr.Zero) WindowsDeleteString(hDevice); }
+        }
+        catch { return false; }
+    }
+
+    // Только выход, который заведомо никто не слушает. «Virtual» в имени не
+    // годится: так называются и настоящие гарнитуры (HyperX Virtual Surround).
+    internal static string? Usable(MMDeviceEnumerator enumerator, string? deviceId)
+    {
+        if (string.IsNullOrEmpty(deviceId)) return null;
+        try
+        {
+            using var main = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            if (deviceId == main.ID) return null;   // в свои же наушники уводить бессмысленно
+            using var device = enumerator.GetDevice(deviceId);
+            return device.State == DeviceState.Active ? device.ID : null;
+        }
+        catch { return null; }
+    }
+
+    internal static string? SilentDevice(MMDeviceEnumerator enumerator)
+    {
+        try
+        {
+            using var main = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+                using (device)
+                    if (device.ID != main.ID && System.Text.RegularExpressions.Regex.IsMatch(device.FriendlyName,
+                        "steam streaming|cable input|voicemeeter|vb-audio", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                        return device.ID;
+        }
+        catch { }
+        return null;
+    }
+
+    internal static void RememberPending(string processName)
+    {
+        try
+        {
+            var names = File.Exists(PendingFile) ? File.ReadAllLines(PendingFile).ToHashSet() : new HashSet<string>();
+            if (names.Add(processName)) File.WriteAllLines(PendingFile, names);
+        }
+        catch { }
+    }
+
+    internal static void ForgetPending(string processName)
+    {
+        try
+        {
+            if (!File.Exists(PendingFile)) return;
+            var names = File.ReadAllLines(PendingFile).Where(name => name != processName).ToArray();
+            if (names.Length == 0) File.Delete(PendingFile); else File.WriteAllLines(PendingFile, names);
+        }
+        catch { }
+    }
+
+    // Возврат выбора делается от имени любого процесса того же exe. Не запущено —
+    // остаётся в списке до следующего раза.
+    internal static void RestorePending()
+    {
+        try
+        {
+            if (!File.Exists(PendingFile)) return;
+            foreach (var name in File.ReadAllLines(PendingFile).Where(name => name.Length > 0))
+            {
+                var any = System.Diagnostics.Process.GetProcessesByName(name);
+                if (any.Length == 0) continue;
+                // Снять выбор Windows даёт только процессу со звуковой сессией
+                // (у браузера это аудиосервис), поэтому пробуем все.
+                var снято = false;
+                foreach (var process in any) снято |= Set((uint)process.Id, null);
+                if (снято) ForgetPending(name);
+            }
+        }
+        catch { }
+    }
+
+    [DllImport("combase.dll")] private static extern int RoGetActivationFactory(IntPtr activatableClassId, ref Guid iid, out IntPtr factory);
+    [DllImport("combase.dll", CharSet = CharSet.Unicode)] private static extern int WindowsCreateString(string source, int length, out IntPtr hstring);
+    [DllImport("combase.dll")] private static extern int WindowsDeleteString(IntPtr hstring);
 }

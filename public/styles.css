@@ -12,6 +12,7 @@
   --sw-night-1:#0e0c18;--sw-night-2:#1e1a36;--sw-night-3:#8f6bff;
   --sw-broadcast-1:#0f1115;--sw-broadcast-2:#1e222b;--sw-broadcast-3:#4d9fff;
   --sw-projector-1:#121110;--sw-projector-2:#252321;--sw-projector-3:#ffb547;
+  --glow-a:#8f6bff;--glow-b:#c050ff;--glow-c:#5b3dff;
   --ease:cubic-bezier(.2,.8,.2,1);
   --mono:"JetBrains Mono",ui-monospace,monospace;
 }
@@ -22,6 +23,7 @@
   --accent:#4d9fff;--accent-strong:#8ec2ff;--accent-soft:rgba(77,159,255,.14);--accent-line:rgba(77,159,255,.55);--on-accent:#06121f;
   --second:#4d9fff;--live:#ff4757;--live-text:#ff7f8a;--ok:#2fd98a;--ok-text:#86ecbd;--cue:#ffb020;--danger:#ff4757;
   --shade:rgba(8,10,14,.72);
+  --glow-a:#4d9fff;--glow-b:#2c5dff;--glow-c:#3cc4ff;
 }
 :root[data-theme="projector"]{
   --bg:#121110;--bar:#151412;--side:#161513;--surface:#1b1a18;--raise:#252321;--sel:#2f2c28;--menu:#22201d;
@@ -30,12 +32,57 @@
   --accent:#ffb547;--accent-strong:#ffd08a;--accent-soft:rgba(255,181,71,.14);--accent-line:rgba(255,181,71,.55);--on-accent:#1a1206;
   --second:#ffb547;--live:#ff5a4e;--live-text:#ff8a80;--ok:#6ee28f;--ok-text:#a8f0bd;--cue:#ffd166;--danger:#ff5a4e;
   --shade:rgba(14,12,10,.72);
+  --glow-a:#ffb547;--glow-b:#ff7a3d;--glow-c:#ffd66e;
 }
 
 *{box-sizing:border-box}
 html{color-scheme:dark}
 body{margin:0;min-width:960px;height:100vh;overflow:hidden;background:var(--bg);color:var(--text);
   font:400 14px/1.4 "Golos Text",system-ui,sans-serif;-webkit-font-smoothing:antialiased;text-rendering:geometricPrecision}
+/* ── Живой фон ──────────────────────────────────────────────────────────────
+   Плавный перелив цветов темы: огромный конический градиент (цвета сменяют
+   друг друга, яркие участки чередуются с приглушёнными) сильно размыт и очень
+   медленно вращается, поверх — два мягких пятна для глубины. Под музыку
+   (--energy 0…1 ставит app.js) перелив чуть ярче и больше.
+   Для видеокарты дёшево: размытие считается один раз, анимируются только
+   rotate/translate/scale/opacity — компоновщик двигает готовую текстуру.
+   Зерно — статичный шум, убирает «пластиковую» гладкость градиентов. */
+.ambient{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none;--energy:0}
+.ambient .flow{position:absolute;left:50%;top:50%;width:150vmax;height:150vmax;margin:-75vmax 0 0 -75vmax;border-radius:50%;
+  will-change:rotate,scale,opacity;
+  background:conic-gradient(from 20deg,
+    color-mix(in srgb,var(--glow-a) 70%,transparent),
+    color-mix(in srgb,var(--glow-b) 38%,transparent) 18%,
+    color-mix(in srgb,var(--glow-b) 64%,transparent) 30%,
+    color-mix(in srgb,var(--glow-c) 22%,transparent) 46%,
+    color-mix(in srgb,var(--glow-c) 58%,transparent) 60%,
+    color-mix(in srgb,var(--glow-a) 16%,transparent) 76%,
+    color-mix(in srgb,var(--glow-a) 70%,transparent));
+  -webkit-mask:radial-gradient(closest-side,#000 30%,rgba(0,0,0,.55) 62%,transparent 100%);
+  mask:radial-gradient(closest-side,#000 30%,rgba(0,0,0,.55) 62%,transparent 100%);
+  filter:blur(70px);opacity:calc(.58 + var(--energy) * .3);scale:calc(1 + var(--energy) * .08);
+  transition:opacity .2s linear,scale .2s linear;animation:flow-spin 120s linear infinite}
+@keyframes flow-spin{to{rotate:1turn}}
+.ambient .blob{position:absolute;border-radius:50%;will-change:translate,opacity;opacity:calc(.5 + var(--energy) * .4);transition:opacity .2s linear}
+.ambient .b1{width:62vmax;height:62vmax;left:-20vmax;top:-26vmax;background:radial-gradient(closest-side,color-mix(in srgb,var(--glow-a) 45%,transparent),transparent);animation:blob-1 40s ease-in-out infinite alternate}
+.ambient .b2{width:56vmax;height:56vmax;right:-22vmax;bottom:-28vmax;background:radial-gradient(closest-side,color-mix(in srgb,var(--glow-b) 40%,transparent),transparent);animation:blob-2 52s ease-in-out infinite alternate}
+@keyframes blob-1{to{translate:24vw 18vh}}
+@keyframes blob-2{to{translate:-20vw -16vh}}
+.ambient .grain{position:absolute;inset:0;opacity:.05;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>")}
+.ambient.off{display:none}
+.ambient.still .flow,.ambient.still .blob{animation-play-state:paused}
+.app{position:relative;z-index:1}
+body:has(.ambient:not(.off)) .topbar,body:has(.ambient:not(.off)) .statusbar{background:color-mix(in srgb,var(--bar) 82%,transparent)}
+body:has(.ambient:not(.off)) .side{background:color-mix(in srgb,var(--side) 84%,transparent)}
+/* Подсветка плеера: кадр 32×18, растянутый и размытый за плеером, — свет
+   продолжает картинку по краям. Место и размер ставит app.js. */
+/* Сцена — отдельный слой, подсветка в нём ниже всего (z-index −1): свет только
+   позади кнопок и плеера. Поднимать сами элементы нельзя — меню качества
+   тогда уходило под плеер. */
+.stage{position:relative;isolation:isolate}
+.player-glow{position:absolute;z-index:-1;pointer-events:none;opacity:0;filter:blur(40px) saturate(1.3);transition:opacity .6s var(--ease)}
+.player-glow.on{opacity:.5}
+@media (prefers-reduced-motion:reduce){.ambient .flow,.ambient .blob{animation:none;transition:none}.player-glow{transition:none}}
 button,input,select{font:inherit;color:inherit}
 button{cursor:pointer}
 button:disabled{cursor:not-allowed}
@@ -175,13 +222,36 @@ option{background:var(--menu);color:var(--text)}
 .tag.ok{background:color-mix(in srgb,var(--ok) 14%,transparent);color:var(--ok)}
 .menu-link{display:flex;align-items:center;gap:8px;margin-top:4px;padding:10px 12px;border:0;border-top:1px solid var(--edge);border-radius:0 0 8px 8px;background:transparent;color:var(--soft);font-size:13px;text-align:left}
 .menu-link:hover{color:var(--text);background:var(--raise)}
-.player-menu{top:calc(100% + 8px);right:0;width:300px;gap:6px}
+.player-menu{top:calc(100% + 8px);right:0;width:320px;gap:6px}
 .menu-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 8px;font-size:13px;color:var(--soft)}
+.menu-row.stacked{flex-direction:column;align-items:stretch;gap:8px}
+.menu-row.stacked .seg.fill{grid-auto-columns:auto}
+.menu-row.stacked .seg.fill button{min-width:0;padding:0 4px}
+.seg-hint{min-height:18px;padding:0 2px;color:var(--muted);font-size:12px;line-height:1.5}
 .menu-note{margin:4px 8px 2px;padding-top:10px;border-top:1px solid var(--edge);color:var(--muted);font-size:12px;line-height:1.5}
 .template-menu{top:calc(100% + 8px);right:0;width:320px;gap:8px;padding:10px}
-.template-menu select,.template-menu input{width:100%}
-.template-actions{display:grid;grid-template-columns:1fr 1fr 40px 40px;gap:6px}
-.template-actions .btn{height:36px;padding:0 10px}
+.template-menu{width:420px;padding:12px}
+/* Отступы слева и справа одинаковые: полоса прокрутки не съедает правый край. */
+.template-list{display:flex;flex-direction:column;gap:6px;max-height:340px;overflow-y:auto;scrollbar-gutter:stable both-edges;margin:0 -6px}
+.template-row{display:grid;grid-template-columns:64px minmax(0,1fr);grid-template-rows:auto auto;column-gap:12px;row-gap:10px;align-items:center;padding:10px;border:1px solid var(--edge);border-radius:12px;background:var(--surface)}
+.template-row:hover{border-color:var(--edge-strong)}
+.template-row .t-cover{position:relative;width:64px;height:36px;display:grid;place-items:center;overflow:hidden;border-radius:6px;background:linear-gradient(180deg,var(--raise),var(--sel));color:var(--accent-strong)}
+.template-row .t-cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.template-row .t-cover .ic{width:16px;height:16px}
+.template-row .t-name{min-width:0;display:flex;flex-direction:column;gap:2px}
+.template-row .t-name b{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.template-row .t-name small{color:var(--muted);font-size:12px}
+.template-row .t-actions{grid-column:1 / -1;display:flex;align-items:center;gap:6px}
+.template-row .t-actions .btn{height:30px;padding:0 10px;gap:6px}
+.template-row .t-actions .btn .ic{width:14px;height:14px}
+.template-row .t-delete{width:30px;height:30px;margin-left:auto;color:var(--muted)}
+.template-row .t-delete:hover{color:var(--live-text);background:color-mix(in srgb,var(--live) 12%,transparent)}
+.template-empty{padding:8px 10px;color:var(--muted);font-size:13px;line-height:1.5}
+.template-save{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}
+.template-save input{width:100%}
+.template-save .btn{height:36px}
+.row-actions{display:flex;align-items:center;gap:6px}
+#muteDevice{max-width:300px}
 
 /* ─── Кадр ──────────────────────────────────────────────────────────────── */
 .player{position:relative;flex:1 1 auto;min-height:220px;overflow:hidden;border-radius:16px;background:#000;display:grid;place-items:center}
@@ -257,6 +327,17 @@ option{background:var(--menu);color:var(--text)}
 .chip-button .ic{width:18px;height:18px}
 .chip-button:hover:not(:disabled){border-color:var(--edge-strong);color:var(--text)}
 .chip-button.on{border-color:var(--accent-line);background:var(--accent-soft);color:var(--accent-strong)}
+.chip-button[aria-expanded="true"]{border-color:var(--edge-strong);color:var(--text)}
+/* Выпадающий выбор скорости и повтора — открывается над кнопкой. */
+.pick-menu{position:fixed;min-width:190px;padding:6px;gap:2px;animation:pick-in .14s ease-out}
+.pick-menu button{height:36px;padding:0 10px;display:flex;align-items:center;gap:10px;border:0;border-radius:8px;background:transparent;color:var(--soft);font-size:14px;text-align:left}
+.pick-menu button span{flex:1}
+.pick-menu button .ic{width:18px;height:18px;flex:none}
+.pick-menu button .ic:last-child{visibility:hidden;color:var(--accent-strong)}
+.pick-menu button[aria-checked="true"]{color:var(--text);font-weight:600}
+.pick-menu button[aria-checked="true"] .ic:last-child{visibility:visible}
+.pick-menu button:hover,.pick-menu button:focus-visible{background:var(--sel);color:var(--text);outline:none}
+@keyframes pick-in{from{opacity:0;transform:translateY(4px)}}
 .deck-volume{display:flex;align-items:center;gap:12px;width:232px;padding-left:20px;border-left:1px solid var(--edge);color:var(--accent-strong)}
 .deck-volume .ic{width:18px;height:18px}
 .vol-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px}
@@ -285,6 +366,16 @@ option{background:var(--menu);color:var(--text)}
 .panel{min-height:0;flex:1;display:flex;flex-direction:column}
 .panel-head{height:76px;flex:none;display:flex;align-items:center;gap:10px;padding:20px 20px 16px}
 .panel-head h2{font-size:18px;font-weight:700;line-height:24px}
+/* Открытый сохранённый список: имя рядом с очередью, точка — есть изменения. */
+.current-list{min-width:0;display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}
+.current-list span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.current-list i{width:7px;height:7px;flex:none;border-radius:50%;background:var(--cue)}
+.template-row.current{border-color:var(--accent-line);background:var(--accent-soft)}
+.template-row .t-title{min-width:0;display:flex;align-items:center;gap:4px}
+.template-row .t-rename{width:24px;height:24px;flex:none;color:var(--faint)}
+.template-row .t-rename:hover{color:var(--text)}
+.template-row .t-rename .ic{width:13px;height:13px}
+.template-row .t-name input{height:28px;font-size:14px;padding:0 8px}
 .count{flex:none;height:22px;min-width:22px;display:inline-grid;place-items:center;padding:0 7px;border-radius:6px;background:var(--raise);color:var(--muted);font:500 12px var(--mono);font-variant-numeric:tabular-nums}
 .count.mini{height:18px;min-width:18px;padding:0 5px;font-size:11px}
 .templates-anchor{position:relative}
@@ -308,11 +399,33 @@ option{background:var(--menu);color:var(--text)}
 .queue-art{width:64px;height:36px;display:grid;place-items:center;overflow:hidden;border-radius:6px;background:linear-gradient(180deg,var(--raise),var(--sel));color:var(--accent-strong)}
 .queue-art img{width:100%;height:100%;object-fit:cover}
 .queue-art .ic{width:16px;height:16px}
+/* Наведение: строка подсвечивается рамкой, на превью — кнопка «играть»,
+   вместо номера — ручка: строку можно схватить и перетащить. */
+.queue-item:hover{border-color:var(--edge)}
+.queue-pick{position:relative;cursor:pointer}
+.queue-art{position:relative}
+/* Длительность на превью, как на YouTube: мелко, на тёмной плашке. */
+.q-dur{position:absolute;left:3px;bottom:3px;padding:0 4px;border-radius:4px;background:rgba(0,0,0,.8);color:#fff;font:600 10px/15px var(--mono);font-variant-numeric:tabular-nums;pointer-events:none}
+.q-play{position:absolute;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.5);color:#fff;opacity:0;transition:opacity .15s var(--ease)}
+.q-play .ic{width:26px;height:26px;padding:7px 6px 7px 8px;border-radius:50%;background:rgba(255,255,255,.94);color:#14121a;box-shadow:0 2px 8px rgba(0,0,0,.45);transform:scale(.85);transition:transform .15s var(--ease)}
+.queue-item:hover .q-play .ic{transform:scale(1)}
+.queue-item:hover .q-play,.queue-pick:focus-visible .q-play{opacity:1}
+.q-grip{position:absolute;left:0;top:0;bottom:0;width:16px;display:grid;place-items:center;color:var(--muted);opacity:0;cursor:grab}
+.q-grip .ic{width:14px;height:14px}
+.queue-item:hover .q-grip{opacity:1}
+.queue-item:hover .q-index,.queue-item:hover .q-bars{opacity:0}
+.queue-list.sorting{user-select:none;cursor:grabbing}
+.queue-list.sorting .queue-item:not(.dragging){transition:transform .18s var(--ease)}
+.queue-list.sorting .q-play{opacity:0!important}
+.queue-item.dragging{z-index:3;border-color:var(--edge-strong);background:var(--raise);box-shadow:0 14px 34px rgba(0,0,0,.5);transition:none!important;cursor:grabbing}
 .queue-title{min-width:0;display:flex;flex-direction:column;gap:4px}
 .queue-title b{font-size:14px;font-weight:500;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .queue-item.playing .queue-title b{font-weight:600}
 .queue-title small{display:flex;align-items:center;gap:6px;min-width:0;color:var(--muted);font-size:12px;line-height:16px;white-space:nowrap;overflow:hidden}
 .queue-title small i{width:3px;height:3px;flex:none;border-radius:50%;background:var(--faint)}
+/* Сжимается источник, а не метка: раньше «В очереди» теряла последнюю букву. */
+.queue-title small>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.queue-title small>span:not(:first-child){flex:none}
 .q-ready{display:inline-flex;align-items:center;gap:3px}.q-ready .ic{width:13px;height:13px;stroke-width:2.2}
 .q-live{color:var(--live-text)}.q-ready{color:var(--ok)}.q-wait{color:var(--faint)}.q-load{color:var(--cue)}.q-bad{color:var(--live-text)}
 .queue-item.unavailable .queue-art{opacity:.45}
@@ -382,11 +495,16 @@ option{background:var(--menu);color:var(--text)}
 
 /* ─── Строка состояния ─────────────────────────────────────────────────── */
 .statusbar{display:flex;align-items:center;gap:14px;min-width:0;padding:0 12px 0 20px;border-top:1px solid var(--edge);background:var(--bar);color:var(--muted);font-size:12px;line-height:16px;white-space:nowrap}
-.sb-item{display:flex;align-items:center;gap:8px;min-width:0}
+/* Подписи не сжимаются: раньше текст выходил за свой блок и наезжал на
+   соседний. Сжимаются только здоровье потока и подсказка — с многоточием. */
+.sb-item{display:flex;align-items:center;gap:8px;flex:none}
+.sb-item:first-child{flex:0 1 auto;min-width:0}
+.sb-item:first-child>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .sb-item b{color:var(--soft);font-weight:500}
-.sb-item.muted{overflow:hidden;text-overflow:ellipsis;display:block;color:var(--faint)}
+.sb-item.muted{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;display:block;color:var(--faint)}
 .sb-item.muted:empty{display:none}
 .sb-sep{width:1px;height:12px;flex:none;background:var(--edge)}
+#netInfo.warn{color:var(--cue)}
 .dot,.link-state i{width:6px;height:6px;flex:none;border-radius:50%;background:var(--faint)}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--cue)}.dot.bad{background:var(--live)}
 .link-state.public{color:var(--ok-text)}.link-state.public i{background:var(--ok)}
@@ -406,6 +524,21 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 #serverDialog{width:min(440px,92vw);max-height:min(88vh,660px);overflow:auto}
 #serverDialog .field-label{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
 #serverDialog input[type=text],#serverDialog input[type=password]{width:100%}
+/* Окно добавления: обложка и название сверху, выбор серий, озвучки, качества. */
+#addDialog{width:min(480px,92vw);max-height:min(88vh,720px);overflow:auto}
+.add-head{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+.add-cover{width:56px;height:78px;flex:none;display:grid;place-items:center;overflow:hidden;border-radius:8px;background:var(--raise);color:var(--accent-strong)}
+.add-cover img{width:100%;height:100%;object-fit:cover}
+.add-cover .ic{width:22px;height:22px}
+.add-copy{min-width:0;display:flex;flex-direction:column;gap:4px}
+.add-copy b{font-size:17px;line-height:1.3;overflow-wrap:anywhere}
+.add-copy small{color:var(--muted);font-size:13px}
+.add-body{display:flex;flex-direction:column;gap:14px}
+.add-body .field-label{display:flex;flex-direction:column;gap:6px}
+.add-body select{width:100%}
+.add-body .seg{width:100%}
+.add-body .seg button{padding:0 8px}
+.field-hint{color:var(--muted);font-size:12px;font-weight:400;line-height:1.45}
 #confirmDialog{width:min(420px,92vw)}
 #confirmDialog .dialog-head{margin-bottom:8px}
 #confirmDialog .dialog-head b{font-size:16px;line-height:1.35}
@@ -432,6 +565,8 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 .switch-row input:checked::after{transform:translateX(16px)}
 .switch-copy b{display:block;font-size:14px;font-weight:600}
 .switch-copy small{display:block;margin-top:3px;color:var(--muted);font-size:12px;line-height:1.5}
+.switch-row:has(input:disabled){opacity:.5;cursor:not-allowed}
+.mute-app-row{margin-top:12px;padding-top:12px;border-top:1px solid var(--edge)}
 .link-mode .btn{width:100%;margin-top:10px}
 
 /* Настройки: разделы слева, одна прокрутка справа. */

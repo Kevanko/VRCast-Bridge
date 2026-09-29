@@ -123,9 +123,9 @@ const SPEED_STEPS=[0.5,0.75,1,1.25,1.5,2];
 const icon=name=>`<svg class="ic" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const LOOP_STEPS=[['once','repeat','Без повтора'],['all','repeat','Повтор очереди'],['one','repeat-one','Повтор трека']];
 function paintSpeed(value){const button=$('#speedSelect');if(button.dataset.value!==String(value))button.dataset.value=String(value);setText(button,`${value}×`);
-  button.classList.toggle('on',Number(value)!==1);setTitle(button,`Скорость ${value}× — нажмите, чтобы изменить`);}
+  button.classList.toggle('on',Number(value)!==1);setTitle(button,`Скорость воспроизведения: ${value}×`);}
 function paintLoop(mode){const button=$('#loopSelect');const step=LOOP_STEPS.find(item=>item[0]===mode)||LOOP_STEPS[0];
-  if(button.dataset.value!==step[0])button.dataset.value=step[0];setHtml(button,icon(step[1]));button.classList.toggle('on',step[0]!=='once');setTitle(button,`${step[2]} — нажмите, чтобы изменить`);}
+  if(button.dataset.value!==step[0])button.dataset.value=step[0];setHtml(button,icon(step[1]));button.classList.toggle('on',step[0]!=='once');setTitle(button,step[2]);}
 
 function monitorPlaceholder(title, text, name = 'broadcast') {
   setText($('#monitorPlaceholderTitle'),title); setText($('#monitorPlaceholderText'),text); setHtml($('#monitorPlaceholderIcon'),icon(name));
@@ -134,8 +134,11 @@ function monitorPlaceholder(title, text, name = 'broadcast') {
 // Декодирование 1080p60 в окне программы стоит около полутора ядер — больше,
 // чем всё кодирование эфира. Поэтому предпросмотр выключается, а на свёрнутом
 // окне останавливается сам: смотреть его в этот момент всё равно некому.
+// Предпросмотр декодирует видео постоянно — это заметная нагрузка. Пока окно
+// свёрнуто или вы в другой программе (в VRChat), он не нужен: отключаем, а при
+// возвращении подключаемся заново за секунду.
 function previewAllowed() {
-  return ui.previewOn && !ui.windowHidden;
+  return ui.previewOn && !ui.windowHidden && !ui.windowBlurred;
 }
 
 function stopPreview() {
@@ -257,12 +260,15 @@ function startPreview(state) {
   // Эфир пошёл — локальный предпросмотр больше не нужен.
   if (ui.localPreviewId) ui.localPreviewId='';
   const previewSource=(state.localPlaybackUrl||state.playbackUrl).replace(/live\.m3u8(?:\?.*)?$/,'preview.m3u8');
-  const черезWebrtc=Boolean(state.webrtcUrl)&&!ui.webrtcFailed;
+  // WebRTC — мгновенная картинка, но без звука: AAC эфира туда не проходит.
+  // Включили звук предпросмотра — показываем HLS, в нём звук есть.
+  const черезWebrtc=Boolean(state.webrtcUrl)&&!ui.webrtcFailed&&взять('previewSound')!=='1';
   const previewKey=`${черезWebrtc?'rtc':'hls'}|${previewSource}`;
   // Ключ включает способ показа: без этого связь WebRTC пересоздавалась на
   // каждом обновлении состояния, и картинка дёргалась.
   if (ui.previewUrl===previewKey && (ui.hls||ui.rtc)) return;
   ui.hls?.destroy(); ui.hls=null; ui.rtc?.close(); ui.rtc=null; ui.previewUrl=previewKey;
+  if (!черезWebrtc) video.srcObject=null;
   if (черезWebrtc) {
     startWebrtcPreview(state.webrtcUrl, video, monitor, previewKey);
     return;
@@ -509,17 +515,34 @@ $('#serverWipe').addEventListener('click',async()=>{
 });
 serverDialog.addEventListener('close',()=>{ $('#serverWipe').textContent='Снести с машины…'; $('#wipeConfirm').hidden=true; });
 
+// Каждый сохранённый список — строка со своими кнопками. Раньше был выпадающий
+// список и общая кнопка «Сохранить»: выбрал список, чтобы открыть, нажал
+// «Сохранить» — и он молча перезаписался текущей очередью (так пропал список
+// на 170+ клипов). Теперь всё, что стирает, называется прямо и переспрашивает.
 function renderTemplates(state) {
-  const select=$('#templateSelect'), selected=select.value, templates=state.templates||[];
-  // Список пересобираем только когда наборы поменялись: пересборка на каждом
-  // опросе захлопывала раскрытый список прямо под курсором.
-  const html='<option value="">Новый список…</option>'+templates.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.count}</option>`).join('');
-  if(select._html!==html){
-    setHtml(select,html);
-    if(selected&&templates.some(item=>item.id===selected))select.value=selected;
-  }
+  const templates=state.templates||[];
+  const текущий=state.currentTemplate;
+  // Во время переименования строку не перерисовываем — иначе поле ввода пропадёт.
+  if($('#templateList').querySelector('.t-name input'))return;
+  const html=templates.length?templates.map(item=>{const открыт=текущий?.id===item.id;return `<div class="template-row${открыт?' current':''}" data-template="${escapeHtml(item.id)}">`
+    +`<span class="t-cover">${item.cover?`<img src="${escapeHtml(item.cover)}" alt="" loading="lazy" decoding="async" onerror="this.remove()">`:''}${icon('log')}</span>`
+    +`<span class="t-name"><span class="t-title"><b title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</b><button class="icon-btn t-rename" type="button" data-t="rename" title="Переименовать" aria-label="Переименовать список">${icon('pencil')}</button></span><small>${штук(Number(item.count)||0,['ролик','ролика','роликов'])}${открыт?(текущий.dirty?' · открыт, есть изменения':' · открыт'):''}</small></span>`
+    +`<span class="t-actions">${открыт?`<button class="btn small" type="button" disabled title="Этот список уже открыт в очереди">${icon('check')}Открыто</button>`:`<button class="btn small primary" type="button" data-t="open" title="Заменить текущую очередь этим списком">${icon('play')}Открыть</button>`}`
+    +`<button class="btn small" type="button" data-t="append" title="Добавить ролики списка в конец текущей очереди">${icon('plus')}В конец</button>`
+    +`<button class="btn small" type="button" data-t="update" title="Заменить содержимое этого списка текущей очередью">${icon('refresh')}Перезаписать</button>`
+    +`<button class="icon-btn t-delete" type="button" data-t="delete" title="Удалить список" aria-label="Удалить список">${icon('trash')}</button></span></div>`;}).join('')
+    :'<p class="template-empty">Пока пусто. Соберите очередь и сохраните её ниже — потом откроете одним нажатием.</p>';
+  setHtml($('#templateList'),html);
   setText($('#templateCount'),String(templates.length));
-  const has=Boolean(select.value); setDisabled($('#loadTemplate'),!has); setDisabled($('#appendTemplate'),!has); setDisabled($('#deleteTemplate'),!has);
+  setDisabled($('#saveTemplate'),!state.queue.length);
+  // Открытый список — в заголовке очереди; кнопка внизу сохраняет в него.
+  setHidden($('#currentList'),!текущий);
+  setText($('#currentListName'),текущий?`· ${текущий.name}`:'');
+  setHidden($('#currentListDirty'),!текущий?.dirty);
+  const кнопка=$('#saveTemplateQuick');
+  setText(кнопка,текущий?(текущий.dirty?'Сохранить изменения':'Сохранено'):'Сохранить список');
+  setTitle(кнопка,текущий?`Сохранить очередь в список «${текущий.name}»`:'Сохранить очередь как новый список');
+  setDisabled(кнопка,!state.queue.length||Boolean(текущий&&!текущий.dirty));
 }
 
 // Откуда ролик — по адресу: человеку понятнее «YouTube», чем «медиа по ссылке».
@@ -530,6 +553,8 @@ function источник(item){
   if(/vk\.(com|ru)|vkvideo/.test(адрес))return 'VK Видео';
   if(/rutube/.test(адрес))return 'Rutube';
   if(/twitch/.test(адрес))return 'Twitch';
+  if(/animelib|anilib/.test(адрес))return 'AnimeLib';
+  if(/kodik|aniqit/.test(адрес))return 'Kodik';
   try{ return new URL(item.sourceUrl).hostname.replace(/^www\./,''); }catch{ return 'Ссылка'; }
 }
 function queueRowHtml(item,index,state,{готовые,качаются,unityВыбор,подсказкаТрека}){
@@ -545,8 +570,10 @@ function queueRowHtml(item,index,state,{готовые,качаются,unityВ�
   return `<div class="${классы}" data-id="${escapeHtml(item.id)}"${item.unavailable?' data-unavailable="1"':''}>`
     +`<button type="button" class="queue-pick" title="${подсказкаТрека}">`
     +(играет?'<span class="q-bars" aria-label="В эфире"><i></i><i></i><i></i></span>':`<span class="q-index">${index+1}</span>`)
-    +`<span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="" loading="lazy" decoding="async" onerror="this.remove()">`:icon('note')}</span>`
-    +`<span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small><span>${escapeHtml(источник(item))}${длина?` · ${длина}`:''}</span><i></i>${метка}</small></span></button>`
+    +`<span class="q-grip" aria-hidden="true">${icon('grip')}</span>`
+    // При наведении поверх превью — кнопка «играть»: сразу видно, что клик включит ролик.
+    +`<span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="" loading="lazy" decoding="async" onerror="this.remove()">`:icon('note')}${длина?`<span class="q-dur">${длина}</span>`:''}${играет?'':`<span class="q-play">${icon('play')}</span>`}</span>`
+    +`<span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small><span>${escapeHtml(источник(item))}</span><i></i>${метка}</small></span></button>`
     +`<button type="button" class="remove-item" aria-label="Убрать из очереди" title="Убрать из очереди">${icon('close')}</button></div>`;
 }
 // Пустая очередь — приглашение, а не пустота: куда перетащить и что можно вставить.
@@ -568,6 +595,58 @@ function scheduleLiveClock(state){
 
 // Метки на кадре: красное «ЭФИР» — то, что видят в VRChat; жёлтое
 // «ПРЕДПРОСМОТР» — источник, который ещё не в эфире.
+// Канал наружу: сколько реально пролезает до своего сервера или через туннель,
+// и предупреждение, если включён VPN — поток тогда идёт через него кругом.
+// Напротив каждого сервиса быстрой ссылки — его средняя скорость по замерам.
+const мбит=kbps=>`${(kbps/1000).toLocaleString('ru-RU',{maximumFractionDigits:1})} Мбит/с`;
+function paintTunnelSpeeds(state){
+  const скорости=state.tunnel?.speeds||{}, проверка=state.tunnel?.test||{};
+  for(const option of $('#tunnelProviderSelect').options){
+    if(option.value==='auto')continue;
+    option.dataset.base||=option.textContent;
+    const итог=проверка.results?.[option.value];
+    const хвост=проверка.current===option.value?' · проверяю…':итог?.error?' · не отвечает':скорости[option.value]?` · ~${мбит(скорости[option.value])}`:option.value==='pinggy'?' · не для VRChat':'';
+    setText(option,option.dataset.base+хвост);
+  }
+  const кнопка=$('#testTunnels');
+  setDisabled(кнопка,Boolean(проверка.running||state.running));
+  setText(кнопка,проверка.running?'Проверяю…':'Проверить');
+  setTitle(кнопка,state.running?'Остановите эфир, чтобы проверить сервисы':'Поднять каждый сервис по очереди и измерить скорость');
+}
+$('#testTunnels').addEventListener('click',async()=>{try{render(await api('/api/tunnels/test',{method:'POST'}));toast('Проверяю сервисы по очереди — около минуты');}catch(error){toast(error.message,true);}});
+// Выбор сетевой карты для потока на свой сервер. Перерисовываем только когда
+// список карт или выбор поменялись, иначе открытый список закрывался бы сам.
+function paintAdapters(state){
+  const select=$('#remoteAdapter'), карты=state.network?.adapters||[], выбрана=state.config.remoteBindAddress||'';
+  const подпись=JSON.stringify([карты,выбрана]);
+  if(select.dataset.sig===подпись||document.activeElement===select)return;
+  select.dataset.sig=подпись;
+  const есть=карты.some(к=>к.address===выбрана);
+  select.innerHTML=`<option value="">Как в системе</option>`+карты.map(к=>`<option value="${escapeHtml(к.address)}"${к.vpn?' disabled':''}>${escapeHtml(к.name)} · ${escapeHtml(к.address)}${к.vpn?' · VPN':''}</option>`).join('')
+    +(выбрана&&!есть?`<option value="${escapeHtml(выбрана)}">${escapeHtml(выбрана)} · сейчас не подключена</option>`:'');
+  select.value=выбрана;
+}
+$('#remoteAdapter').addEventListener('change',async event=>{
+  try{render(await api('/api/config',{method:'POST',body:JSON.stringify({remoteBindAddress:event.target.value})}));toast(event.target.value?'Поток пойдёт через выбранную карту':'Поток пойдёт как решит система');}
+  catch(error){toast(error.message,true);}
+});
+function paintNetInfo(state){
+  const наружу=state.config.outputMode!=='local', perf=state.performance||{};
+  const мбит=state.config.outputMode==='remote'?Number(perf.remoteCapacityKbps)/1000:Number(state.tunnel?.metrics?.throughputMbps)||0;
+  // «Через VPN» — только если так и есть: при правиле DIRECT поток идёт мимо,
+  // хотя адаптер VPN в системе остаётся.
+  const маршрут=state.network?.route||'';
+  const vpn=наружу&&маршрут!=='direct'?state.network?.vpn:'';
+  const части=[];
+  if(наружу&&мбит>0)части.push(`канал ~${мбит.toLocaleString('ru-RU',{maximumFractionDigits:1})} Мбит/с`);
+  // Про VPN пишем только когда поток реально идёт через него.
+  if(маршрут==='vpn'&&vpn)части.push(`через VPN (${vpn})`);
+  setHidden($('#netInfo'),!части.length); setHidden($('#netSep'),!части.length);
+  setText($('#netInfo'),части.length?части.join(' · '):'');
+  $('#netInfo').classList.toggle('warn',маршрут==='vpn');
+  setTitle($('#netInfo'),маршрут==='vpn'?`Поток идёт через VPN «${vpn}» и упирается в его скорость. Добавьте правило DIRECT для ffmpeg.exe и адреса своего сервера.`:маршрут==='direct'?'Поток идёт напрямую: правило VPN пускает его мимо прокси':vpn?`Включён VPN «${vpn}». Как идёт поток, узнать не удалось — если лагает, добавьте правило DIRECT для ffmpeg.exe.`:'Сколько реально проходит до зрителей');
+}
+
 function paintMonitorTags(state){
   const кадр=$('#monitor'), метка=$('#monitorTag'), подпись=$('#monitorBadge');
   let текст='', класс='', пояснение='Нет эфира';
@@ -588,10 +667,13 @@ function paintMonitorTags(state){
 
 // Кнопка под настройками экрана: начать эфир, переключить его на экран или
 // применить изменения к уже идущему захвату. Подпись говорит, что именно будет.
+// «Только я» не ждёт готовности: локальный канал поднимается вместе с эфиром,
+// а запасная HLS-ссылка работает и без MediaMTX. Ждать надо туннель и свой сервер.
+const ссылкаНеГотова=state=>state.config?.outputMode!=='local'&&!state.delivery?.ready;
 function paintApply(state){
   const экранВЭфире=state.running&&state.activeKind==='screen';
   setText($('#applyCapture'),экранВЭфире?'Применить в эфире':state.running?'Вещать экран':'Показать в эфире');
-  setDisabled($('#applyCapture'),экранВЭфире&&!ui.captureDirty);
+  setDisabled($('#applyCapture'),(экранВЭфире&&!ui.captureDirty)||(!state.running&&ссылкаНеГотова(state)));
   const [вид,текст]=экранВЭфире?(ui.captureDirty?['dirty','Изменения ещё не в эфире']:['live','Экран в эфире — изменения применятся по кнопке'])
     :state.running?['','Сейчас в эфире видео — эфир не прервётся']:['','Эфир не запущен — кнопка его начнёт'];
   setClass($('#applyHint'),`apply-hint ${вид}`); setText($('#applyHintText'),текст);
@@ -674,7 +756,7 @@ function render(state) {
     hint=rtspLive?'':'В мире выберите плеер AVPro и разрешите Untrusted URLs.';
     // Бесплатный туннель не тянет тяжёлый поток — это и есть причина рывков у друзей.
     if(tunnelMode){const heavy=ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30);
-      if(heavy)hint+=' Через туннель 1080p и 60 кадров рвутся — лучше 720p и 30.';
+      if(heavy&&!(Number(state.tunnel?.metrics?.throughputMbps)>=7.7))hint+=' Этот туннель медленный — эфир пойдёт в 720p и 30 кадров.';
       // Адрес выдаётся на один сеанс. Кто вставил его раньше — смотрит, а кто
       // зайдёт после перезапуска, получит нерабочую ссылку и будет думать,
       // что сломалась программа. Про это надо предупреждать заранее.
@@ -693,6 +775,7 @@ function render(state) {
     linkError=streamStalled||state.tunnel?.state==='error'||tunnelBroken;
   }
   setText($('#playbackUrl'),shownUrl||(linkError?'Ссылка пока недоступна':'Подготовка ссылки…')); setText($('#trustHint'),hint);
+  paintNetInfo(state); paintAdapters(state); paintTunnelSpeeds(state);
   setDisabled($('#copyUrl'),!shownUrl);
   const linkState=$('#linkState'); setClass(linkState,`link-state ${linkGood?'public':linkError?'error':''}`); setText(linkState.querySelector('span'),linkText);
   // Транспорт имеет смысл только для RTSP-ссылки
@@ -735,12 +818,29 @@ function render(state) {
   const тяжело=слабый&&(ui.source==='screen'?(state.config.quality==='1080p'||Number(state.config.fps)>30):(state.config.mediaQuality==='1080p'||Number(state.config.mediaFps)>30));
   const ratio=Number(state.performance?.realtimeRatio||0);
   const perf=state.performance||{}, q=perf.quality||{}, events=perf.events||[];
-  const lat=Number(perf.liveLatencySec||0);
+  // liveLatencySec — дрейф внутренних часов кодировщика, а не задержка у
+  // зрителя. Для туннеля показываем измеренный через внешний URL возраст края.
+  const drift=Number(perf.liveLatencySec||0);
+  const audienceLatency=Number(state.tunnel?.metrics?.audienceLatencySec);
+  const hasAudienceLatency=state.config.outputMode==='tunnel'&&Number.isFinite(audienceLatency)&&audienceLatency>=0;
+  // У зрителя — диапазон: от края плейлиста до его начала (плеер VRChat
+  // на Windows часто стартует ближе к началу окна).
+  const задержкаДо=Number(state.tunnel?.metrics?.audienceLatencyMaxSec);
+  const задержкаТекст=`${Math.round(audienceLatency)}–${Math.round(Number.isFinite(задержкаДо)?задержкаДо:audienceLatency)} с`;
   const congested=events.some(e=>e.kind==='remote-congestion'&&Date.now()-e.at<15000);
   let health=тяжело?'видеокарта не кодирует — поставьте 720p и 30 кадров':streamReady?(ratio&&ratio<0.97?`отстаёт на ${Math.round((1-ratio)*100)}%`:'идёт вовремя'):streamStalled?'не успевает — снизьте качество':'набирает буфер';
-  if(congested)health='свой сервер не тянет битрейт — снизьте качество';
+  // Бесплатный туннель на 0,5–1 Мбит/с поток не тянет, как ни настраивай, —
+  // говорим об этом прямо, а не «набирает буфер».
+  const туннельМбит=Number(state.tunnel?.metrics?.throughputMbps)||0;
+  const туннельМедленный=state.config.outputMode==='tunnel'&&туннельМбит>0&&туннельМбит<1.2;
+  if(туннельМедленный)health=`туннель медленный (~${туннельМбит.toLocaleString('ru-RU')} Мбит/с) — у зрителей будут паузы, нужен свой сервер`;
+  else if(congested)health='свой сервер не успевал — битрейт снижен автоматически';
+  // Хвост до своего сервера — это задержка, которую видит зритель в VRChat.
+  // Раньше здесь горело «идёт вовремя», хотя зрители отставали на секунды.
+  else if(Number(perf.remoteBacklogSec)>=1)health=`свой сервер отстаёт на ${Number(perf.remoteBacklogSec).toFixed(1).replace('.',',')} с`;
   else if(state.running&&streamReady){
-    if(lat>0.3)health+=` · задержка ${lat.toFixed(1)}с`;
+    if(hasAudienceLatency)health+=` · у зрителя ≈ ${задержкаТекст}`;
+    else if(drift>0.3)health+=` · дрейф ${drift.toFixed(1)}с`;
     if(q.freezes>0)health+=` · фризов ${q.freezes}`;
     if(q.driftCorrections>0)health+=` · синхр. ${q.driftCorrections}`;
   }
@@ -753,16 +853,16 @@ function render(state) {
   setHidden($('#healthChip'),!state.running);
   if(state.running){
     setClass($('#healthChip'),`tag-chip soft health-chip ${здоровье==='ok'?'':здоровье}`);
-    setText($('#healthChipText'),здоровье==='ok'?(lat>0.3?`Задержка ${lat.toFixed(1).replace('.',',')} с`:'Поток вовремя'):здоровье==='warn'?'Набирает буфер':'Не успевает');
+    setText($('#healthChipText'),здоровье==='ok'?(hasAudienceLatency?`У зрителя ≈ ${задержкаТекст}`:drift>0.3?`Дрейф ${drift.toFixed(1).replace('.',',')} с`:'Поток вовремя'):здоровье==='warn'?'Набирает буфер':'Не успевает');
   }
   setTitle($('#streamHealth'),state.running
-    ?`Задержка сейчас ${lat.toFixed(1)}с (пик ${Number(perf.maxLiveLatencySec||0).toFixed(1)}с)\nФризов ${q.freezes||0} на ${q.freezeSeconds||0}с всего\nСинхронизаций задержки ${q.driftCorrections||0}${last?`\nПоследнее: ${last.detail}${last.position!=null?` (${last.title||'трек'} на ${last.position}с)`:''}`:''}`
+    ?`${hasAudienceLatency?`Задержка у зрителей публичной ссылки ≈ ${задержкаТекст} (зависит от их плеера)`:`Дрейф кодировщика ${drift.toFixed(1)}с (пик ${Number(perf.maxLiveLatencySec||0).toFixed(1)}с)`}\nФризов ${q.freezes||0} на ${q.freezeSeconds||0}с всего\nСинхронизаций часов ${q.driftCorrections||0}${last?`\nПоследнее: ${last.detail}${last.position!=null?` (${last.title||'трек'} на ${last.position}с)`:''}`:''}`
     :'');
   setText($('#queueCount'),state.queue.length);
   const всегоСекунд=state.queue.reduce((sum,item)=>sum+(Number(item.duration)||0),0);
   setHtml($('#queueSummary'),`${штук(state.queue.length,['видео','видео','видео'])}${всегоСекунд?` · <b>${formatTime(всегоСекунд)}</b>`:''}`);
   setHidden($('#pickLocal'),!state.queue.length);
-  setDisabled($('#clearQueue'),!state.queue.length); setDisabled($('#saveTemplateQuick'),!state.queue.length);
+  setDisabled($('#clearQueue'),!state.queue.length);
   // Журнал в сотню строк переписываем, только пока его окно открыто: иначе
   // это самая тяжёлая запись в DOM на каждом опросе, и её никто не видит.
   if($('#logDialog').open)paintLogs(state);
@@ -771,11 +871,20 @@ function render(state) {
   // сколько кадров. Раньше это было спрятано под шестерёнкой, и автопонижение
   // качества человек замечал только в журнале.
   const выход=state.running?(state.activeKind==='screen'?'screen':'queue'):(ui.source==='screen'?'screen':'queue');
-  const чёткость=выход==='screen'?state.config.quality:state.config.mediaQuality;
-  const кадры=выход==='screen'?state.config.fps:state.config.mediaFps;
+  // Через бесплатный туннель уходит не больше 720p/30 — показываем то, что
+  // реально получат зрители, а не выбранное в настройках.
+  // Быстрый туннель (замер от ~7,7 Мбит/с) пропускает выбранное как есть.
+  const туннель=state.config.outputMode==='tunnel'&&!(Number(state.tunnel?.metrics?.throughputMbps)>=7.7);
+  let чёткость=выход==='screen'?state.config.quality:state.config.mediaQuality;
+  let кадры=выход==='screen'?state.config.fps:state.config.mediaFps;
+  if(туннель&&чёткость==='1080p')чёткость='720p';
+  if(туннель&&Number(кадры)>30)кадры=30;
   const битрейт=Number(state.config.videoBitrate)||0;
-  setText($('#qualityLabel'),`${чёткость} · ${кадры} к/с`);
-  setText($('#bitrateLabel'),битрейт?`Поток ${(битрейт/1000).toLocaleString('ru-RU')} Мбит/с`:'Поток авто');
+  setText($('#qualityLabel'),`${чёткость} · ${кадры} к/с${perf.pendingProfile?' · со следующего запуска':''}`);
+  // В подписи — уровень и сколько реально уходит (с учётом автоснижения).
+  const уровень=$('#videoBitrate').selectedOptions[0]?.dataset.short||'Авто';
+  const битрейты=[perf.remoteBudgetKbps,perf.desiredProfile?.bitrateKbps].map(Number).filter(n=>n>0), реально=битрейты.length?Math.min(...битрейты):0;
+  setText($('#bitrateLabel'),реально?`${уровень} · ${(реально/1000).toLocaleString('ru-RU',{maximumFractionDigits:1})} Мбит/с`:уровень);
   setTitle($('#playerSettings'),`Что уходит в эфир: ${чёткость}, ${кадры} кадров, ${битрейт?`${битрейт} Кбит/с`:'поток авто'}`);
   const monitor=$('#monitor');
   // Транспорт (перемотка, пауза, скорость) нужен только когда идёт живое
@@ -791,7 +900,7 @@ function render(state) {
   const подсказкаТрека=unityВыбор?'Выбрать для подготовки Unity':state.running?'Включить этот трек в эфире':'Посмотреть здесь, без эфира';
   const готовые=new Set(state.cache?.readyIds||[]), качаются=new Set(state.cache?.downloading||[]);
   const queueSignature=JSON.stringify([state.currentId,state.running,ui.localPreviewId,ui.unitySelectedId,подсказкаТрека,[...качаются],[...готовые],state.queue.map(item=>[item.id,item.title,item.thumbnail,item.duration,item.unavailable,item.local])]);
-  if(queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>queueRowHtml(item,index,state,{готовые,качаются,unityВыбор,подсказкаТрека})).join(''):queueEmptyHtml();}
+  if(!ui.dragging&&queueSignature!==ui.queueSignature){ui.queueSignature=queueSignature;list.innerHTML=state.queue.length?state.queue.map((item,index)=>queueRowHtml(item,index,state,{готовые,качаются,unityВыбор,подсказкаТрека})).join(''):queueEmptyHtml();}
   const screenSource=ui.source==='screen';
   setHidden($('#menuMediaQuality'),screenSource); setHidden($('#menuMediaFps'),screenSource);
   setHidden($('#menuScreenQuality'),!screenSource); setHidden($('#menuScreenFps'),!screenSource);
@@ -810,8 +919,8 @@ function render(state) {
   $('#goLive').classList.toggle('switch',чужойЭфир);
   setText($('#goLiveLabel'),чужойЭфир?(экран?'Вещать экран':'Вещать видео'):'Начать эфир');
   // Пустая очередь — пускать нечего; кнопка честно неактивна, а не падает с ошибкой.
-  setDisabled($('#goLive'),!экран&&!state.running&&!state.queue.length);
-  setTitle($('#goLive'),чужойЭфир?'Эфир не прервётся: зрители сразу увидят новый источник':'');
+  setDisabled($('#goLive'),(!экран&&!state.running&&!state.queue.length)||(!state.running&&ссылкаНеГотова(state)));
+  setTitle($('#goLive'),чужойЭфир?'Эфир не прервётся: зрители сразу увидят новый источник':ссылкаНеГотова(state)?(state.delivery?.error||'Ссылка ещё готовится — дождитесь готовности'):'');
   setHidden($('#stopLive'),!state.running);
   setText($('#stopLive'),'Остановить эфир');
   paintApply(state);
@@ -937,7 +1046,34 @@ async function loadCaptureSources() {
   fillSelect($('#audioOutput'),ui.sources.audioOutputs,saved.audioOutputId,'Выберите выход',item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`);
   fillSelect($('#audioDevice'),ui.sources.audioDevices,saved.captureAudioDevice,'Выберите вход',name=>`<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`);
   ui.sourcesLoaded=true;
+  paintMuteDevices();
 }
+
+// «Не слышать у себя» уводит звук на выход, который никто не слушает. Своими
+// наушниками (выход по умолчанию) он быть не может. Рекомендуем тот же, что
+// выбрал бы помощник: Steam Streaming, VB-CABLE, Voicemeeter.
+const БЕЗЗВУЧНЫЙ=/steam streaming|cable input|voicemeeter|vb-audio/i;
+function muteTarget(){
+  const выходы=ui.sources.audioOutputs||[], выбран=ui.status?.config?.muteDevice||'';
+  const свой=выходы.find(item=>item.id===выбран&&!item.isDefault);
+  return свой||выходы.find(item=>!item.isDefault&&БЕЗЗВУЧНЫЙ.test(item.name))||null;
+}
+function paintMuteDevices(){
+  const выходы=ui.sources.audioOutputs||[], выбран=ui.status?.config?.muteDevice||'';
+  const рекомендованный=выходы.find(item=>!item.isDefault&&БЕЗЗВУЧНЫЙ.test(item.name));
+  fillSelect($('#muteDevice'),выходы.filter(item=>!item.isDefault),выбран,
+    рекомендованный?`Авто — рекомендуется: ${escapeHtml(рекомендованный.name)}`:'Авто — подходящего выхода нет',
+    item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}${БЕЗЗВУЧНЫЙ.test(item.name)?' — беззвучный':' — его может быть слышно'}</option>`);
+  const цель=muteTarget(), загружено=ui.sourcesLoaded;
+  // Некуда уводить — переключатель серый (если он не включён прямо сейчас),
+  // и рядом прямой путь в настройки.
+  setDisabled($('#muteLocalApp'),загружено&&!цель&&!$('#muteLocalApp').checked);
+  setHidden($('#muteSetupNote'),!загружено||Boolean(цель));
+  setText($('#muteDeviceNote'),цель?`Сейчас: ${цель.name}. Звук приложения уходит туда и в программу, а не в наушники`:'Подходящего выхода нет — установите VB-CABLE или выберите другой выход');
+}
+$('#openMuteSettings').addEventListener('click',()=>открытьНастройки('setStream'));
+$('#refreshOutputs').addEventListener('click',()=>loadCaptureSources().then(()=>toast('Список выходов обновлён')).catch(error=>toast(error.message,true)));
+$('#muteDevice').addEventListener('change',async()=>{try{const live=ui.status?.activeKind==='screen';render(await saveConfig(live));paintMuteDevices();toast('Выход сохранён');}catch(error){toast(error.message,true);}});
 
 async function refreshWindows() {
   const windows=await api('/api/windows');
@@ -959,7 +1095,7 @@ function configPayload() {
   const handle=$('#windowSource').value||(ждём?saved.captureWindowHandle||'':'');
   const selectedWindow=ui.sources.windows.find(item=>item.handle===handle);
   const processId=selectedWindow?selectedWindow.id:(ждём&&handle===saved.captureWindowHandle?saved.audioProcessId||'':'');
-  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:ждём?saved.captureMonitorId||'':$('#monitorSource').value,captureWindowHandle:handle,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:ждём?saved.audioOutputId||'':$('#audioOutput').value,audioProcessId:processId,captureAudioDevice:ждём?saved.captureAudioDevice||'':$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim(),tunnelProvider:$('#tunnelProviderSelect').value,closeToTray:$('#closeAction').value!=='exit' };
+  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:ждём?saved.captureMonitorId||'':$('#monitorSource').value,captureWindowHandle:handle,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:ждём?saved.audioOutputId||'':$('#audioOutput').value,audioProcessId:processId,captureAudioDevice:ждём?saved.captureAudioDevice||'':$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),muteLocalApp:$('#muteLocalApp').checked,muteDevice:ui.sourcesLoaded?$('#muteDevice').value:(ui.status?.config?.muteDevice||''),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim(),tunnelProvider:$('#tunnelProviderSelect').value,closeToTray:$('#closeAction').value!=='exit' };
 }
 async function saveConfig(applyLive = false) { return api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),applyLive})}); }
 
@@ -1032,6 +1168,7 @@ $('#captureMode').addEventListener('change',event=>{
 });
 $('#audioMode').addEventListener('change',event=>chooseAudioMode(event.target.value));
 $('#localAppVolume').addEventListener('change',async()=>{try{const live=ui.status?.activeKind==='screen';render(await saveConfig(live));toast(live?'Громкость изменена, в эфире прежняя':'Сохранено');}catch(error){toast(error.message,true);}});
+$('#muteLocalApp').addEventListener('change',async()=>{try{const live=ui.status?.activeKind==='screen';render(await saveConfig(live));toast($('#muteLocalApp').checked?'У вас звук выключен, в эфире остался':'Звук приложения у вас возвращён');}catch(error){toast(error.message,true);}});
 $('#monitorSource').addEventListener('change',()=>refreshCapturePreview().catch(error=>toast(error.message,true)));
 $('#windowSource').addEventListener('change',()=>refreshCapturePreview().catch(error=>toast(error.message,true)));
 
@@ -1060,8 +1197,131 @@ $('#selectRegion').addEventListener('click',()=>{window.location.href='vrcast://
 window.applySelectedRegion=region=>{$('#regionX').value=region.x;$('#regionY').value=region.y;$('#regionWidth').value=region.width;$('#regionHeight').value=region.height;refreshCapturePreview().catch(()=>{});toast(`Выбрано ${region.width}×${region.height}`);};
 window.addLocalFiles=async paths=>{try{const result=await api('/api/queue/local',{method:'POST',body:JSON.stringify({paths})});render(result.status);toast(`Добавлено: ${result.added.length}`);}catch(error){toast(error.message,true);}};
 
-$('#addForm').addEventListener('submit',async event=>{event.preventDefault();const button=$('#addButton');button.disabled=true;button.textContent='…';try{const result=await api('/api/queue',{method:'POST',body:JSON.stringify({url:$('#mediaUrl').value})});$('#mediaUrl').value='';render(result.status);toast(`Добавлено: ${result.added.length}`);}catch(error){toast(error.message,true);}finally{button.disabled=false;button.textContent='Добавить';}});
+// Окно выбора при добавлении. Возвращает нажатое действие (или null) и то,
+// что выбрано внутри. Кнопки: [значение, подпись, класс].
+function окноДобавления({title,sub='',cover='',body='',кнопки,начать}){
+  const окно=$('#addDialog');
+  setText($('#addDialogTitle'),title); setText($('#addDialogSub'),sub);
+  $('#addCover').innerHTML=cover?`<img src="${escapeHtml(cover)}" alt="" onerror="this.remove()">`:icon('log');
+  $('#addDialogBody').innerHTML=body;
+  $('#addDialogActions').innerHTML=кнопки.map(([значение,подпись,класс=''])=>`<button class="btn ${класс}" type="button" data-add="${escapeHtml(значение)}">${escapeHtml(подпись)}</button>`).join('');
+  начать?.(окно);
+  return new Promise(resolve=>{
+    const готово=значение=>{окно.removeEventListener('close',закрыли);$('#addDialogActions').onclick=null;if(окно.open)окно.close();resolve(значение);};
+    const закрыли=()=>готово(null);
+    окно.addEventListener('close',закрыли);
+    $('#addDialogActions').onclick=event=>{const кнопка=event.target.closest('[data-add]');if(кнопка)готово(кнопка.dataset.add==='cancel'?null:кнопка.dataset.add);};
+    окно.showModal();
+    ($('#addDialogActions .primary')||$('#addDialogActions button')).focus();
+  });
+}
+
+// Примерный размер серии на 24 минуты — чтобы выбор качества был понятен.
+const РАЗМЕР_СЕРИИ={1080:'≈ 700 МБ',720:'≈ 350 МБ',480:'≈ 200 МБ',360:'≈ 130 МБ'};
+async function выбратьСерии(info){
+  const серии=info.episodes, много=серии.length>1;
+  const номер=id=>серии.findIndex(e=>e.id===id);
+  let scope=много&&!info.episode?'all':'one', quality=720;
+  const озвучки=info.teams.map(t=>`<option value="${escapeHtml(t.id)}|${escapeHtml(t.translation)}"${t.id===info.team&&t.translation===info.translation?' selected':''}>${escapeHtml(t.name)}${t.kind?` · ${escapeHtml(t.kind.toLowerCase())}`:''}</option>`).join('');
+  const body=(много?`<label class="field-label">Серия<select id="animeEpisode">${серии.map(e=>`<option value="${escapeHtml(e.id)}"${e.id===info.episode?' selected':''}>${escapeHtml(e.number)}${e.name?`. ${escapeHtml(e.name)}`:''}</option>`).join('')}</select></label>`
+      +`<div class="field-label">Что добавить<div class="seg fill" id="animeScope" role="radiogroup" aria-label="Что добавить"></div></div>`:'')
+    +(info.teams.length?`<label class="field-label">Озвучка<select id="animeTeam">${озвучки}</select><small class="field-hint">Если у какой-то серии этой озвучки нет — возьмётся похожая.</small></label>`:'')
+    +`<div class="field-label">Качество<div class="seg fill" id="animeQuality" role="radiogroup" aria-label="Качество"></div><small class="field-hint" id="animeSize"></small></div>`;
+  const сколько=()=>{if(!много)return 1;const i=Math.max(0,номер($('#animeEpisode').value));return scope==='all'?серии.length:scope==='from'?серии.length-i:1;};
+  const рисовать=()=>{
+    if(много){const i=Math.max(0,номер($('#animeEpisode').value));
+      $('#animeScope').innerHTML=[['one','Эту серию'],['from',`С неё до конца · ${серии.length-i}`],['all',`Все · ${серии.length}`]].map(([v,t])=>`<button type="button" role="radio" data-value="${v}" aria-checked="${v===scope}">${t}</button>`).join('');}
+    $('#animeQuality').innerHTML=[[1080,'Лучшее'],[720,'720p'],[480,'480p'],[360,'360p']].map(([v,t])=>`<button type="button" role="radio" data-value="${v}" aria-checked="${v===quality}">${t}</button>`).join('');
+    setText($('#animeSize'),`${РАЗМЕР_СЕРИИ[quality]} за серию. Скачиваются только ближайшие серии, остальные играют прямо с сайта.`);
+    const добавить=$('#addDialogActions [data-add="add"]'); if(добавить)setText(добавить,сколько()===1?'Добавить серию':`Добавить ${штук(сколько(),['серию','серии','серий'])}`);
+  };
+  const ответ=await окноДобавления({title:info.title,sub:`${info.site} · ${штук(серии.length,['серия','серии','серий'])}`,cover:info.cover,body,
+    кнопки:[['cancel','Отмена'],['add','Добавить','primary']],
+    начать:окно=>{
+      рисовать();
+      окно.querySelector('#animeEpisode')?.addEventListener('change',рисовать);
+      окно.querySelector('#animeScope')?.addEventListener('click',e=>{const b=e.target.closest('[data-value]');if(b){scope=b.dataset.value;рисовать();}});
+      окно.querySelector('#animeQuality').addEventListener('click',e=>{const b=e.target.closest('[data-value]');if(b){quality=Number(b.dataset.value);рисовать();}});
+    }});
+  if(ответ!=='add')return null;
+  const [team,translation]=($('#animeTeam')?.value||'|').split('|');
+  return {scope:много?scope:'one',episode:много?$('#animeEpisode').value:undefined,team,translation,quality};
+}
+
+async function добавитьСсылку(url){
+  const info=await api('/api/queue/inspect',{method:'POST',body:JSON.stringify({url})});
+  let запрос={url};
+  if(info.kind==='anime'){const выбор=await выбратьСерии(info);if(!выбор)return null;запрос.anime=выбор;}
+  let result=await api('/api/queue',{method:'POST',body:JSON.stringify(запрос)});
+  // Много видео разом — спрашиваем, прежде чем забить очередь.
+  if(result.ask){
+    const {count,title,single}=result.ask;
+    const ответ=await окноДобавления({title:`Добавить ${штук(count,['видео','видео','видео'])}?`,sub:title?`Плейлист «${title}»`:'Плейлист',
+      body:`<p class="confirm-text">Все ролики встанут в очередь и начнут скачиваться по порядку — сначала ближайшие.</p>`,
+      кнопки:[['cancel','Отмена'],...(single?[['single','Только это видео']]:[]),['all',`Добавить все ${count}`,'primary']]});
+    if(!ответ)return null;
+    result=await api('/api/queue',{method:'POST',body:JSON.stringify({url,confirm:ответ})});
+  }
+  return result;
+}
+
+$('#addForm').addEventListener('submit',async event=>{event.preventDefault();const button=$('#addButton');button.disabled=true;button.textContent='…';try{const result=await добавитьСсылку($('#mediaUrl').value.trim());if(result){$('#mediaUrl').value='';render(result.status);toast(`Добавлено: ${result.added.length}`);}}catch(error){toast(error.message,true);}finally{button.disabled=false;button.textContent='Добавить';}});
+// Перетаскивание в очереди: схватил — строка едет за курсором, соседние
+// плавно расступаются; отпустил — встаёт на место и порядок уходит на сервер.
+// Пока тянем, список не перерисовывается из статуса, иначе строка «выпадет».
+let тяга=null;
+$('#queueList').addEventListener('pointerdown',event=>{
+  if(event.button!==0||тяга)return;
+  const row=event.target.closest('.queue-item');
+  if(!row||event.target.closest('.remove-item')||(ui.status?.queue?.length||0)<2)return;
+  тяга={row,startY:event.clientY,y:event.clientY,started:false};
+});
+function тянуть(){
+  const list=$('#queueList'), т=тяга;
+  const сдвиг=т.y-т.startY+(list.scrollTop-т.scroll);
+  т.to=Math.max(0,Math.min(т.rows.length-1,т.from+Math.round(сдвиг/т.step)));
+  т.row.style.transform=`translateY(${сдвиг}px)`;
+  т.rows.forEach((r,i)=>{if(r===т.row)return;
+    const место=т.from<i&&i<=т.to?-т.step:т.to<=i&&i<т.from?т.step:0;
+    r.style.transform=место?`translateY(${место}px)`:'';});
+}
+addEventListener('pointermove',event=>{
+  if(!тяга)return;
+  тяга.y=event.clientY;
+  if(!тяга.started){
+    if(Math.abs(тяга.y-тяга.startY)<6)return;
+    const list=$('#queueList');
+    тяга.started=true; ui.dragging=true;
+    тяга.rows=[...list.querySelectorAll('.queue-item')]; тяга.from=тяга.to=тяга.rows.indexOf(тяга.row);
+    тяга.step=тяга.row.offsetHeight+(parseFloat(getComputedStyle(list).rowGap)||0); тяга.scroll=list.scrollTop;
+    list.classList.add('sorting'); тяга.row.classList.add('dragging');
+    // У краёв списка прокручиваем сами — иначе длинную очередь не протащить.
+    тяга.timer=setInterval(()=>{if(!тяга?.started)return;const край=list.getBoundingClientRect();
+      const d=тяга.y<край.top+40?-10:тяга.y>край.bottom-40?10:0;if(d){list.scrollTop+=d;тянуть();}},16);
+  }
+  тянуть();
+});
+// Колесо мыши во время перетаскивания: список едет, а курсор стоит — строку
+// пересчитываем на каждую прокрутку, иначе она стояла и потом прыгала.
+$('#queueList').addEventListener('scroll',()=>{if(тяга?.started)тянуть();},{passive:true});
+async function отпустить(){
+  const т=тяга; тяга=null;
+  if(!т?.started)return;
+  clearInterval(т.timer);
+  ui.тянули=true; setTimeout(()=>{ui.тянули=false;},0);
+  const list=$('#queueList');
+  // Сразу ставим строку на новое место в DOM, чтобы не мигнуло до ответа сервера.
+  for(const r of т.rows)r.style.transform='';
+  list.classList.remove('sorting'); т.row.classList.remove('dragging');
+  if(т.to!==т.from){const опора=т.rows[т.to];list.insertBefore(т.row,т.to>т.from?опора.nextSibling:опора);}
+  try{ if(т.to!==т.from){ui.queueSignature=null;render(await api('/api/queue/move',{method:'POST',body:JSON.stringify({id:т.row.dataset.id,to:т.to})}));} }
+  catch(error){toast(error.message,true);}
+  finally{ui.dragging=false;ui.queueSignature=null;if(ui.status)render(ui.status);}
+}
+addEventListener('pointerup',отпустить);
+addEventListener('pointercancel',отпустить);
 $('#queueList').addEventListener('click',async event=>{
+  if(ui.тянули){event.preventDefault();return;}
   if(event.target.closest('[data-pick-local]')){ window.location.href='vrcast://pick-media'; return; }
   const row=event.target.closest('.queue-item'); if(!row)return;
   const id=row.dataset.id;
@@ -1078,12 +1338,54 @@ $('#queueList').addEventListener('click',async event=>{
 // Enter/пробел выбирают трек сами: выбор — настоящая кнопка .queue-pick рядом
 // с кнопкой удаления, а не строка-«кнопка» с вложенной кнопкой внутри.
 $('#clearQueue').addEventListener('click',async()=>{const всего=ui.status?.queue?.length||0;if(всего&&!await подтвердить(`Очистить очередь — ${штук(всего,['ролик','ролика','роликов'])}?`,'Очистить','Список опустеет целиком. Сохранённые списки и скачанные файлы останутся.'))return;try{очиститьЛокальныйПредпросмотр();ui.localNote=null;render(await api('/api/queue',{method:'DELETE'}));}catch(error){toast(error.message,true);}});
-$('#templateSelect').addEventListener('change',event=>{const item=ui.status?.templates?.find(entry=>entry.id===event.target.value);if(item)$('#templateName').value=item.name;$('#loadTemplate').disabled=!item;$('#appendTemplate').disabled=!item;$('#deleteTemplate').disabled=!item;});
-$('#saveTemplate').addEventListener('click',async()=>{const button=$('#saveTemplate');button.disabled=true;try{const result=await api('/api/templates',{method:'POST',body:JSON.stringify({id:$('#templateSelect').value,name:$('#templateName').value})});render(result.status);$('#templateSelect').value=result.id;$('#templateSelect').dispatchEvent(new Event('change'));toast('Список сохранён');}catch(error){toast(error.message,true);}finally{button.disabled=false;}});
-async function loadTemplate(append){const id=$('#templateSelect').value;if(!id)return;try{render(await api(`/api/templates/${encodeURIComponent(id)}/load`,{method:'POST',body:JSON.stringify({append})}));toast(append?'Добавлено в конец списка':'Список открыт');}catch(error){toast(error.message,true);}}
-$('#loadTemplate').addEventListener('click',()=>loadTemplate(false)); $('#appendTemplate').addEventListener('click',()=>loadTemplate(true));
-$('#deleteTemplate').addEventListener('click',async()=>{const id=$('#templateSelect').value;if(!id)return;const список=ui.status?.templates?.find(item=>item.id===id);
-  if(!await подтвердить(`Удалить список «${список?.name||'без названия'}»${список?` — ${штук(Number(список.count)||0,['ролик','ролика','роликов'])}`:''}?`,'Удалить','Текущая очередь не изменится.'))return;try{render(await api(`/api/templates/${encodeURIComponent(id)}`,{method:'DELETE'}));$('#templateName').value='';toast('Сохранённый список удалён');}catch(error){toast(error.message,true);}});
+const ролики=n=>штук(Number(n)||0,['ролик','ролика','роликов']);
+async function сохранитьСписок(id,name){render((await api('/api/templates',{method:'POST',body:JSON.stringify({id,name})})).status);}
+$('#templateSaveForm').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const name=$('#templateName').value.trim(), очередь=ui.status?.queue?.length||0;
+  if(!name){$('#templateName').focus();return toast('Введите название списка',true);}
+  // Совпало имя — это перезапись чужого содержимого, её надо подтвердить.
+  const тот=ui.status?.templates?.find(item=>item.name.trim().toLowerCase()===name.toLowerCase());
+  if(тот&&!await подтвердить(`Список «${тот.name}» уже есть — перезаписать?`,'Перезаписать',`Сейчас в нём ${ролики(тот.count)}. Их заменит текущая очередь — ${ролики(очередь)}.`))return;
+  try{await сохранитьСписок(тот?.id||'',name);$('#templateName').value='';toast(тот?'Список перезаписан':'Список сохранён');}catch(error){toast(error.message,true);}
+});
+$('#templateList').addEventListener('click',async event=>{
+  const button=event.target.closest('[data-t]'), row=event.target.closest('[data-template]'); if(!button||!row)return;
+  const список=ui.status?.templates?.find(item=>item.id===row.dataset.template); if(!список)return;
+  const очередь=ui.status?.queue?.length||0, путь=`/api/templates/${encodeURIComponent(список.id)}`;
+  try{
+    if(button.dataset.t==='open'){
+      if(очередь&&!await подтвердить(`Открыть «${список.name}» вместо текущей очереди?`,'Открыть',`Текущая очередь (${ролики(очередь)}) будет заменена. Если она нужна — сначала сохраните её как список.`))return;
+      render(await api(`${путь}/load`,{method:'POST',body:JSON.stringify({append:false})}));toast(`Открыт список «${список.name}»`);openTemplateMenu(false);
+    }else if(button.dataset.t==='append'){
+      render(await api(`${путь}/load`,{method:'POST',body:JSON.stringify({append:true})}));toast(`В конец очереди добавлено: ${ролики(список.count)}`);
+    }else if(button.dataset.t==='update'){
+      if(!очередь)return toast('Очередь пуста — перезаписывать нечем',true);
+      if(!await подтвердить(`Перезаписать список «${список.name}» текущей очередью?`,'Перезаписать',`Сейчас в списке ${ролики(список.count)}. Их заменит текущая очередь — ${ролики(очередь)}. Отменить это нельзя.`))return;
+      await сохранитьСписок(список.id,список.name);toast('Список перезаписан');
+    }else if(button.dataset.t==='rename'){
+      // Имя правится прямо в строке: Enter — сохранить, Esc — отменить.
+      const место=row.querySelector('.t-title'), поле=document.createElement('input');
+      поле.type='text'; поле.maxLength=80; поле.value=список.name; поле.setAttribute('aria-label','Новое название списка');
+      место.replaceWith(поле); поле.focus(); поле.select();
+      let готово=false;
+      const закончить=async сохранить=>{
+        if(готово)return; готово=true; поле.remove();
+        // Строку надо перерисовать в любом случае: setHtml сравнивает с прошлой
+        // разметкой, и без сброса название так и осталось бы вырезанным.
+        $('#templateList')._html='';
+        const имя=поле.value.trim();
+        if(сохранить&&имя&&имя!==список.name){ try{ render(await api(`${путь}/rename`,{method:'POST',body:JSON.stringify({name:имя})})); toast('Список переименован'); return; }catch(error){ toast(error.message,true); } }
+        if(ui.status)render(ui.status);
+      };
+      поле.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();закончить(true);} if(e.key==='Escape'){e.preventDefault();e.stopPropagation();закончить(false);} });
+      поле.addEventListener('blur',()=>закончить(true));
+    }else if(button.dataset.t==='delete'){
+      if(!await подтвердить(`Удалить список «${список.name}» — ${ролики(список.count)}?`,'Удалить','Текущая очередь и скачанные ролики не изменятся.'))return;
+      render(await api(путь,{method:'DELETE'}));toast('Список удалён');
+    }
+  }catch(error){toast(error.message,true);}
+});
 // Форма добавления: два ясных случая вместо одной анкеты на всё.
 // «Уже настроен» — вставили адрес и ключ, который выдал сервер при установке.
 // «Настроить с нуля» — пароль root, и программа сама всё поставит.
@@ -1200,6 +1502,13 @@ function setWindowHidden(hidden) {
   schedulePoll(hidden?undefined:0);
 }
 document.addEventListener('visibilitychange',()=>setWindowHidden(document.hidden));
+function setWindowBlurred(blurred){
+  if(ui.windowBlurred===blurred)return;
+  ui.windowBlurred=blurred;
+  if(blurred)stopPreview(); else if(ui.status)render(ui.status);
+}
+document.addEventListener('vrcast-blur',()=>setWindowBlurred(true));
+document.addEventListener('vrcast-focus',()=>setWindowBlurred(false));
 document.addEventListener('vrcast-hidden',()=>setWindowHidden(true));
 document.addEventListener('vrcast-shown',()=>setWindowHidden(document.hidden));
 $('#clearCache').addEventListener('click',async()=>{
@@ -1226,12 +1535,32 @@ $('#tunnelProviderSelect').addEventListener('change',async()=>{ui.configEditUnti
 $('#mediaQuality').addEventListener('change',()=>applyQualityLive('queue'));$('#mediaFps').addEventListener('change',()=>applyQualityLive('queue'));
 // Не получилось — кнопка возвращается к тому, что на самом деле стоит на
 // сервере. Раньше она оставалась на новом значении, которого не было.
-$('#speedSelect').addEventListener('click',async()=>{const current=Number($('#speedSelect').dataset.value)||1;
-  const next=SPEED_STEPS[(SPEED_STEPS.indexOf(current)+1)%SPEED_STEPS.length];
-  paintSpeed(next);ui.speedPendingUntil=Date.now()+1500;const ok=await playback('speed',{speed:next});ui.speedPendingUntil=0;paintSpeed(ok?next:(ui.status?.playback?.speed||1));});
-$('#loopSelect').addEventListener('click',async()=>{const current=$('#loopSelect').dataset.value||'once';
-  const next=LOOP_STEPS[(LOOP_STEPS.findIndex(item=>item[0]===current)+1)%LOOP_STEPS.length][0];
-  paintLoop(next);ui.loopPendingUntil=Date.now()+1500;const ok=await playback('loop',{mode:next});ui.loopPendingUntil=0;paintLoop(ok?next:(ui.status?.playback?.loopMode||'once'));});
+// Скорость и повтор — выпадающий список над кнопкой: видно все варианты сразу
+// и выбирается нужный, а не перебирается по кругу.
+function открытьВыбор(кнопка,варианты,текущее,выбрать){
+  закрытьВыбор();
+  const меню=document.createElement('div');
+  меню.className='menu pick-menu'; меню.setAttribute('role','menu');
+  меню.innerHTML=варианты.map(([значение,подпись,значок])=>`<button type="button" role="menuitemradio" aria-checked="${String(значение)===String(текущее)}" data-value="${escapeHtml(String(значение))}">${значок?icon(значок):''}<span>${escapeHtml(подпись)}</span>${icon('check')}</button>`).join('');
+  document.body.append(меню);
+  const место=кнопка.getBoundingClientRect(), размер=меню.getBoundingClientRect();
+  меню.style.left=`${Math.max(8,Math.min(innerWidth-размер.width-8,место.left+место.width/2-размер.width/2))}px`;
+  меню.style.top=`${Math.max(8,место.top-размер.height-8)}px`;
+  кнопка.setAttribute('aria-expanded','true');
+  меню.addEventListener('click',event=>{const пункт=event.target.closest('button[data-value]');if(!пункт)return;закрытьВыбор();выбрать(пункт.dataset.value);});
+  ui.выбор={меню,кнопка};
+  (меню.querySelector('[aria-checked="true"]')||меню.querySelector('button')).focus();
+}
+function закрытьВыбор(){if(!ui.выбор)return;ui.выбор.меню.remove();ui.выбор.кнопка.setAttribute('aria-expanded','false');ui.выбор=null;}
+document.addEventListener('pointerdown',event=>{if(ui.выбор&&!event.composedPath().some(el=>el===ui.выбор.меню||el===ui.выбор.кнопка))закрытьВыбор();},true);
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&ui.выбор){const кнопка=ui.выбор.кнопка;закрытьВыбор();кнопка.focus();}});
+addEventListener('resize',закрытьВыбор);
+$('#speedSelect').addEventListener('click',()=>{if(ui.выбор?.кнопка===$('#speedSelect'))return закрытьВыбор();
+  открытьВыбор($('#speedSelect'),SPEED_STEPS.map(value=>[value,value===1?'1× — обычная':`${String(value).replace('.',',')}×`]),$('#speedSelect').dataset.value,async value=>{
+    const next=Number(value);paintSpeed(next);ui.speedPendingUntil=Date.now()+1500;const ok=await playback('speed',{speed:next});ui.speedPendingUntil=0;paintSpeed(ok?next:(ui.status?.playback?.speed||1));});});
+$('#loopSelect').addEventListener('click',()=>{if(ui.выбор?.кнопка===$('#loopSelect'))return закрытьВыбор();
+  открытьВыбор($('#loopSelect'),LOOP_STEPS.map(([value,значок,подпись])=>[value,подпись,value==='once'?'repeat-off':значок]),$('#loopSelect').dataset.value||'once',async next=>{
+    paintLoop(next);ui.loopPendingUntil=Date.now()+1500;const ok=await playback('loop',{mode:next});ui.loopPendingUntil=0;paintLoop(ok?next:(ui.status?.playback?.loopMode||'once'));});});
 // Сегменты: один клик — одно изменение, без второго выпадающего списка
 // поверх первого. Значение продолжает жить в скрытом select, поэтому весь
 // остальной код (сохранение настроек, восстановление при запуске) не менялся.
@@ -1239,6 +1568,8 @@ function paintSegments(select) {
   const box=document.querySelector(`.seg[data-for="${select.id}"]`);
   if(!box)return;
   for(const button of box.children){const on=String(button.dataset.value===select.value);if(button.getAttribute('aria-checked')!==on)button.setAttribute('aria-checked',on);}
+  // Пояснение выбранного варианта — одной строкой под рядом, а не у каждого.
+  if(select.id==='videoBitrate')setText($('#bitrateHint'),select.selectedOptions[0]?.dataset.hint||'');
 }
 
 function buildSegments() {
@@ -1246,7 +1577,7 @@ function buildSegments() {
     const select=document.getElementById(box.dataset.for);
     if(!select)continue;
     box.innerHTML=[...select.options].map(option=>
-      `<button type="button" role="radio" aria-checked="false" data-value="${escapeHtml(option.value)}">${escapeHtml(option.dataset.short||option.textContent)}</button>`).join('');
+      `<button type="button" role="radio" aria-checked="false" data-value="${escapeHtml(option.value)}"${option.dataset.hint?` title="${escapeHtml(option.dataset.hint)}"`:''}>${escapeHtml(option.dataset.short||option.textContent)}</button>`).join('');
     box.addEventListener('click',event=>{
       const button=event.target.closest('button[data-value]');
       if(!button||button.dataset.value===select.value)return;
@@ -1267,9 +1598,18 @@ function buildSegments() {
 }
 
 function paintVolume(input, output) { const value=Number(input.value); output.value=`${value}%`; input.style.setProperty('--volume',`${value/input.max*100}%`); }
-$('#mediaVolume').addEventListener('input',event=>paintVolume(event.target,$('#mediaVolumeValue')));
+// В эфире громкость меняется прямо во время перетаскивания, а не когда
+// отпустили ползунок. Шлём не чаще раза в 150 мс и только саму громкость.
+function живаяГромкость(отправить){
+  let таймер=null, последнее=0;
+  return value=>{ clearTimeout(таймер); const ждать=Math.max(0,150-(Date.now()-последнее));
+    таймер=setTimeout(()=>{ последнее=Date.now(); отправить(value).catch(()=>{}); },ждать); };
+}
+const громкостьРолика=живаяГромкость(value=>api('/api/playback',{method:'POST',body:JSON.stringify({action:'volume',volume:value})}));
+const громкостьЗахвата=живаяГромкость(value=>api('/api/config',{method:'POST',body:JSON.stringify({captureVolume:value,applyLive:true})}));
+$('#mediaVolume').addEventListener('input',event=>{paintVolume(event.target,$('#mediaVolumeValue'));if(ui.status?.activeKind==='queue'&&!ui.status?.playback?.paused)громкостьРолика(Number(event.target.value)/100);});
 $('#mediaVolume').addEventListener('change',async event=>{if(ui.status?.activeKind==='queue')playback('volume',{volume:Number(event.target.value)/100});else try{render(await saveConfig());}catch(error){toast(error.message,true);}});
-$('#captureVolume').addEventListener('input',event=>paintVolume(event.target,$('#captureVolumeValue')));
+$('#captureVolume').addEventListener('input',event=>{paintVolume(event.target,$('#captureVolumeValue'));if(ui.status?.activeKind==='screen')громкостьЗахвата(Number(event.target.value)/100);});
 // Громкость экрана раньше только рисовалась: в настройки она попадала лишь при
 // следующем пуске, а в идущем эфире не менялась вовсе.
 $('#captureVolume').addEventListener('change',async()=>{
@@ -1277,7 +1617,7 @@ $('#captureVolume').addEventListener('change',async()=>{
   catch(error){ toast(error.message,true); }
 });
 
-async function начатьЭфир(){const button=$('#goLive'),карточка=$('#applyCapture');button.disabled=true;карточка.disabled=true;try{await saveConfig();const тело=ui.source==='queue'&&ui.localPreviewId?JSON.stringify({id:ui.localPreviewId}):undefined;
+async function начатьЭфир(){const button=$('#goLive'),карточка=$('#applyCapture');if(ui.status&&!ui.status.running&&ссылкаНеГотова(ui.status))return toast(ui.status?.delivery?.error||'Ссылка ещё готовится. Дождитесь статуса «Готово».',true);button.disabled=true;карточка.disabled=true;try{await saveConfig();const тело=ui.source==='queue'&&ui.localPreviewId?JSON.stringify({id:ui.localPreviewId}):undefined;
   $('#monitor').classList.remove('source-preview','window-paused');
   if(ui.source==='queue')очиститьЛокальныйПредпросмотр();
   render(await api(`/api/start/${ui.source}`,{method:'POST',body:тело}));ui.localPreviewId='';ui.localNote=null;ui.captureDirty=false;toast(ui.output==='tunnel'?'Запускаю эфир и получаю публичную ссылку':'Эфир запускается');}catch(error){toast(error.message,true);}finally{button.disabled=false;карточка.disabled=false;if(ui.status)render(ui.status);}}
@@ -1298,7 +1638,7 @@ $('#checkUpdate').addEventListener('click',async()=>{
   finally{ кнопка.disabled=false; }
 });
 $('#openLogFolder').addEventListener('click',()=>{window.location.href='vrcast://open-folder';});
-$('#appSoundSettings').addEventListener('click',()=>{window.location.href='vrcast://app-sound';}); $('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
+$('#closeLogs').addEventListener('click',()=>$('#logDialog').close());
 
 // Опрос состояния подстраивается под то, что происходит. Раньше запрос шёл
 // каждые 800 мс круглосуточно, а часы перемотки перерисовывались пять раз
@@ -1379,7 +1719,7 @@ $('#capturePreview').addEventListener('error',()=>{
   ui.frameTimer=setTimeout(()=>{ if(captureFramesWanted())$('#capturePreview').src=`/api/capture-preview?time=${Date.now()}`; },1000);
 });
 
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#closeAction').value=state.config.closeToTray===false?'exit':'tray';paintCloseNote();$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode,false);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#closeAction').value=state.config.closeToTray===false?'exit':'tray';paintCloseNote();$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#muteLocalApp').checked=Boolean(state.config.muteLocalApp);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode,false);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
   ui.windowHidden=document.hidden; document.documentElement.classList.toggle('window-hidden',document.hidden);
   render(state);
   // Опрос запускаем до списка источников: тот идёт через PowerShell и может
@@ -1402,10 +1742,69 @@ function paintPreviewSound(){
   const звук=взять('previewSound')==='1';
   preview.muted=!звук; preview.volume=звук?0.8:0;
   setHtml($('#previewMute'),icon(звук?'sound':'mute'));
-  setTitle($('#previewMute'),звук?'Выключить звук предпросмотра':'Включить звук предпросмотра');
+  setTitle($('#previewMute'),звук?'Выключить звук предпросмотра (картинка снова без задержки)':'Включить звук предпросмотра (картинка отстанет на пару секунд)');
 }
-$('#previewMute').addEventListener('click',()=>{ положить('previewSound',взять('previewSound')==='1'?'0':'1'); paintPreviewSound(); });
+$('#previewMute').addEventListener('click',()=>{
+  положить('previewSound',взять('previewSound')==='1'?'0':'1'); paintPreviewSound();
+  // Звук есть только в HLS-предпросмотре — пересобираем показ под выбор.
+  if(ui.status?.running){ ui.previewUrl=''; startPreview(ui.status); }
+});
 paintPreviewSound();
+
+// ── Живой фон и подсветка плеера ────────────────────────────────────────────
+// Всё по минимуму для видеокарты: пятна фона анимирует CSS (translate/scale),
+// сюда приходит только «энергия» музыки раз в кадр и кадр 32×18 для подсветки
+// десять раз в секунду. Окно свёрнуто или фон выключен — ничего не считается.
+const фон=$('#ambient'), подсветка=$('#playerGlow'), кистьПодсветки=подсветка.getContext('2d',{willReadFrequently:false});
+const фонВключён=()=>взять('ambient')!=='0';
+function paintAmbient(){
+  const вкл=фонВключён();
+  фон.classList.toggle('off',!вкл);
+  $('#ambientToggle').checked=вкл;
+  if(!вкл){ подсветка.classList.remove('on'); фон.style.setProperty('--energy','0'); }
+}
+$('#ambientToggle').addEventListener('change',event=>{ положить('ambient',event.target.checked?'1':'0'); paintAmbient(); });
+paintAmbient();
+
+// Подсветка стоит точно за плеером и чуть шире него.
+function поставитьПодсветку(){
+  const m=$('#monitor'), запас=Math.round(m.offsetWidth*0.05);
+  Object.assign(подсветка.style,{left:`${m.offsetLeft-запас}px`,top:`${m.offsetTop-запас}px`,width:`${m.offsetWidth+запас*2}px`,height:`${m.offsetHeight+запас*2}px`});
+}
+new ResizeObserver(поставитьПодсветку).observe($('#monitor'));
+поставитьПодсветку();
+
+setInterval(()=>{
+  if(!фонВключён()||document.hidden){ подсветка.classList.remove('on'); return; }
+  const картинка=$('#capturePreview');
+  const источник=preview.checkVisibility?.()&&preview.readyState>=2&&preview.videoWidth?preview
+    :картинка.checkVisibility?.()&&картинка.complete&&картинка.naturalWidth?картинка:null;
+  if(!источник){ подсветка.classList.remove('on'); return; }
+  try{ кистьПодсветки.drawImage(источник,0,0,подсветка.width,подсветка.height); подсветка.classList.add('on'); }
+  catch{ подсветка.classList.remove('on'); }
+},100);
+
+// Энергия музыки приходит с сервера: он сам слушает звук эфира (в WebRTC-
+// предпросмотре звука нет — AAC туда не проходит). Подписка есть, только пока
+// фон включён и окно на экране; значение — басы, 0…1, ~20 раз в секунду.
+let энергия=0, цельЭнергии=0, показано=-1, прошлыйКадр=0, поток=null;
+function подпискаЭнергии(){
+  const нужна=фонВключён()&&!document.hidden&&Boolean(ui.status?.running);
+  if(нужна&&!поток){ поток=new EventSource('/api/energy'); поток.onmessage=e=>{ цельЭнергии=Number(e.data)||0; }; }
+  else if(!нужна&&поток){ поток.close(); поток=null; цельЭнергии=0; }
+}
+setInterval(подпискаЭнергии,1000);
+function тикФона(время){
+  requestAnimationFrame(тикФона);
+  if(время-прошлыйКадр<33||document.hidden)return; // ~30 раз в секунду хватает глазу
+  прошлыйКадр=время;
+  // Быстро вспыхивает, плавно гаснет — как индикатор на пульте.
+  энергия=цельЭнергии>энергия?энергия+(цельЭнергии-энергия)*0.6:энергия*0.9;
+  const округл=Math.round(энергия*50)/50;
+  if(округл!==показано){ показано=округл; фон.style.setProperty('--energy',String(округл)); }
+}
+requestAnimationFrame(тикФона);
+document.addEventListener('visibilitychange',()=>{ фон.classList.toggle('still',document.hidden); подпискаЭнергии(); });
 
 // Меню настроек — как у видеосервисов: одна шестерёнка в углу кадра.
 const playerMenu=$('#playerMenu');
@@ -1436,16 +1835,22 @@ function openTemplateMenu(open){
 }
 $('#audienceButton').addEventListener('click',()=>openAudienceMenu());
 $('#templatesButton').addEventListener('click',()=>openTemplateMenu());
-$('#saveTemplateQuick').addEventListener('click',()=>{
+$('#saveTemplateQuick').addEventListener('click',async()=>{
+  const текущий=ui.status?.currentTemplate;
+  // Список открыт — сохраняем в него (прежний вариант уходит в резервную копию).
+  if(текущий){ try{ render(await api('/api/templates/current/save',{method:'POST'})); toast(`Сохранено в «${текущий.name}»`); }catch(error){ toast(error.message,true); } return; }
   openTemplateMenu(true);
-  $('#templateSelect').value=''; $('#templateSelect').dispatchEvent(new Event('change'));
   $('#templateName').value=''; $('#templateName').focus();
 });
 $('#manageServers').addEventListener('click',()=>{ openAudienceMenu(false); открытьНастройки('setNet'); });
+// Путь события берём на момент клика: кнопка внутри меню могла уже исчезнуть
+// (карандаш превращается в поле ввода), и closest() по оторванному элементу
+// решал, что клик был снаружи, — меню закрывалось посреди переименования.
 document.addEventListener('click',event=>{
-  if(!event.target.closest('#playerMenu, #playerSettings'))togglePlayerMenu(false);
-  if(!event.target.closest('#audienceMenu, #audienceButton'))openAudienceMenu(false);
-  if(!event.target.closest('#templateMenu, #templatesButton'))openTemplateMenu(false);
+  const внутри=ids=>event.composedPath().some(node=>ids.includes(node.id));
+  if(!внутри(['playerMenu','playerSettings']))togglePlayerMenu(false);
+  if(!внутри(['audienceMenu','audienceButton']))openAudienceMenu(false);
+  if(!внутри(['templateMenu','templatesButton']))openTemplateMenu(false);
 });
 document.addEventListener('keydown',event=>{ if(event.key==='Escape'){ togglePlayerMenu(false); openAudienceMenu(false); openTemplateMenu(false); } });
 

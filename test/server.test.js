@@ -92,7 +92,7 @@ test('отдаёт интерфейс и отклоняет неправильн
   assert.match(html, /id="captureVolume"/);
   assert.match(html, /id="encoderMode"/);
   assert.match(html, /id="applyCapture"/);
-  assert.match(html, /id="templateSelect"/);
+  assert.match(html, /id="templateList"/);
   assert.match(html, /data-output="tunnel"/);
 
   const response = await fetch(`http://127.0.0.1:${port}/api/queue`, {

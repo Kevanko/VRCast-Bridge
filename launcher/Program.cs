@@ -113,6 +113,7 @@ internal static class Program
         var resources = new Dictionary<string, string>
         {
             ["VRCast.Payload.server.js"] = Path.Combine("src", "server.js"),
+            ["VRCast.Payload.anime.js"] = Path.Combine("src", "anime.js"),
             ["VRCast.Payload.index.html"] = Path.Combine("public", "index.html"),
             ["VRCast.Payload.styles.css"] = Path.Combine("public", "styles.css"),
             ["VRCast.Payload.ui.css"] = Path.Combine("public", "ui.css"),
@@ -544,7 +545,7 @@ internal static class Program
     // живёт у сервера (config.closeToTray), поэтому берём её тем же запросом,
     // что и признак эфира. Сервер не ответил — null: тогда окно просто
     // закрывается, прятать в трей программу без сервера незачем.
-    internal static async Task<(bool Running, bool CloseToTray)?> ReadWindowState()
+    internal static async Task<(bool Running, bool CloseToTray, string? UnsavedList)?> ReadWindowState()
     {
         try
         {
@@ -554,9 +555,25 @@ internal static class Program
             var running = root.TryGetProperty("running", out var value) && value.ValueKind == JsonValueKind.True;
             var toTray = !(root.TryGetProperty("config", out var config)
                 && config.TryGetProperty("closeToTray", out var tray) && tray.ValueKind == JsonValueKind.False);
-            return (running, toTray);
+            // Открытый список с несохранёнными изменениями — спросим при выходе.
+            string? unsaved = null;
+            if (root.TryGetProperty("currentTemplate", out var current) && current.ValueKind == JsonValueKind.Object
+                && current.TryGetProperty("dirty", out var dirty) && dirty.ValueKind == JsonValueKind.True
+                && current.TryGetProperty("name", out var name)) unsaved = name.GetString();
+            return (running, toTray, unsaved);
         }
         catch { return null; }
+    }
+
+    internal static bool SaveCurrentList()
+    {
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            using var content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+            return client.PostAsync($"{AppUrl}api/templates/current/save", content).GetAwaiter().GetResult().IsSuccessStatusCode;
+        }
+        catch { return false; }
     }
 
     internal static void StopBroadcast()
@@ -933,6 +950,9 @@ internal sealed class MainWindow : Form
         // Геометрию применяем после создания окна: до этого WinForms пересчитывает
         // координаты под DPI другого монитора и окно уползает при каждом запуске.
         Shown += (_, _) => RestoreGeometry();
+        // Окно не в фокусе — предпросмотр в нём не нужен (см. previewAllowed).
+        Activated += (_, _) => SendPageEvent("vrcast-focus");
+        Deactivate += (_, _) => SendPageEvent("vrcast-blur");
         FormClosing += OnClosing;
         DragEnter += (_, args) => { if (args.Data?.GetDataPresent(DataFormats.FileDrop) == true) args.Effect = DragDropEffects.Copy; };
         DragDrop += async (_, args) =>
@@ -946,9 +966,11 @@ internal sealed class MainWindow : Form
         };
     }
 
-    private void SendVisibility()
+    private void SendVisibility() =>
+        SendPageEvent(!Visible || WindowState == FormWindowState.Minimized ? "vrcast-hidden" : "vrcast-shown");
+
+    private void SendPageEvent(string name)
     {
-        var name = !Visible || WindowState == FormWindowState.Minimized ? "vrcast-hidden" : "vrcast-shown";
         try { _webView.CoreWebView2?.ExecuteScriptAsync($"document.dispatchEvent(new Event('{name}'))"); } catch { }
     }
 
@@ -1091,18 +1113,6 @@ internal sealed class MainWindow : Form
                     BeginInvoke(() =>
                     {
                         try { Process.Start(new ProcessStartInfo(folder) { UseShellExecute = true }); } catch { }
-                    });
-                    return;
-                }
-                // Страница Windows «Громкость и устройства приложений»: только там
-                // можно отправить звук приложения на другой выход. Своего API для
-                // этого Windows не даёт, зато открыть нужную страницу — не вопрос.
-                if (args.Uri.StartsWith("vrcast://app-sound", StringComparison.OrdinalIgnoreCase))
-                {
-                    args.Cancel = true;
-                    BeginInvoke(() =>
-                    {
-                        try { Process.Start(new ProcessStartInfo("ms-settings:apps-volume") { UseShellExecute = true }); } catch { }
                     });
                     return;
                 }
@@ -1309,7 +1319,7 @@ internal sealed class MainWindow : Form
     {
         if (_closing) return;
         // Task.Run обязателен: прямое ожидание на потоке окна встанет намертво.
-        (bool Running, bool CloseToTray)? состояние = null;
+        (bool Running, bool CloseToTray, string? UnsavedList)? состояние = null;
         try
         {
             var запрос = Task.Run(Program.ReadWindowState);
@@ -1326,6 +1336,19 @@ internal sealed class MainWindow : Form
             return;
         }
         _exitRequested = false;
+        // Открытый список меняли и не сохранили — как любой редактор, спрашиваем.
+        if (состояние?.UnsavedList is { } список)
+        {
+            var ответ = MessageBox.Show(Visible ? this : null,
+                $"В списке «{список}» есть несохранённые изменения.{Environment.NewLine}{Environment.NewLine}Сохранить их перед выходом?",
+                "VRCast Bridge", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (ответ == DialogResult.Cancel) { eventArgs.Cancel = true; return; }
+            if (ответ == DialogResult.Yes && !Task.Run(Program.SaveCurrentList).Wait(TimeSpan.FromSeconds(6)))
+            {
+                eventArgs.Cancel = true;
+                return;
+            }
+        }
         // Эфир идёт прямо сейчас — закрытие оборвёт его у всех, кто смотрит.
         // Спрашиваем, как спрашивает любой редактор про несохранённый файл.
         // Окно может быть спрятано в трее — тогда вопрос без владельца, иначе

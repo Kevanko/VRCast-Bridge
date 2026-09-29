@@ -167,16 +167,16 @@ async function measureStream(videoBitrate, seconds = 7) {
 }
 
 test('снижение битрейта уменьшает поток и остаётся стабильным', async () => {
-  const high = await measureStream(6000);
-  const low = await measureStream(800);
-  console.log(`  [битрейт] 6000k → ${Math.round(high.avgBytes / 1024)} КБ/сегм, макс.пауза ${high.maxGap.toFixed(2)}с; 800k → ${Math.round(low.avgBytes / 1024)} КБ/сегм, макс.пауза ${low.maxGap.toFixed(2)}с; поток меньше в ${(high.avgBytes / low.avgBytes).toFixed(1)}×`);
+  const high = await measureStream(8000);
+  const low = await measureStream(1500);
+  console.log(`  [битрейт] 8000k → ${Math.round(high.avgBytes / 1024)} КБ/сегм, макс.пауза ${high.maxGap.toFixed(2)}с; 1500k → ${Math.round(low.avgBytes / 1024)} КБ/сегм, макс.пауза ${low.maxGap.toFixed(2)}с; поток меньше в ${(high.avgBytes / low.avgBytes).toFixed(1)}×`);
   // Низкий битрейт обязан давать существенно меньше данных: меньше данных на
   // проводе — меньше шансов переполнить канал зрителя, то есть выше стабильность.
   assert.ok(low.avgBytes < high.avgBytes * 0.6,
-    `800k должен давать заметно меньший поток, чем 6000k: ${Math.round(low.avgBytes / 1024)}КБ/сегм против ${Math.round(high.avgBytes / 1024)}КБ/сегм`);
+    `1500k должен давать заметно меньший поток, чем 8000k: ${Math.round(low.avgBytes / 1024)}КБ/сегм против ${Math.round(high.avgBytes / 1024)}КБ/сегм`);
   // И тот и другой поток должны быть непрерывными (стабильность = ровный ритм).
-  assert.ok(high.maxGap < 2.5, `6000k: сегменты должны идти ровно (макс. пауза ${high.maxGap.toFixed(2)}с)`);
-  assert.ok(low.maxGap < 2.5, `800k: сегменты должны идти ровно (макс. пауза ${low.maxGap.toFixed(2)}с)`);
+  assert.ok(high.maxGap < 2.5, `8000k: сегменты должны идти ровно (макс. пауза ${high.maxGap.toFixed(2)}с)`);
+  assert.ok(low.maxGap < 2.5, `1500k: сегменты должны идти ровно (макс. пауза ${low.maxGap.toFixed(2)}с)`);
 });
 
 // ── Восстановление после остановки ───────────────────────────────────────
