@@ -9,7 +9,7 @@ import { connect as netConnect, createServer as netCreateServer } from 'node:net
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
 
-const APP_VERSION = '0.60.0';
+const APP_VERSION = '0.60.1';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -644,17 +644,45 @@ function currentTemplate() {
 }
 
 // Изменён ли открытый список: сравниваем ролики по адресам и порядку.
+const совпадаетСОчередью = template => template.items.length === queue.length
+  && template.items.every((item, index) => item.sourceUrl === queue[index]?.sourceUrl);
+
 function currentTemplateState() {
   const template = currentTemplate();
   if (!template) return null;
-  const dirty = template.items.length !== queue.length || template.items.some((item, index) => item.sourceUrl !== queue[index]?.sourceUrl);
-  return { id: template.id, name: template.name, dirty };
+  return { id: template.id, name: template.name, dirty: !совпадаетСОчередью(template) };
+}
+
+// Очередь уже лежит в каком-то сохранённом списке (слово в слово) — тогда
+// открыть другой можно без вопроса «заменить текущую?»: ничего не потеряется.
+function queueSaved() {
+  return !queue.length || templates.some(совпадаетСОчередью);
 }
 
 function templateSummaries() {
   // Обложка списка — превью первого ролика, у которого оно есть.
   return templates.map(item => ({ id: item.id, name: item.name, count: item.items.length, updatedAt: item.updatedAt,
     cover: String(item.items.find(entry => /^https?:\/\//.test(entry.thumbnail || ''))?.thumbnail || '') }));
+}
+
+function очиститьОчередь() {
+  if (activeKind === 'queue') stopActive();
+  queue = []; resolvedMedia.clear(); mediaFailures.clear(); cacheDeclined.clear(); saveQueue();
+}
+
+// Новый пустой список: один на всех. Второй пустой не нужен — есть первый.
+function createEmptyTemplate(body) {
+  const пустой = templates.find(item => !item.items.length);
+  if (пустой) throw new Error(`Пустой список уже есть — «${пустой.name}». Откройте его и добавляйте видео.`);
+  const name = String(body.name || '').trim().slice(0, 80) || 'Новый список';
+  const now = new Date().toISOString();
+  const created = { id: crypto.randomUUID(), name, items: [], createdAt: now, updatedAt: now,
+    settings: { loopMode: config.loopMode, playbackSpeed: config.playbackSpeed, mediaVolume: config.mediaVolume } };
+  templates.push(created); saveTemplates();
+  очиститьОчередь();
+  saveConfig({ currentTemplateId: created.id });
+  log(`Создан пустой список: ${name}`);
+  return created.id;
 }
 
 function saveQueueTemplate(body) {
@@ -680,6 +708,14 @@ function applyQueueTemplate(id, append = false) {
   if (!template) throw new Error('Шаблон не найден.');
   const restored = template.items.map(item => normalizeQueueItem(item, true)).filter(Boolean);
   fillMissingInfo(restored).catch(() => {});
+  // Пустой список — это «начать с чистого листа»: очередь очищается, как по
+  // кнопке «Очистить», а список становится открытым, чтобы в него сохранять.
+  if (!template.items.length) {
+    if (append) return;
+    очиститьОчередь();
+    saveConfig({ currentTemplateId: template.id });
+    return;
+  }
   if (!restored.length) throw new Error('В шаблоне не осталось доступных медиафайлов.');
   if (append) {
     // Добавление шаблона не должно менять уже играющий трек и его настройки.
@@ -2118,7 +2154,7 @@ function status(withLogs = true) {
     : config.outputMode === 'tunnel' ? (tunnelState === 'error' || tunnelServes === false ? 'failed' : tunnelUrl ? 'verifying' : 'preparing')
     : config.outputMode === 'remote' ? (remoteReachable === false ? 'failed' : 'preparing') : 'preparing';
   return {
-    appVersion: APP_VERSION, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(), currentTemplate: currentTemplateState(),
+    appVersion: APP_VERSION, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(), currentTemplate: currentTemplateState(), queueSaved: queueSaved(),
     progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
@@ -3830,8 +3866,8 @@ function writePcr(b, at, value) {
 // Режет поток продюсера ровно по 188-байтным пакетам и сдвигает его метки.
 // state.target — время (с), с которого продюсер начал; известно с первого пакета.
 // ── Энергия музыки для живого фона ──────────────────────────────────────────
-// Маленький ffmpeg слушает только звук эфира: басы (до 180 Гц), моно 4 кГц —
-// меньше процента процессора. Громкость басов 20 раз в секунду уходит окнам,
+// Маленький ffmpeg слушает только звук эфира: моно 4 кГц —
+// меньше процента процессора. Громкость 20 раз в секунду уходит окнам,
 // подписанным на /api/energy. Никто не слушает или эфира нет — процесса нет.
 // Кормится тем же потоком, что уходит в эфир; не успевает — куски пропускаются,
 // эфир от этого не ждёт никогда.
@@ -3846,7 +3882,7 @@ function кормитьЭнергию(chunk) {
 function запуститьЭнергию() {
   const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-probesize', '500000', '-analyzeduration', '500000',
     '-f', 'mpegts', '-i', 'pipe:0', '-map', '0:a:0?', '-vn',
-    '-af', 'lowpass=f=180,aresample=4000', '-ac', '1', '-f', 's16le', 'pipe:1'], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+    '-af', 'aresample=4000', '-ac', '1', '-f', 's16le', 'pipe:1'], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
   энергияFfmpeg = child;
   child.stdin.on('error', () => {});
   let хвост = Buffer.alloc(0);
@@ -3857,9 +3893,10 @@ function запуститьЭнергию() {
       let сумма = 0;
       for (let i = 0; i < ОКНО; i += 2) { const x = хвост.readInt16LE(i); сумма += x * x; }
       хвост = хвост.subarray(ОКНО);
-      // −50…−10 дБ → 0…1: тишина ноль, плотный бас под единицу.
+      // Громкость всего трека (до 2 кГц), −48…−12 дБ → 0…1: фон следует за
+      // музыкой целиком, а не мигает на каждый удар бочки.
       const дб = 10 * Math.log10(сумма / 200 / 1073741824 + 1e-12);
-      const уровень = Math.max(0, Math.min(1, (дб + 50) / 40)).toFixed(2);
+      const уровень = Math.max(0, Math.min(1, (дб + 48) / 36)).toFixed(2);
       for (const res of слушателиЭнергии) res.write(`data: ${уровень}\n\n`);
     }
   });
@@ -6229,6 +6266,10 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req); const id = saveQueueTemplate(body);
       return json(res, 201, { id, status: status() });
     }
+    if (req.method === 'POST' && url.pathname === '/api/templates/empty') {
+      createEmptyTemplate(await readBody(req));
+      return json(res, 200, status());
+    }
     if (req.method === 'POST' && url.pathname === '/api/templates/current/save') {
       // «Сохранить» в открытый список — и из окна, и из вопроса при выходе.
       const template = currentTemplate();
@@ -6288,7 +6329,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, status());
     }
     if (req.method === 'DELETE' && url.pathname === '/api/queue') {
-      if (activeKind === 'queue') stopActive(); queue = []; resolvedMedia.clear(); mediaFailures.clear(); cacheDeclined.clear(); saveQueue();
+      очиститьОчередь();
       // Очистили очередь — дальше собирается новый список, а не правится старый.
       saveConfig({ currentTemplateId: '' });
       return json(res, 200, status());
