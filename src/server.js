@@ -1,14 +1,15 @@
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { availableParallelism, constants as osConstants, networkInterfaces, setPriority } from 'node:os';
 import { basename, dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
-import { connect as netConnect } from 'node:net';
+import { connect as netConnect, createServer as netCreateServer } from 'node:net';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
+import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
 
-const APP_VERSION = '0.54.18';
+const APP_VERSION = '0.60.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -88,6 +89,16 @@ const defaults = {
   regionWidth: 1280, regionHeight: 720, audioMode: 'system', captureAudioDevice: '',
   audioOutputId: '', audioProcessId: '', loopMode: 'once', playbackSpeed: 1,
   captureVolume: 1.5, mediaVolume: 1, mediaQuality: '720p', mediaFps: 60, localAppVolume: 1,
+  muteLocalApp: false,
+  // Адрес сетевой карты, с которой поток уходит на свой сервер ('' — как
+  // решит система). Выбирает сам человек в настройках: так поток идёт мимо VPN.
+  remoteBindAddress: '',
+  // Какой сохранённый список сейчас открыт в очереди: «Сохранить» обновляет
+  // его, а при выходе с изменениями программа спрашивает, сохранить ли их.
+  currentTemplateId: '',
+  // Куда «Не слышать у себя» уводит звук приложения. Пусто — рекомендованный
+  // беззвучный выход (Steam Streaming, VB-CABLE, Voicemeeter).
+  muteDevice: '',
   cacheRoot: '',
   videoBitrate: 0,
   autoQuality: true,
@@ -100,8 +111,18 @@ const defaults = {
   closeToTray: true,
 };
 
+// Битрейт — только из готовых уровней; старые значения (1000, 1800…) — к ближайшему.
+const BITRATE_LEVELS = [0, 1500, 2500, 4500, 8000];
+function ближайшийБитрейт(value) {
+  const n = Number(value) || 0;
+  return n ? BITRATE_LEVELS.slice(1).reduce((a, b) => Math.abs(b - n) < Math.abs(a - n) ? b : a) : 0;
+}
+
 function loadConfig() {
-  try { return { ...defaults, ...JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) }; }
+  try {
+    const saved = { ...defaults, ...JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) };
+    return { ...saved, videoBitrate: ближайшийБитрейт(saved.videoBitrate) };
+  }
   catch { return { ...defaults }; }
 }
 
@@ -113,11 +134,14 @@ let templates = loadTemplates();
 let activeProcess = null;
 let activeAuxProcess = null;
 let activeWindowProcess = null;
+let activeFilterControl = null;
+let ffmpegHasZmq = false;
 let relayProcess = null;
 let standbyProcess = null;
 let pauseFrameProcess = null;
 let relayStartedAt = 0;
 let relayProfile = null;
+let relayBitrateKbps = 0;
 let mediaMtxProcess = null;
 let mediaMtxFailures = 0;
 let mediaMtxLastError = '';
@@ -140,7 +164,21 @@ let pinggyStarted = false;
 // получения адреса, и Pinggy рапортовал «работает», а в VRChat было пусто.
 let tunnelServes = null;
 let tunnelVerifyTimer = null;
-let lhrKnownKey = '';
+let tunnelMetrics = null;
+// Сколько видео реально пролезает через бесплатный туннель (кбит/с). Меряется
+// один раз, пока эфира нет: бесплатные каналы режут скорость до 0,5–1 Мбит/с,
+// и поток на 2–5 Мбит/с через них не смотрится вообще — сегмент в 1 с грузился
+// 3 с. Под замер подбираем битрейт и разрешение: картинка проще, зато без пауз.
+let tunnelBudgetKbps = 0;
+// Проверяется раз в 30 с: VPN включают и выключают на ходу.
+let vpnInterface = '';
+// Как РЕАЛЬНО идёт поток при включённом VPN: 'direct' — правило пускает его
+// мимо (DIRECT), 'vpn' — через прокси, '' — не узнать. Спрашиваем у самого
+// mihomo/Clash (только чтение списка соединений): адаптер VPN есть в системе
+// всегда, и по нему одному программа писала «через VPN» даже при DIRECT.
+let vpnRoute = '';
+let tunnelSpeedMbps = 0;
+const SPEEDTEST = crypto.randomBytes(2 * 1024 * 1024);
 let activeKind = null;
 let currentId = null;
 let currentStartedAt = null;
@@ -177,6 +215,7 @@ let windowCaptureState = null;
 let audioLevelDb = -96;
 let audioSamples = 0;
 let audioSquares = 0;
+let activeAudioStartedAt = 0;
 let logLines = [];
 const resolvedMedia = new Map();
 const mediaCacheJobs = new Map();
@@ -241,21 +280,20 @@ function toolAvailable(name, versionArgs = ['--version']) {
 // из них занять все ядра — продюсер не успевает к реальному времени, и зритель
 // видит фриз. Поэтому всё, через что проходит поток (сам сервер: он
 // прокачивает поток через свой event loop; продюсеры, релей, RTSP-пушеры,
-// MediaMTX, туннель, помощники звука и окна), идёт на ступень выше обычного.
-// Именно ABOVE_NORMAL, а не HIGH: работа эфира ограничена темпом реального
-// времени (-re), лишнего он не берёт, и ступени выше NORMAL хватает, чтобы
-// игра, браузер и сканер его не вытесняли. HIGH же обгоняет и системные
-// обычные потоки, и при кодировании на процессоре (libx264 занимает все ядра)
-// душил бы саму игру — у человека проседал бы VRChat ради стрима из VRChat.
-// REALTIME не трогаем вовсе: он способен заморозить ввод и драйверы.
+// MediaMTX, туннель, помощники звука и окна), идёт с HIGH. Работа эфира
+// ограничена темпом реального времени, лишнего он не берёт, поэтому HIGH не
+// отнимает у игры больше, чем эфиру нужно, — но под нагрузкой эфир всегда
+// получает процессор первым. Исключение — кодирование на процессоре (ниже).
 // Фон (загрузки yt-dlp, превью, ffprobe, сборка для Unity, опросы PowerShell,
 // распаковка компонентов) — ступенью ниже обычного: он не срочный и не должен
 // отнимать процессор у эфира и игры. Не LOW: под полной нагрузкой игры он бы
 // почти не получал времени, и следующий трек не успевал бы скачаться.
-// Windows не наследует ABOVE_NORMAL дочерним процессам, поэтому приоритет
-// ставится каждому процессу сразу после запуска (BELOW_NORMAL наследуется —
-// ffmpeg, которого yt-dlp зовёт для склейки, тоже окажется в фоне).
-const ПРИОРИТЕТ_ЭФИРА = osConstants.priority.PRIORITY_ABOVE_NORMAL;
+// Windows не наследует HIGH дочерним процессам, поэтому приоритет ставится
+// каждому процессу сразу после запуска (BELOW_NORMAL наследуется — ffmpeg,
+// которого yt-dlp зовёт для склейки, тоже окажется в фоне).
+// Не HIGHEST: libuv превращает его в REALTIME_PRIORITY_CLASS, а тот под
+// админом замораживает мышь, звук и драйверы.
+const ПРИОРИТЕТ_ЭФИРА = osConstants.priority.PRIORITY_HIGH;
 const ПРИОРИТЕТ_ФОНА = osConstants.priority.PRIORITY_BELOW_NORMAL;
 
 function setChildPriority(child, priority) {
@@ -587,8 +625,36 @@ function saveTemplates() {
   writeJsonAtomic(TEMPLATES_FILE, templates);
 }
 
+// Перед перезаписью или удалением список откладывается в копию: одна
+// неверная кнопка уже стоила списка на 170 клипов, вернуть его было не из чего.
+// Хранятся 30 последних копий.
+const TEMPLATE_BACKUP_DIR = join(DATA_DIR, 'templates-backup');
+function backupTemplate(template) {
+  try {
+    mkdirSync(TEMPLATE_BACKUP_DIR, { recursive: true });
+    const имя = String(template.name || 'список').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 60);
+    writeFileSync(join(TEMPLATE_BACKUP_DIR, `${new Date().toISOString().replace(/[:.]/g, '-')} ${имя}.json`), JSON.stringify(template, null, 2));
+    const копии = readdirSync(TEMPLATE_BACKUP_DIR).filter(name => name.endsWith('.json')).sort();
+    for (const лишняя of копии.slice(0, Math.max(0, копии.length - 30))) rmSync(join(TEMPLATE_BACKUP_DIR, лишняя), { force: true });
+  } catch (error) { log(`Копия списка не сохранилась: ${error.message}`); }
+}
+
+function currentTemplate() {
+  return config.currentTemplateId ? templates.find(item => item.id === config.currentTemplateId) || null : null;
+}
+
+// Изменён ли открытый список: сравниваем ролики по адресам и порядку.
+function currentTemplateState() {
+  const template = currentTemplate();
+  if (!template) return null;
+  const dirty = template.items.length !== queue.length || template.items.some((item, index) => item.sourceUrl !== queue[index]?.sourceUrl);
+  return { id: template.id, name: template.name, dirty };
+}
+
 function templateSummaries() {
-  return templates.map(item => ({ id: item.id, name: item.name, count: item.items.length, updatedAt: item.updatedAt }));
+  // Обложка списка — превью первого ролика, у которого оно есть.
+  return templates.map(item => ({ id: item.id, name: item.name, count: item.items.length, updatedAt: item.updatedAt,
+    cover: String(item.items.find(entry => /^https?:\/\//.test(entry.thumbnail || ''))?.thumbnail || '') }));
 }
 
 function saveQueueTemplate(body) {
@@ -599,13 +665,14 @@ function saveQueueTemplate(body) {
   const now = new Date().toISOString();
   const snapshot = queue.map(item => ({ ...item }));
   if (existing) {
+    backupTemplate(existing);
     existing.name = name; existing.items = snapshot; existing.updatedAt = now;
     existing.settings = { loopMode: config.loopMode, playbackSpeed: config.playbackSpeed, mediaVolume: config.mediaVolume };
-    saveTemplates(); log(`Шаблон обновлён: ${name}`); return existing.id;
+    saveTemplates(); saveConfig({ currentTemplateId: existing.id }); log(`Шаблон обновлён: ${name}`); return existing.id;
   }
   const created = { id: crypto.randomUUID(), name, items: snapshot, createdAt: now, updatedAt: now,
     settings: { loopMode: config.loopMode, playbackSpeed: config.playbackSpeed, mediaVolume: config.mediaVolume } };
-  templates.push(created); saveTemplates(); log(`Шаблон сохранён: ${name}`); return created.id;
+  templates.push(created); saveTemplates(); saveConfig({ currentTemplateId: created.id }); log(`Шаблон сохранён: ${name}`); return created.id;
 }
 
 function applyQueueTemplate(id, append = false) {
@@ -614,10 +681,33 @@ function applyQueueTemplate(id, append = false) {
   const restored = template.items.map(item => normalizeQueueItem(item, true)).filter(Boolean);
   fillMissingInfo(restored).catch(() => {});
   if (!restored.length) throw new Error('В шаблоне не осталось доступных медиафайлов.');
-  if (activeKind === 'queue') stopActive();
-  queue = append ? [...queue, ...restored].slice(0, 500) : restored;
+  if (append) {
+    // Добавление шаблона не должно менять уже играющий трек и его настройки.
+    queue = [...queue, ...restored].slice(0, 500);
+  } else if (activeKind === 'queue' && currentId) {
+    // Загрузка шаблона во время эфира раньше вызывала stopActive(): RTSP/HLS
+    // обрывался, а VRChat нередко уже не возвращался без Resync. Оставляем
+    // текущий producer жить. Если этот трек есть в шаблоне — продолжаем с его
+    // позиции; если нет — даём ему доиграть и затем переходим к шаблону.
+    const playing = queue.find(item => item.id === currentId);
+    let nextIndex = restored.findIndex(item => item.id === currentId || (playing && item.sourceUrl === playing.sourceUrl));
+    if (nextIndex >= 0) {
+      queue = restored;
+      currentId = queue[nextIndex].id;
+      queueIndex = nextIndex;
+    } else {
+      queue = [playing, ...restored].filter(Boolean).slice(0, 500);
+      queueIndex = 0;
+    }
+  } else {
+    queue = restored;
+  }
   saveQueue();
-  saveConfig(template.settings);
+  // Настройки шаблона применяем только в покое. В живом эфире смена скорости
+  // или громкости должна быть явным действием, а append вообще не должен
+  // незаметно менять звучание.
+  if (!append && activeKind !== 'queue') saveConfig(template.settings);
+  if (!append) saveConfig({ currentTemplateId: template.id });
   for (const item of restored) if (item.local && item.hasVideo && !item.thumbnail) generateThumbnail(item);
   log(`${append ? 'Добавлен' : 'Загружен'} шаблон: ${template.name}`);
 }
@@ -701,7 +791,7 @@ function stopPublicTunnel() {
   tunnelDeadlineTimer = null;
   tunnelFallbackTimer = null;
   if (tunnelVerifyTimer) clearInterval(tunnelVerifyTimer);
-  tunnelVerifyTimer = null; tunnelServes = null;
+  tunnelVerifyTimer = null; tunnelServes = null; tunnelMetrics = null; tunnelBudgetKbps = 0;
   tunnelProcess = null; tunnelCandidates = new Set(); tunnelUrl = ''; tunnelState = 'idle'; tunnelError = ''; tunnelProvider = '';
   for (const child of children) child.kill('SIGTERM');
   stopPinggyDaemon();
@@ -713,14 +803,14 @@ function activatePublicTunnel(child, provider, url) {
   tunnelFallbackTimer = null;
   if (tunnelDeadlineTimer) clearTimeout(tunnelDeadlineTimer);
   tunnelDeadlineTimer = null;
-  tunnelProcess = child; tunnelProvider = provider; tunnelUrl = url.replace(/\/$/, ''); tunnelState = 'ready'; tunnelError = '';
+  tunnelProcess = child; tunnelProvider = provider; tunnelUrl = url.replace(/\/$/, ''); tunnelState = 'verifying'; tunnelError = '';
   for (const candidate of tunnelCandidates) if (candidate !== child) candidate.kill('SIGTERM');
   tunnelCandidates = new Set([child]);
   if (provider === 'Cloudflare') setTimeout(stopPinggyDaemon, 500);
   log(`Публичная ссылка · ${provider} — проверяю, что она реально отдаёт поток…`);
   // Адрес получен, но это ещё не значит, что по нему играет: проверяем сами,
   // как это делает плеер, и перепроверяем — заглушка может появиться и позже.
-  tunnelServes = null;
+  tunnelServes = null; tunnelVerifyFails = 0;
   if (tunnelVerifyTimer) clearInterval(tunnelVerifyTimer);
   setTimeout(verifyTunnelServes, 2500);
   tunnelVerifyTimer = setInterval(verifyTunnelServes, 30000);
@@ -731,38 +821,107 @@ function activatePublicTunnel(child, provider, url) {
 // сам туннель. Настоящий поток начинается с #EXTM3U; страница-предупреждение
 // Pinggy или ошибка сети — это HTML или не-200, и тогда честно говорим, что
 // ссылка для VRChat не годится, вместо ложного «готово».
+let tunnelVerifyFails = 0;
+let tunnelVerifyBusy = false;
 async function verifyTunnelServes() {
   const url = tunnelUrl, провайдер = tunnelProvider;
-  if (!url || config.outputMode !== 'tunnel') return;
+  if (!url || config.outputMode !== 'tunnel' || tunnelVerifyBusy) return;
+  tunnelVerifyBusy = true;
+  // Один сбой у уже проверенной ссылки — чаще джиттер туннеля, чем смерть:
+  // не прячем адрес и не пугаем «не отдаёт поток» до второго сбоя подряд.
+  const сбой = () => ++tunnelVerifyFails < 2 && tunnelServes === true;
   try {
     const ответ = await fetch(`${url}/stream/live.m3u8`, { redirect: 'follow',
       signal: AbortSignal.timeout(9000), headers: { 'User-Agent': 'LibVLC/3.0 VRCast' } });
-    const текст = (await ответ.text()).slice(0, 400);
+    const текст = await ответ.text();
     if (tunnelUrl !== url) return;
     if (ответ.ok && /#EXTM3U/.test(текст)) {
+      // Одного плейлиста мало: бесплатный туннель может вернуть m3u8, а сегменты
+      // душить или отдавать настолько медленно, что смотреть физически нельзя.
+      // Забираем последний сегмент и показываем фактическую скорость/возраст.
+      const строки = текст.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+      const media = [...строки].reverse().find(line => !line.startsWith('#') && /\.ts(?:\?|$)/i.test(line));
+      if (!media) throw new Error('в плейлисте пока нет сегмента');
+      const segmentUrl = new URL(media, `${url}/stream/live.m3u8`).toString();
+      const started = Date.now();
+      const segmentResponse = await fetch(segmentUrl, { redirect: 'follow', signal: AbortSignal.timeout(9000),
+        headers: { 'User-Agent': 'LibVLC/3.0 VRCast' } });
+      const segment = await segmentResponse.arrayBuffer();
+      if (!segmentResponse.ok || segment.byteLength < 188) throw new Error(`сегмент не отдался (${segmentResponse.status})`);
+      const elapsedMs = Math.max(1, Date.now() - started);
+      const pdt = [...строки].reverse().find(line => line.startsWith('#EXT-X-PROGRAM-DATE-TIME:'));
+      const edgeMs = pdt ? Date.parse(pdt.slice('#EXT-X-PROGRAM-DATE-TIME:'.length)) : NaN;
+      tunnelMetrics = { checkedAt: Date.now(), segmentMs: elapsedMs,
+        throughputMbps: tunnelBudgetKbps ? tunnelSpeedMbps : null,
+        // Свежесть края плюс отступ EXT-X-START для туннеля: плеер стартует не
+        // с края, а на столько позади. Буфер самого плеера сверху.
+        audienceLatencySec: Number.isFinite(edgeMs) ? Number(Math.max(0, (Date.now() - edgeMs) / 1000 + TUNNEL_START_OFFSET).toFixed(1)) : null,
+        // Верхняя граница: плеер VRChat на Windows (Media Foundation) часто
+        // начинает не с края, а от начала окна плейлиста. Замер пользователя:
+        // при окне 12 с показывали 3–4 с, а реально было 8–9.
+        audienceLatencyMaxSec: Number.isFinite(edgeMs) ? Number(Math.max(0, (Date.now() - edgeMs) / 1000 + TUNNEL_WINDOW + elapsedMs / 1000).toFixed(1)) : null };
+      if (!tunnelBudgetKbps && !activeKind) {
+        const { ttfbMs, rawKbps: kbps } = await measureTunnelKbps(url);
+        if (tunnelUrl !== url) return;
+        // Секундный сегмент должен приходить к зрителю за полсекунды вместе с
+        // задержкой ответа — иначе плеер подвисает (замер Pinggy из Латвии: на
+        // 60% канала сегмент шёл 0,84–0,97 с). Потолок 1,8 Мбит/с: канал со
+        // стороны программы (21 Мбит/с) и у зрителя (~3,5) у бесплатных
+        // туннелей разные — зрителя они режут отдельно, а его отсюда не измерить.
+        // Штраф за задержку ответа (было до ×0,15) ронял поток в 300 кбит/с —
+        // картинка кашей при том, что зрители тянули больше. Теперь 60% замера.
+        // Потолок 8 Мбит/с — максимум качества (1080p/60). Ниже по замеру —
+        // 60% канала: остальное запас на рывки туннеля.
+        tunnelBudgetKbps = Math.max(800, Math.min(8000, Math.round(kbps * 0.6 - 128)));
+        tunnelSpeedMbps = tunnelMetrics.throughputMbps = Number((kbps / 1000).toFixed(2));
+        запомнитьСкоростьТуннеля(ключТуннеля(провайдер), kbps);
+        const p = streamProfile('queue');
+        log(`Скорость публичной ссылки ~${(kbps / 1000).toFixed(1)} Мбит/с, ответ ${ttfbMs} мс — эфир через неё пойдёт в ${p.quality}/${p.fps}, ${p.bitrateKbps} кбит/с`);
+      }
       if (tunnelServes !== true) log(`Публичная ссылка готова · ${провайдер} — реально отдаёт поток, можно отправлять друзьям`);
-      tunnelServes = true; tunnelError = '';
+      tunnelServes = true; tunnelState = 'ready'; tunnelError = ''; tunnelVerifyFails = 0;
       return;
     }
+    if (сбой()) return;
     const html = /<!doctype|<html/i.test(текст);
-    tunnelServes = false;
+    tunnelServes = false; tunnelState = 'error'; tunnelMetrics = null;
     tunnelError = провайдер === 'Pinggy'
       ? 'Pinggy показывает страницу-предупреждение вместо потока — в VRChat не заиграет. Выберите Cloudflare или свой сервер (его ссылка постоянная и без заглушек).'
       : html ? `${провайдер} отдаёт страницу, а не поток — для VRChat не годится. Смените туннель или возьмите свой сервер.`
       : `${провайдер}: ссылка не отдаёт поток (ответ ${ответ.status}). Смените туннель или возьмите свой сервер.`;
     log(`Публичная ссылка не отдаёт поток · ${tunnelError}`);
   } catch (error) {
-    if (tunnelUrl !== url) return;
-    tunnelServes = false;
+    if (tunnelUrl !== url || сбой()) return;
+    tunnelServes = false; tunnelState = 'error'; tunnelMetrics = null;
     tunnelError = `${провайдер}: публичная ссылка не открывается (${String(error.message || error).slice(0, 80)}). Сеть блокирует туннель — смените его или возьмите свой сервер.`;
     log(`Публичная ссылка не открывается · ${tunnelError}`);
+  } finally {
+    tunnelVerifyBusy = false;
+    // Пока ссылка не подтверждена, проверяем часто: адрес Cloudflare нередко
+    // начинает резолвиться через несколько секунд, и ждать 30 с незачем.
+    if (tunnelUrl === url && tunnelServes !== true) setTimeout(verifyTunnelServes, 4000).unref?.();
   }
+}
+
+// Качаем тестовый блок через сам туннель столько, сколько успеем за 6 с.
+// Медленный канал не ждём до конца: скорость видна и по части.
+// Отдельно меряем задержку ответа и чистую скорость: плеер качает много
+// маленьких сегментов, и на каждом теряется время до первого байта.
+async function measureTunnelKbps(url) {
+  const started = Date.now(); let bytes = 0, first = 0;
+  try {
+    const ответ = await fetch(`${url}/stream/speedtest.bin?${started}`, { signal: AbortSignal.timeout(6000),
+      headers: { 'User-Agent': 'LibVLC/3.0 VRCast' } });
+    for await (const chunk of ответ.body) { first ||= Date.now(); bytes += chunk.length; }
+  } catch {}
+  const ttfbMs = (first || Date.now()) - started;
+  return { ttfbMs, rawKbps: bytes * 8 / Math.max(1, Date.now() - (first || started)) };
 }
 
 // Сообщение о неудаче с учётом выбора: если человек сам указал провайдера,
 // честно называем его — «в вашей сети он недоступен», а не общая фраза.
 function tunnelFailMessage() {
-  const имя = { cloudflare: 'Cloudflare', pinggy: 'Pinggy', localhostrun: 'localhost.run' }[config.tunnelProvider];
+  const имя = ТУННЕЛИ[config.tunnelProvider]?.name;
   return имя
     ? `«${имя}» не отвечает — в вашей сети он, похоже, недоступен. Выберите «Авто» или другой туннель.`
     : 'Не удалось подключить ни один публичный канал. Отключите VPN/фильтр или выберите другой туннель.';
@@ -793,67 +952,138 @@ function trackTunnelChild(child, provider) {
   return child;
 }
 
-function startCloudflareCandidate() {
-  const child = trackTunnelChild(spawn(CLOUDFLARED(), ['tunnel', '--no-autoupdate', '--protocol', 'http2', '--url', `http://127.0.0.1:${PORT}`], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }), 'Cloudflare');
-  let pending = '', candidateUrl = '', announced = false;
-  const inspect = chunk => {
-    pending = (pending + String(chunk)).slice(-16000);
-    candidateUrl ||= pending.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i)?.[0] || '';
-    if (candidateUrl && !announced) { announced = true; log('Cloudflare выдал адрес, устанавливаю медиасоединение…'); }
-    if (candidateUrl && /Registered tunnel connection/i.test(pending)) activatePublicTunnel(child, 'Cloudflare', candidateUrl);
-    const errorLine = String(chunk).split(/\r?\n/).find(line => /\bERR\b/.test(line));
-    if (errorLine) log(`Cloudflare: ${errorLine.trim().slice(0, 300)}`);
-  };
-  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8'); child.stdout.on('data', inspect); child.stderr.on('data', inspect);
+// ── Сервисы быстрой ссылки ───────────────────────────────────────────────────
+// Все бесплатные и без регистрации. SSH-сервисы (localhost.run, Serveo) не
+// требуют своего бинарника — хватает plink, который у нас уже есть.
+// Замер 29.09.2026 за VPN: Cloudflare рвётся на узлах 7844 (ECONNRESET), а с
+// физической карты подключается за 130 мс — поэтому, если в настройках выбрана
+// сетевая карта, все сервисы идут через неё мимо TUN.
+const ТУННЕЛИ = {
+  cloudflare: { name: 'Cloudflare', url: /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i },
+  localhostrun: { name: 'localhost.run', url: /https:\/\/[a-z0-9-]+\.lhr\.life/i, ssh: 'localhost.run' },
+  serveo: { name: 'Serveo', url: /https:\/\/[a-z0-9.-]+\.serveousercontent\.com/i, ssh: 'serveo.net' },
+  pinggy: { name: 'Pinggy', url: /https:\/\/[a-z0-9-]+\.run\.pinggy-free\.link/i },
+};
+const ключТуннеля = имя => Object.keys(ТУННЕЛИ).find(ключ => ТУННЕЛИ[ключ].name === имя) || '';
+const туннельДоступен = ключ => ключ === 'cloudflare' ? Boolean(tools.cloudflared) : ключ === 'pinggy' ? Boolean(tools.pinggy) : Boolean(PLINK());
+
+// Ключ SSH-сервера узнаём первым подключением и держим до перезапуска.
+const sshКлючи = new Map();
+async function sshКлюч(host, port) {
+  if (sshКлючи.has(host)) return sshКлючи.get(host);
+  const проба = await spawnCollect(PLINK(), ['-ssh', '-batch', '-P', String(port), `nokey@${port === 22 ? host : '127.0.0.1'}`, 'exit'], 20000);
+  const ключ = `${проба.stdout || ''}${проба.stderr || ''}`.match(/SHA256:[A-Za-z0-9+/=]+/)?.[0] || '';
+  if (ключ) sshКлючи.set(host, ключ);
+  return ключ;
 }
 
-function startPinggyCandidate() {
-  pinggyStarted = true;
-  const child = trackTunnelChild(spawn(PINGGY(), ['--noTui', '-l', `http://127.0.0.1:${PORT}`], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: pinggyEnvironment() }), 'Pinggy');
-  let pending = '';
-  const inspect = chunk => {
-    pending = (pending + String(chunk)).slice(-16000);
-    const match = pending.match(/https:\/\/[a-z0-9-]+\.run\.pinggy-free\.link/i);
-    if (match) activatePublicTunnel(child, 'Pinggy', match[0]);
-  };
-  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8'); child.stdout.on('data', inspect); child.stderr.on('data', inspect);
+// Узлы Cloudflare по настоящему DNS: с выбранной карты cloudflared не должен
+// идти на подставные адреса mihomo.
+async function узлыCloudflare() {
+  const цели = (await dohA('_v2-origintunneld._tcp.argotunnel.com', 'SRV').catch(() => []))
+    .map(запись => запись.split(' ').pop().replace(/\.$/, ''));
+  const адреса = [];
+  for (const цель of цели.length ? цели : ['region1.v2.argotunnel.com', 'region2.v2.argotunnel.com']) {
+    for (const ip of (await dohA(цель).catch(() => [])).slice(0, 2)) адреса.push(`${ip}:7844`);
+  }
+  return адреса;
 }
 
-// Туннель по SSH через localhost.run. Ему не нужен свой бинарник — хватает
-// plink, который у нас уже есть для своих серверов. Главное: он проходит там,
-// где cloudflared глухо блокируется (замер на сети с VPN: cloudflared не
-// поднимает канал ни по http2, ни по quic, а этот отдаёт адрес за 5 секунд).
-const LHR_HOST = 'localhost.run';
-
-async function lhrHostKey() {
-  if (lhrKnownKey) return lhrKnownKey;
-  const проба = await spawnCollect(PLINK(), ['-ssh', '-batch', '-P', '22', 'nokey@' + LHR_HOST, 'exit'], 20000);
-  const ключ = `${проба.stdout || ''}${проба.stderr || ''}`.match(/SHA256:[A-Za-z0-9+/=]+/);
-  lhrKnownKey = ключ ? ключ[0] : '';
-  return lhrKnownKey;
+// Как запустить сервис: команда, аргументы и когда ссылка готова.
+async function командаТуннеля(ключ) {
+  const карта = выбраннаяКарта();
+  if (ключ === 'cloudflare') {
+    const мимо = карта ? await узлыCloudflare() : [];
+    return { cmd: CLOUDFLARED(), args: ['tunnel', '--no-autoupdate', '--protocol', 'http2',
+      ...(мимо.length ? ['--edge-bind-address', карта, ...мимо.flatMap(адрес => ['--edge', адрес])] : []),
+      '--url', `http://127.0.0.1:${PORT}`], ready: текст => /Registered tunnel connection/i.test(текст) };
+  }
+  if (ключ === 'pinggy') {
+    pinggyStarted = true;
+    return { cmd: PINGGY(), args: ['--noTui', '-l', `http://127.0.0.1:${PORT}`], env: pinggyEnvironment(), ready: () => true };
+  }
+  const host = ТУННЕЛИ[ключ].ssh;
+  // С выбранной картой plink идёт через местный мост, иначе — напрямую.
+  const port = карта ? await мостДо(host, 22) : 22;
+  const hostkey = await sshКлюч(host, port);
+  if (!hostkey) throw new Error(`${ТУННЕЛИ[ключ].name}: сервер не отдал ключ`);
+  return { cmd: PLINK(), args: ['-ssh', '-batch', '-no-antispoof', '-hostkey', hostkey, '-P', String(port),
+    '-R', `80:127.0.0.1:${PORT}`, `nokey@${port === 22 ? host : '127.0.0.1'}`], ready: () => true };
 }
 
-async function startSshTunnelCandidate() {
-  if (!PLINK()) return;
-  const поколение = tunnelGeneration;
-  const ключ = await lhrHostKey();
-  // Ключ ждём до 20 секунд. Если за это время туннель выключили (ушли в «Этот
-  // ПК» или сменили провайдера), подключаться уже нельзя: раньше plink всё
-  // равно поднимался, и публичная ссылка открывалась в режиме, где её не просили.
-  if (поколение !== tunnelGeneration || config.outputMode !== 'tunnel') return;
-  if (!ключ) { log('SSH-туннель: сервер не отдал ключ, пропускаю'); return; }
-  if (stopping || tunnelUrl) return;
-  log('SSH-туннель: подключаюсь');
-  const child = trackTunnelChild(spawn(PLINK(), ['-ssh', '-batch', '-no-antispoof', '-hostkey', ключ,
-    '-R', `80:127.0.0.1:${PORT}`, 'nokey@' + LHR_HOST], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }), 'localhost.run');
-  let буфер = '';
+// Запуск сервиса: сообщает адрес, когда он реально готов принимать зрителей.
+function поднятьТуннель(команда, ключ, готово) {
+  const child = spawn(команда.cmd, команда.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], ...(команда.env ? { env: команда.env } : {}) });
+  let текст = '', адрес = '', сообщили = false;
   const смотреть = chunk => {
-    буфер = (буфер + chunk).slice(-8000);
-    const адрес = буфер.match(/https:\/\/[a-z0-9-]+\.lhr\.life/i);
-    if (адрес) activatePublicTunnel(child, 'localhost.run', адрес[0]);
+    текст = (текст + String(chunk)).slice(-16000);
+    адрес ||= текст.match(ТУННЕЛИ[ключ].url)?.[0] || '';
+    if (адрес && !сообщили && команда.ready(текст)) { сообщили = true; готово(адрес); }
   };
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
   child.stdout.on('data', смотреть); child.stderr.on('data', смотреть);
+  child.on('error', () => {});
+  return child;
+}
+
+// Средняя скорость каждого сервиса — по всем замерам (свежие весят больше).
+// Показывается в списке выбора, чтобы было видно, кто у вас быстрее.
+function запомнитьСкоростьТуннеля(ключ, kbps) {
+  if (!ключ || !(kbps > 0)) return;
+  const было = Number(config.tunnelSpeeds?.[ключ]) || 0;
+  saveConfig({ tunnelSpeeds: { ...(config.tunnelSpeeds || {}), [ключ]: Math.round(было ? было * 0.5 + kbps * 0.5 : kbps) } });
+}
+
+// «Проверить все»: по очереди поднимаем каждый сервис отдельно от эфира,
+// меряем, сколько он реально отдаёт, и гасим. Pinggy не проверяем: бесплатный
+// подменяет поток страницей-предупреждением, в VRChat он не играет.
+let проверкаТуннелей = { running: false, current: '', results: {} };
+async function проверитьТуннели() {
+  if (проверкаТуннелей.running) return;
+  проверкаТуннелей = { running: true, current: '', results: {} };
+  try {
+    for (const ключ of Object.keys(ТУННЕЛИ).filter(k => k !== 'pinggy' && туннельДоступен(k))) {
+      if (shuttingDown) return;
+      проверкаТуннелей.current = ключ;
+      let child = null;
+      try {
+        const команда = await командаТуннеля(ключ);
+        const адрес = await new Promise((resolve, reject) => {
+          const таймер = setTimeout(() => reject(new Error('не ответил за 25 с')), 25000);
+          child = поднятьТуннель(команда, ключ, url => { clearTimeout(таймер); resolve(url); });
+          child.on('close', () => { clearTimeout(таймер); reject(new Error('отключился')); });
+        });
+        // Новый адрес (особенно у Cloudflare) начинает открываться не сразу —
+        // до четырёх попыток с паузой.
+        let rawKbps = 0, ttfbMs = 0;
+        for (let попытка = 0; попытка < 4 && !(rawKbps > 50); попытка++) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          ({ rawKbps, ttfbMs } = await measureTunnelKbps(адрес));
+        }
+        if (!(rawKbps > 50)) throw new Error('ссылка не отдаёт данные');
+        запомнитьСкоростьТуннеля(ключ, rawKbps);
+        проверкаТуннелей.results[ключ] = { kbps: Math.round(rawKbps), ttfbMs };
+        log(`Проверка ${ТУННЕЛИ[ключ].name}: ~${(rawKbps / 1000).toFixed(1)} Мбит/с, ответ ${ttfbMs} мс`);
+      } catch (error) {
+        проверкаТуннелей.results[ключ] = { error: error.message };
+        log(`Проверка ${ТУННЕЛИ[ключ].name}: ${error.message}`);
+      } finally { try { child?.kill('SIGTERM'); } catch {} }
+    }
+  } finally { проверкаТуннелей = { ...проверкаТуннелей, running: false, current: '' }; }
+}
+
+async function startTunnelCandidate(ключ) {
+  const поколение = tunnelGeneration;
+  const команда = await командаТуннеля(ключ);
+  // Пока узнавали ключ и узлы, туннель могли выключить или уже найти другой.
+  if (поколение !== tunnelGeneration || config.outputMode !== 'tunnel' || stopping || tunnelUrl) return;
+  const child = trackTunnelChild(поднятьТуннель(команда, ключ, адрес => activatePublicTunnel(child, ТУННЕЛИ[ключ].name, адрес)), ТУННЕЛИ[ключ].name);
+  if (ключ === 'cloudflare') {
+    child.stderr.on('data', chunk => {
+      const строка = String(chunk).split(/\r?\n/).find(line => /\bERR\b/.test(line));
+      if (строка) log(`Cloudflare: ${строка.trim().slice(0, 300)}`);
+    });
+  }
 }
 
 function startPublicTunnel() {
@@ -861,29 +1091,34 @@ function startPublicTunnel() {
   // Не бросаем: функцию зовут и из таймеров (переподключение, смена режима),
   // а необработанный throw в setTimeout ронял бы весь сервер. Просто честно
   // ставим состояние ошибки.
-  if (!tools.cloudflared && !tools.pinggy && !PLINK()) {
+  if (!Object.keys(ТУННЕЛИ).some(туннельДоступен)) {
     tunnelState = 'error'; tunnelError = 'Компоненты публичной ссылки не найдены.';
     return;
   }
   tunnelUrl = ''; tunnelProvider = ''; tunnelState = 'starting'; tunnelError = '';
   // Провайдер можно выбрать; «Авто» поднимает всех сразу — побеждает тот, кто
-  // первым отдал адрес. Раньше Pinggy ждал Cloudflare 12 секунд, а в сетях с
-  // фильтром Cloudflare не подключается никогда — ссылка появлялась через
-  // минуту и с ошибкой. Если выбранного провайдера нет — откатываемся к авто.
+  // первым отдал адрес. Если выбранного нет — откатываемся к авто.
   let провайдер = config.tunnelProvider || 'auto';
-  if (провайдер === 'cloudflare' && !tools.cloudflared) провайдер = 'auto';
-  if (провайдер === 'pinggy' && !tools.pinggy) провайдер = 'auto';
-  if (провайдер === 'localhostrun' && !PLINK()) провайдер = 'auto';
-  if (tools.cloudflared && (провайдер === 'auto' || провайдер === 'cloudflare')) startCloudflareCandidate();
-  if (провайдер === 'auto' || провайдер === 'localhostrun') startSshTunnelCandidate().catch(error => logDetail(`SSH-туннель: ${error.message}`));
+  if (провайдер !== 'auto' && !(ТУННЕЛИ[провайдер] && туннельДоступен(провайдер))) провайдер = 'auto';
+  const запустить = ключ => startTunnelCandidate(ключ).catch(error => logDetail(`Туннель ${ТУННЕЛИ[ключ].name}: ${error.message}`));
   // Pinggy — крайний случай, а не гонщик наравне: бесплатный подменяет поток
-  // страницей-предупреждением, и в VRChat такая ссылка не играет (у друга
-  // Cloudflare был заблокирован, Pinggy выигрывал гонку — и «якобы работает,
-  // а в игре пусто»). Поэтому в «Авто» даём Cloudflare и localhost.run фору,
-  // а Pinggy поднимаем только если за 6 секунд никто не отозвался.
-  if (провайдер === 'pinggy' && tools.pinggy) startPinggyCandidate();
-  else if (провайдер === 'auto' && tools.pinggy) {
-    tunnelFallbackTimer = setTimeout(() => { if (!tunnelUrl && !stopping && config.outputMode === 'tunnel') startPinggyCandidate(); }, 6000);
+  // страницей-предупреждением, и в VRChat такая ссылка не играет. Поэтому в
+  // «Авто» он поднимается, только если за 6 секунд никто не отозвался.
+  if (провайдер !== 'auto') запустить(провайдер);
+  else {
+    // Сначала самый быстрый по прошлым замерам; ответил за 6 с — он и будет.
+    // Нет — поднимаем остальных наперегонки, Pinggy ещё через 6 с.
+    const скорость = ключ => Number(config.tunnelSpeeds?.[ключ]) || 0;
+    const порядок = Object.keys(ТУННЕЛИ).filter(ключ => ключ !== 'pinggy' && туннельДоступен(ключ)).sort((a, b) => скорость(b) - скорость(a));
+    const ещё = () => !tunnelUrl && !stopping && config.outputMode === 'tunnel';
+    const [лучший, ...остальные] = скорость(порядок[0]) ? порядок : [null, ...порядок];
+    if (лучший) запустить(лучший);
+    const резерв = () => {
+      for (const ключ of остальные) запустить(ключ);
+      if (туннельДоступен('pinggy')) tunnelFallbackTimer = setTimeout(() => { if (ещё()) запустить('pinggy'); }, 6000);
+    };
+    if (лучший) tunnelFallbackTimer = setTimeout(() => { if (ещё()) резерв(); }, 6000);
+    else резерв();
   }
   // Один выбранный туннель ждём меньше: если он не отозвался за 18 секунд, он в
   // этой сети недоступен. «Авто» гоняет несколько сразу, ему даём больше.
@@ -1384,6 +1619,34 @@ function publicAddress() {
   return rtspAddress() || `http://127.0.0.1:${PORT}/stream/live.m3u8`;
 }
 
+function outputReadiness() {
+  if (config.outputMode === 'tunnel') {
+    if (tunnelUrl && tunnelServes === true) return { ready: true, message: '' };
+    return { ready: false, message: tunnelError || (tunnelUrl
+      ? 'Публичная ссылка ещё проверяется. Дождитесь статуса «Готово» — эфир пока не запущен.'
+      : 'Публичная ссылка ещё создаётся. Дождитесь её готовности — эфир пока не запущен.') };
+  }
+  if (config.outputMode === 'remote') {
+    if (remoteReachable === true && remoteChannelLive) return { ready: true, message: '' };
+    return { ready: false, message: remoteReachable === false
+      ? 'Свой сервер недоступен. Проверьте адрес и ключ — эфир пока не запущен.'
+      : 'Соединение со своим сервером ещё готовится. Дождитесь статуса «Готово».' };
+  }
+  return { ready: Boolean(channelLive), message: channelLive ? '' : 'Локальный канал ещё запускается. Подождите пару секунд.' };
+}
+
+function requireReadyOutput() {
+  // Локальный RTSP — часть самого приложения: старт producer может происходить
+  // одновременно с его прогревом. Блокировать нужно внешние режимы, где адрес
+  // может быть мёртвым и пользователь иначе запустит эфир «в никуда».
+  if (config.outputMode === 'local') return;
+  // Туннель, который не поднялся, сам не перезапускается: раньше повтором был
+  // каждый новый старт эфира. Сохраняем это — пробуем снова и просим подождать.
+  if (config.outputMode === 'tunnel' && !activeKind && !tunnelProcess && !tunnelCandidates.size) startPublicTunnel();
+  const result = outputReadiness();
+  if (!result.ready && !activeKind) throw Object.assign(new Error(result.message), { statusCode: 425, code: 'OUTPUT_NOT_READY' });
+}
+
 function unityBaseAddress() {
   if (config.outputMode === 'tunnel' && tunnelUrl && tunnelProvider === 'Cloudflare') return tunnelUrl;
   return `http://127.0.0.1:${PORT}`;
@@ -1573,6 +1836,10 @@ function findFile(directory, name) {
 async function refreshToolsAsync() {
   const проба = async (name, args) => (await spawnCollect(name, args, 5000).catch(() => null))?.status === 0;
   tools.ffmpeg = await проба('ffmpeg', ['-version']);
+  // Фильтры zmq есть не в каждой сборке FFmpeg (в «essentials» их нет). Без них
+  // трек с zmq в графе не стартовал бы вовсе — тогда горячих команд нет, и
+  // скорость с громкостью применяются перезапуском трека с той же позиции.
+  if (tools.ffmpeg) ffmpegHasZmq = /\bazmq\b/.test((await spawnCollect('ffmpeg', ['-hide_banner', '-filters'], 5000).catch(() => null))?.stdout || '');
   // ytdlpPath() в конце возвращает 'yt-dlp' — оно всегда истинно, поэтому
   // проверяем именно наличие файла, а не путь.
   tools.ytdlp = existsSync(YTDLP_UPDATED) || existsSync(join(DATA_DIR, 'tools', 'yt-dlp.exe')) || existsSync(YTDLP_BUNDLED);
@@ -1844,20 +2111,38 @@ function status(withLogs = true) {
   const speed = Number(config.playbackSpeed) || 1;
   const runningElapsed = currentStartedAt ? Math.max(0, (Date.now() - currentStartedAt) / 1000) * speed : 0;
   const elapsed = queuePaused ? pausedPosition : sourcePosition + runningElapsed;
+  const desiredProfile = streamProfile(activeKind || 'queue');
+  const deliveryReady = config.outputMode === 'tunnel' ? Boolean(tunnelUrl && tunnelServes === true)
+    : config.outputMode === 'remote' ? Boolean(remoteReachable === true && remoteChannelLive) : Boolean(channelLive);
+  const deliveryPhase = deliveryReady ? 'ready'
+    : config.outputMode === 'tunnel' ? (tunnelState === 'error' || tunnelServes === false ? 'failed' : tunnelUrl ? 'verifying' : 'preparing')
+    : config.outputMode === 'remote' ? (remoteReachable === false ? 'failed' : 'preparing') : 'preparing';
   return {
-    appVersion: APP_VERSION, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(),
+    appVersion: APP_VERSION, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(), currentTemplate: currentTemplateState(),
     progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
     cache: { ready: cachedReadyCount(), total: queue.length, downloading: [...mediaCacheJobs.keys()],
       // Какие ролики уже скачаны — очередь помечает их «Готово».
-      readyIds: queue.filter(item => !item.local && готовыеВКеше.has(item.id) && !mediaCacheJobs.has(item.id)).map(item => item.id),
+      readyIds: queue.filter(item => !item.local && готовыеВКеше.has(cacheKey(item)) && !mediaCacheJobs.has(item.id)).map(item => item.id),
       root: config.cacheRoot || '', path: mediaCacheDir(), drives: storageInfo.drives, sizeMb: storageInfo.sizeMb,
       limitGb: Number(config.cacheLimitGb) || 0 },
-    audio: { levelDb: audioLevelDb, silent: audioLevelDb < -70 },
+    audio: { levelDb: audioLevelDb, silent: audioLevelDb < -70,
+      phase: activeKind !== 'screen' || config.audioMode === 'none' ? 'idle'
+        : activeAuxProcess ? (audioLevelDb >= -70 ? 'capturing' : Date.now() - activeAudioStartedAt < 2500 ? 'initializing' : 'silent')
+        : config.audioMode === 'device' ? 'capturing' : 'initializing',
+      requestedPid: config.audioMode === 'process' ? config.audioProcessId : '', helperRunning: Boolean(activeAuxProcess),
+      localMuted: Boolean(config.audioMode === 'process' && config.muteLocalApp) },
     performance: { encoder: encoder.label, hardware: encoder.hardware, continuousQueue: true, outputProfile: relayProfile,
+      desiredProfile, pendingProfile: Boolean(activeKind && relayProfile && !sameProfile(relayProfile, desiredProfile)),
+      remoteBacklogSec: config.outputMode === 'remote' && activeKind ? Number(remoteBacklogSec.toFixed(1)) : 0,
+      remoteCapacityKbps: config.outputMode === 'remote' ? remoteCapacityKbps : 0,
+      remoteBudgetKbps: config.outputMode === 'remote' ? remoteBudgetKbps || стартовыйБюджет() : 0,
       encoderMode: config.encoderMode || 'auto', gpuLabel: hardwareEncoder ? hardwareEncoder.label : '',
       streamClock: Number(streamTimestamp().toFixed(3)),
+      // На сколько последний отданный кадр отстаёт от настенных часов. Должно
+      // стоять на месте: рост = копится задержка у зрителей.
+      edgeLagSec: relayProcess && lastRelayPts ? Number((streamTimestamp() - lastRelayPts).toFixed(2)) : null,
       realtimeRatio: Number(hlsHealth.realtimeRatio.toFixed(2)), segmentAge: hlsHealth.segmentAge === null ? null : Number(hlsHealth.segmentAge.toFixed(1)),
       // Задержка живого края (та, что раньше росла до 22с) и журнал качества:
       // фризы с местом, просадки, автоматические сбросы задержки.
@@ -1871,8 +2156,11 @@ function status(withLogs = true) {
     stream: { ready: hlsHealth.ready, segmentCount: hlsHealth.segmentCount,
       state: !relayProcess ? 'offline' : hlsHealth.ready ? 'ready' : hlsHealth.segmentAge !== null && hlsHealth.segmentAge >= 4 ? 'stalled' : 'starting' },
     compatibility: { unity: unityCompatibility() },
+    network: { vpn: vpnInterface, route: vpnRoute, adapters: сетевыеКарты() },
+    delivery: { mode: config.outputMode, phase: deliveryPhase, ready: deliveryReady,
+      error: config.outputMode === 'tunnel' ? tunnelError : config.outputMode === 'remote' && remoteReachable === false ? 'Сервер не отвечает.' : '' },
     // linkReady — единственный честный признак «ссылку уже можно вставлять».
-    linkReady: config.outputMode === 'remote' ? remoteChannelLive : channelLive,
+    linkReady: deliveryReady,
     rtsp: { available: Boolean(mediaMtxProcess && rtspPushProcesses.has('local')), live: channelLive, url: rtspAddress(),
       lanUrls: getLanAddresses().map(ip => `rtspt://${ip}:${RTSP_PORT}/live`),
       direct: directLinks(), whiteIp: config.whiteIp || '',
@@ -1881,9 +2169,10 @@ function status(withLogs = true) {
             channel: remoteRtspTarget()?.channel || '', channelRejected: remoteChannelRejected,
             url: remoteRtspTarget()?.playUrl || '' }
         : null },
-    tunnel: { state: tunnelState, ready: Boolean(tunnelUrl) && tunnelServes !== false, provider: tunnelProvider,
-      serves: tunnelServes, verifying: Boolean(tunnelUrl) && tunnelServes === null,
-      expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError },
+    tunnel: { state: tunnelState, ready: Boolean(tunnelUrl) && tunnelServes === true, provider: tunnelProvider,
+      serves: tunnelServes, verifying: Boolean(tunnelUrl) && tunnelServes === null, metrics: tunnelMetrics,
+      expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError,
+      speeds: config.tunnelSpeeds || {}, test: проверкаТуннелей },
     config: { ...config,
       servers: savedServers().map(item => ({ id: item.id, name: item.name, host: item.host,
         rtspPort: item.rtspPort, addedAt: item.addedAt, reachable: serverReach[item.id] ?? null,
@@ -1910,7 +2199,7 @@ function обновитьГотовые() {
 }
 
 function cachedReadyCount() {
-  return queue.filter(item => item.local || (готовыеВКеше.has(item.id) && !mediaCacheJobs.has(item.id))).length;
+  return queue.filter(item => item.local || (готовыеВКеше.has(cacheKey(item)) && !mediaCacheJobs.has(item.id))).length;
 }
 
 // Адреса сетевых карт помним 15 секунд. networkInterfaces() на Windows —
@@ -1994,6 +2283,10 @@ async function inspectHlsHealth() {
     hlsHealth.segmentAge = null;
     // Плейлиста нет, а эфир идёт — это тоже фриз (край мёртв).
     if (activeKind) trackStreamQuality(null);
+    // Сторож зависаний раньше смотрел только на живой плейлист: пропал он
+    // (релей пересобрался и не поднялся) — и эфир стоял 33 с без перезапуска.
+    const с = hlsHealth.updatedAt || relayStartedAt;
+    if (activeKind && с) watchStalledStream({ segmentAge: (Date.now() - с) / 1000 });
   } finally { hlsHealthBusy = false; }
 }
 
@@ -2080,14 +2373,23 @@ function resetQualityTelemetry() {
 // фризы. Вместо молчаливой деградации понижаем нагрузку сами: сначала кадры,
 // потом разрешение, и говорим об этом в журнале.
 let отставаний = 0;
+// Смена продюсера (старт эфира, следующий трек) на пару секунд роняет темп
+// сегментов — это переход, а не слабая машина. Без паузы автоснижение
+// срабатывало на каждом старте: пересборка канала и минус 60 кадров.
+let producerStartedAt = 0;
 let lightMode = false;
 let последнееСнижение = 0;
 
 function autoReduceQuality(state) {
   if (config.autoQuality === false || !activeKind) return;
+  if (Date.now() - producerStartedAt < 8000) { отставаний = 0; return; }
   const темп = Number(state.realtimeRatio) || 1;
   const возраст = Number(state.segmentAge) || 0;
-  const плохо = темп < 0.9 || возраст > 5;
+  // Слабая машина — это кадры идут, но медленнее реального времени. Если кадров
+  // нет вовсе (источник из сети не открылся), снижение качества не поможет, а
+  // раньше оно навсегда роняло эфир до 480p из-за сетевой заминки. Зависания
+  // лечит watchStalledStream.
+  const плохо = темп < 0.9 && возраст < 3;
   отставаний = плохо ? отставаний + 1 : 0;
   if (отставаний < 5 || Date.now() - последнееСнижение < 60000) return;
 
@@ -2189,7 +2491,28 @@ function streamProfile(kind = activeKind) {
   const основа = kind === 'queue'
     ? { quality: качества.includes(config.mediaQuality) ? config.mediaQuality : '720p', fps: Number(config.mediaFps) === 60 ? 60 : 30 }
     : { quality: качества.includes(config.quality) ? config.quality : '720p', fps: Number(config.fps) === 60 ? 60 : 30 };
-  return degrade ? { ...основа, ...degrade } : основа;
+  let profile = degrade ? { ...основа, ...degrade } : основа;
+  // Бесплатный HTTP-туннель — резервный путь, а не CDN. Ограничиваем его
+  // профилем, который реально проходит через такие каналы без постоянного
+  // переполнения и пятнадцатисекундного хвоста.
+  // Быстрый канал (замер от ~7,7 Мбит/с: Cloudflare с выбранной картой даёт
+  // 25–39, Serveo ~10) держит и 1080p/60 — там ограничение только мешает.
+  if (config.outputMode === 'tunnel' && tunnelBudgetKbps < 4500) {
+    if (profile.quality === '1080p') profile = { ...profile, quality: '720p' };
+    if (profile.fps > 30) profile = { ...profile, fps: 30 };
+    // Узкий канал: 720p на битрейте меньше 1,5 Мбит/с рассыпается на блоки,
+    // 480p на том же битрейте выглядит чище.
+    if (!(Number(config.videoBitrate) > 0) && tunnelBudgetKbps && tunnelBudgetKbps < 1000) profile = { ...profile, quality: '480p' };
+  }
+  // Свой сервер с узким каналом: разрешение под битрейт. Меняется только при
+  // новом сеансе (старт эфира) — посреди эфира смена разрешения рвёт плеер.
+  if (config.outputMode === 'remote' && !(Number(config.videoBitrate) > 0)) {
+    const бюджет = remoteBudgetKbps || стартовыйБюджет();
+    if (бюджет && бюджет < 3600 && profile.quality === '1080p') profile = { ...profile, quality: '720p' };
+    if (бюджет && бюджет < 2400 && profile.fps > 30) profile = { ...profile, fps: 30 };
+    if (бюджет && бюджет < 1200) profile = { ...profile, quality: '480p' };
+  }
+  return { ...profile, encoderMode: config.encoderMode || 'auto', bitrateKbps: configuredBitrateKbps(profile) };
 }
 
 // Один сеанс релея = один формат кадра. Любая смена разрешения/fps/SAR/каналов
@@ -2204,7 +2527,8 @@ function sessionProfile(kind = activeKind) {
 // сравнивалось одно разрешение, переключатель 30/60 в живом эфире не делал
 // ничего, потому что продюсер получал прежний профиль релея.
 function sameProfile(left, right) {
-  return Boolean(left && right) && left.quality === right.quality && left.fps === right.fps;
+  return Boolean(left && right) && left.quality === right.quality && left.fps === right.fps
+    && left.encoderMode === right.encoderMode;
 }
 
 // Осознанная смена качества: релей перезапускается, но relayStartedAt сохраняется,
@@ -2270,12 +2594,25 @@ function autoBitrateKbps(profile) {
   return profile.fps === 60 ? 4800 : 3200;
 }
 
-function bitrateKbps(profile) {
+function configuredBitrateKbps(profile) {
   const выбран = Number(config.videoBitrate) || 0;
   let rate = выбран > 0 ? выбран : autoBitrateKbps(profile);
-  const наружу = config.outputMode === 'remote' || config.outputMode === 'tunnel';
-  if (наружу && !выбран) rate = Math.min(rate, 6000);
+  if (config.outputMode === 'tunnel') return выбран > 0 ? выбран : Math.max(800, Math.min(rate, tunnelBudgetKbps || 2200));
+  // Свой сервер: 4,5 Мбит/с для старта — отдача с ПК через VPN у пользователя
+  // 5–7 Мбит/с, и 6 Мбит/с забивали канал. Если и этого много, remoteGate снизит сам.
+  if (config.outputMode === 'remote' && !выбран) rate = Math.min(rate, 4500);
   return Math.max(600, Math.min(20000, Math.round(rate)));
+}
+
+function bitrateKbps(profile) {
+  // Битрейт — настройка кодировщика, а не канала: релей копирует поток как
+  // есть. Раньше здесь брался битрейт, с которым запустился релей, и смена в
+  // меню не давала разницы до перезапуска эфира.
+  const base = configuredBitrateKbps(profile);
+  // Свой сервер не тянул — битрейт снижен под реальный канал (см. remoteGate).
+  if (Number(config.videoBitrate) > 0) return base;
+  const бюджет = config.outputMode === 'remote' ? remoteBudgetKbps || стартовыйБюджет() : 0;
+  return бюджет ? Math.min(base, бюджет) : base;
 }
 
 // Ступень 480p нужна слабым машинам без аппаратного кодировщика: лучше
@@ -2360,7 +2697,9 @@ function relayOutputArgs(profile) {
   // Короткая история сегментов (~15с на диске): плеер, отставший сильнее,
   // получает 404 и сам возвращается к живому краю — задержка не может
   // накапливаться бесконечно, как раньше при минутной истории.
-  return ['-c', 'copy', '-flush_packets', '1', '-f', 'hls', '-hls_time', '1', '-hls_list_size', '12', '-hls_delete_threshold', '3',
+  // max_interleave_delta: без него при коротком провале звука на стыке муксер
+  // придерживал видео до 10 с (значение по умолчанию), ожидая пару для чередования.
+  return ['-c', 'copy', '-max_interleave_delta', '500000', '-flush_packets', '1', '-f', 'hls', '-hls_time', '1', '-hls_list_size', '12', '-hls_delete_threshold', '3',
     '-hls_start_number_source', 'epoch_us', '-hls_flags', 'delete_segments+omit_endlist+program_date_time+independent_segments+temp_file',
     '-hls_segment_filename', join(HLS_DIR, 'segment-%08d.ts'), join(HLS_DIR, 'live.m3u8')];
 }
@@ -2423,6 +2762,7 @@ function markProducerTimestamp(timestamp) {
 // а мягкое завершение через «q» создавало наложение двух писателей в релей.
 function stopProducer(child) {
   if (!child) return;
+  if (activeFilterControl?.child === child) activeFilterControl = null;
   // Хвост уходящего процесса не должен попасть в эфир после того, как начал
   // писать следующий: его пакеты со старым временем отматывали плеер назад.
   // Поэтому сначала полностью отцепляем вывод, и только потом гасим процесс.
@@ -2474,7 +2814,19 @@ function stopAudioHelper(child) {
   if (!child) return;
   try { child.stdin?.end(); } catch {}
   const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} }, 900);
-  child.once('close', () => clearTimeout(timer));
+  // Возвращаем звук уведённым приложениям всегда, а не только когда помощника
+  // пришлось убить: иначе увод, совпавший с закрытием, оставлял Spotify
+  // беззвучным. Но не поверх нового помощника — тот уже увёл звук заново.
+  child.once('close', () => { clearTimeout(timer); if (!activeAuxProcess || activeAuxProcess === child) restoreRoutedApps(); });
+}
+
+// «Не слышать у себя» уводит звук приложения на беззвучный выход, и Windows
+// запоминает это для exe. Помощник возвращает всё сам при штатной остановке;
+// если его пришлось убить (или программа упала), возвращаем по его списку.
+function restoreRoutedApps() {
+  const helper = join(ROOT, 'tools', 'VRCast.AudioCapture.exe');
+  if (!existsSync(helper) || !existsSync(join(DATA_DIR, 'routed-apps.txt'))) return;
+  inBackground(spawn(helper, ['--unroute-pending'], { windowsHide: true, stdio: 'ignore' })).on('error', () => {});
 }
 
 function stopWindowWatch() {
@@ -2520,11 +2872,21 @@ function startWindowWatcher(handle) {
 function applyWindowState(state) {
   if (activeKind !== 'screen' || config.captureMode !== 'window') return;
   const следующее = state === 'gone' ? 'missing' : state;
-  if (!windowCaptureState || следующее === windowCaptureState) { windowCaptureState = следующее; return; }
-  windowCaptureState = следующее;
-  log(следующее === 'visible' ? 'Окно снова на экране — захват продолжен' : 'Окно свернуто — показывается заглушка');
-  startScreen().catch(error => log(`Наблюдение за окном: ${error.message}`));
+  окноПоНаблюдателю = { state: следующее, at: Date.now() };
+  if (!windowCaptureState) { windowCaptureState = следующее; return; }
+  // Выдержка 0,7 с: при разворачивании окно пару кадров «мигает» между
+  // состояниями, и каждый такой миг раньше перезапускал захват — 8 раз за
+  // секунду, резкий пролаг у зрителей.
+  clearTimeout(окноТаймер);
+  окноТаймер = setTimeout(() => {
+    if (activeKind !== 'screen' || config.captureMode !== 'window' || окноПоНаблюдателю.state === windowCaptureState) return;
+    windowCaptureState = окноПоНаблюдателю.state;
+    log(windowCaptureState === 'visible' ? 'Окно снова на экране — захват продолжен' : 'Окно свернуто — показывается заглушка');
+    startScreen().catch(error => log(`Наблюдение за окном: ${error.message}`));
+  }, 700);
 }
+let окноТаймер = null;
+let окноПоНаблюдателю = { state: '', at: 0 };
 
 function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null) {
   stopLivePreview();
@@ -2554,6 +2916,7 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
       aux = onAir(spawn(helper, audioHelperArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
       aux.stdin.on('error', () => {});
       activeAuxProcess = aux;
+      activeAudioStartedAt = Date.now();
       aux.stdout.on('error', () => {});
       observeAudio(aux.stdout);
       aux.stdout.pipe(child.stdio[3]);
@@ -2684,8 +3047,71 @@ let keepAudioHelper = false;
 let keepWindowHelper = false;
 
 function audioHelperSignature() {
-  if (!['system', 'output', 'process'].includes(config.audioMode)) return '';
-  return [config.audioMode, config.audioOutputId, config.audioProcessId, localAppLevel().toFixed(3)].join('|');
+  if (!['system', 'output', 'process', 'none'].includes(config.audioMode)) return '';
+  return [config.audioMode, config.audioOutputId, config.audioProcessId, config.muteDevice || ''].join('|');
+}
+
+function audioHelperArguments() {
+  if (config.audioMode === 'device') return null;
+  // Тишина через помощника нужна, чтобы потом на лету включить звук. Нет
+  // помощника — обходимся тишиной из FFmpeg (anullsrc), эфир всё равно пойдёт.
+  if (config.audioMode === 'none') return existsSync(join(ROOT, 'tools', 'VRCast.AudioCapture.exe')) ? ['--silence'] : null;
+  if (!['system', 'output', 'process'].includes(config.audioMode)) return ['--silence'];
+  const args = config.audioMode === 'output' && config.audioOutputId ? ['--device-id', config.audioOutputId]
+    : config.audioMode === 'process' && /^\d+$/.test(String(config.audioProcessId)) ? ['--pid', String(config.audioProcessId)] : [];
+  args.push('--stream-gain', Math.max(0, Math.min(6, Number(config.captureVolume) || 0)).toFixed(3));
+  if (config.audioMode === 'process') args.push('--local-volume', localAppLevel().toFixed(3));
+  if (config.audioMode === 'process' && config.muteLocalApp) args.push('--local-mute');
+  if (config.audioMode === 'process' && config.muteDevice) args.push('--route-device', String(config.muteDevice));
+  return args;
+}
+
+function updateAudioHelperControls() {
+  if (!activeAuxProcess?.stdin?.writable) return false;
+  try {
+    activeAuxProcess.stdin.write(`stream-gain ${Math.max(0, Math.min(6, Number(config.captureVolume) || 0)).toFixed(3)}\n`);
+    if (config.audioMode === 'process') {
+      activeAuxProcess.stdin.write(`local-volume ${localAppLevel().toFixed(3)}\n`);
+      activeAuxProcess.stdin.write(`local-mute ${config.muteLocalApp ? '1' : '0'}\n`);
+    }
+    return true;
+  } catch { return false; }
+}
+
+async function replaceAudioHelperLive() {
+  if (activeKind !== 'screen' || !activeProcess?.stdio?.[3]?.writable) return false;
+  const args = audioHelperArguments();
+  // Микрофон идёт через DirectShow прямо в ffmpeg. Его нельзя заменить внутри
+  // открытого input без пересоздания producer; остальные режимы используют
+  // единый PCM pipe и меняются бесшовно.
+  if (!args) return false;
+  if (config.audioMode === 'process' && !/^\d+$/.test(String(config.audioProcessId)))
+    throw new Error('Для звука приложения выберите окно с работающим процессом.');
+  const helper = join(ROOT, 'tools', 'VRCast.AudioCapture.exe');
+  if (!existsSync(helper)) throw new Error('Компонент системного звука не найден.');
+  const next = onAir(spawn(helper, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
+  next.stdin.on('error', () => {}); next.stdout.on('error', () => {});
+  let failed = null;
+  next.once('error', error => { failed = error; });
+  await new Promise(resolvePromise => setTimeout(resolvePromise, 80));
+  if (failed || next.exitCode !== null) { stopAudioHelper(next); throw failed || new Error('Новый источник звука не запустился.'); }
+  const previous = activeAuxProcess;
+  try { previous?.stdout?.unpipe(activeProcess.stdio[3]); } catch {}
+  observeAudio(next.stdout);
+  next.stdout.pipe(activeProcess.stdio[3], { end: false });
+  activeAuxProcess = next; activeAudioStartedAt = Date.now(); audioHelperKey = audioHelperSignature();
+  helperOwner.set(next, activeProcess);
+  attachProcessLogs(next, 'System audio');
+  next.on('close', code => {
+    if (activeAuxProcess !== next || stopping || !activeProcess || !code) return;
+    activeAuxProcess = null; audioHelperKey = '';
+    if (!захватМожноПерезапустить(code)) return;
+    log(`Компонент звука неожиданно остановился (код ${code}) — перезапускаю захват`);
+    startScreen().catch(error => log(`Перезапуск захвата: ${error.message}`));
+  });
+  stopAudioHelper(previous);
+  log('Источник звука переключён без остановки видео');
+  return true;
 }
 
 function windowHelperSignature(profile) {
@@ -2716,6 +3142,7 @@ async function startScreen() {
 
 async function startScreenInner() {
   const wasLive = Boolean(activeKind);
+  if (!wasLive) encoder = pickEncoder(config.encoderMode);
   // Решаем до остановки: если настройки помощников те же, оставляем их жить.
   const текущийПрофиль = sessionProfile('screen');
   const тотЖеЗахват = wasLive && activeKind === 'screen';
@@ -2756,6 +3183,9 @@ async function startScreenInner() {
     selectedWindow = (await listWindows()).find(item => item.handle === String(config.captureWindowHandle)) || null;
     проверитьОтмену();
       windowCaptureState = !selectedWindow ? 'missing' : selectedWindow.minimized ? 'minimized' : 'visible';
+    // Список окон Windows во время анимации ещё говорит «свёрнуто», хотя
+    // наблюдатель уже видит окно, — верим свежему слову наблюдателя.
+    if (selectedWindow && Date.now() - окноПоНаблюдателю.at < 3000) windowCaptureState = окноПоНаблюдателю.state;
   } else if (config.captureMode === 'monitor') {
     const monitors = await listMonitors();
     проверитьОтмену();
@@ -2785,14 +3215,10 @@ async function startScreenInner() {
     else args.push('-i', 'desktop');
   }
 
-  let audioHelperArgs = null;
-  if (config.audioMode === 'system' || config.audioMode === 'output' || config.audioMode === 'process') {
-    audioHelperArgs = config.audioMode === 'output' && config.audioOutputId ? ['--device-id', config.audioOutputId]
-      : config.audioMode === 'process' && /^\d+$/.test(String(config.audioProcessId)) ? ['--pid', String(config.audioProcessId)] : [];
-    // «Слышать у себя тише»: понижаем громкость приложения в микшере Windows и
-    // ровно на столько же усиливаем звук в эфире. Приглушить полностью нельзя —
-    // захват идёт после регулятора, и вместе с колонками замолчал бы и стрим.
-    if (config.audioMode === 'process') audioHelperArgs.push('--local-volume', localAppLevel().toFixed(3));
+  let audioHelperArgs = audioHelperArguments();
+  if (audioHelperArgs) {
+    // Захват процесса идёт ПОСЛЕ регулятора громкости Windows: «тише у себя»
+    // помощник компенсирует усилением (см. SessionMuter в audio-helper).
     // Без use_wallclock_as_timestamps: штамп времени чтения из пайпа + aresample
     // async образуют петлю (всплеск → тишина → всплеск дальше), разгоняющую
     // аудио-таймлайн на сотни секунд. Хелпер сам держит темп 1.0x по Stopwatch,
@@ -2800,16 +3226,13 @@ async function startScreenInner() {
     args.push('-fflags', 'nobuffer', '-thread_queue_size', '16', '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:3', '-map', '0:v:0', '-map', '1:a:0');
   } else if (config.audioMode === 'device' && config.captureAudioDevice) {
     args.push('-thread_queue_size', '32', '-f', 'dshow', '-i', `audio=${config.captureAudioDevice}`, '-map', '0:v:0', '-map', '1:a:0');
-  } else {
-    args.push('-re', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0');
-  }
-  // Компенсацию приглушения делает сам хелпер, ещё во float: усиливать здесь
-  // значило бы поднимать вместе с сигналом шум квантования 16 бит.
-  const captureVolume = Math.max(0, Math.min(6, Number(config.captureVolume) || 0));
+  } else args.push('-re', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0');
   // Кадр от Desktop Duplication лежит в памяти видеокарты — забираем его перед фильтрами.
   const fromGpu = ddagrabOutput === null ? '' : 'hwdownload,format=bgra,';
   args.push('-vf', `${fromGpu}scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
-    '-af', `aresample=async=1:first_pts=0:min_hard_comp=0.100,volume=${captureVolume.toFixed(2)},alimiter=limit=0.97:level=disabled`,
+    // Громкость системного звука и приложения крутит сам помощник (на лету).
+    // Микрофон идёт через DirectShow мимо него — ему усиление ставим здесь.
+    '-af', `aresample=async=1:first_pts=0:min_hard_comp=0.100,${config.audioMode === 'device' ? `volume=${Math.max(0, Math.min(6, Number(config.captureVolume) || 0)).toFixed(2)},` : ''}alimiter=limit=0.97:level=disabled`,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile));
   проверитьОтмену();
   runScreenProcess(args, audioHelperArgs, windowHelperArgs);
@@ -2963,7 +3386,10 @@ function stopMediaMtx() {
 function rtspTargets() {
   const targets = [{ id: 'local', url: `rtsp://vrcast:${rtspPublishPass}@127.0.0.1:${RTSP_PORT}/live` }];
   const remote = remoteRtspTarget();
-  if (remote) targets.push({ id: 'remote', url: remote.publishUrl });
+  // Выбрана сетевая карта — пушер идёт через местный мост, который открывает
+  // соединение до сервера с её адреса (ffmpeg сам так не умеет).
+  const мост = remote && выбраннаяКарта() && remoteBridge?.address()?.port;
+  if (remote) targets.push({ id: 'remote', url: мост ? remote.publishUrl.replace(`@${remote.host}:${remote.port}/`, `@127.0.0.1:${мост}/`) : remote.publishUrl });
   return targets;
 }
 
@@ -3015,7 +3441,7 @@ function startRtspPush() {
       '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
       // Пакеты уходят сразу, без придержки в муксере: каждая такая задержка
       // складывается с буфером плеера и в VRChat видна как отставание.
-      '-muxdelay', '0', '-muxpreload', '0', '-flush_packets', '1', '-max_delay', '0',
+      '-muxdelay', '0', '-muxpreload', '0', '-flush_packets', '1', '-max_delay', '0', '-max_interleave_delta', '500000',
       // -rw_timeout муксер RTSP не читает вовсе (проверено: на молчащем сервере
       // пушер висел бесконечно). Свой сокет он настраивает опцией -timeout —
       // с ней зависший сервер отпускает пушера через 5 секунд, и тот
@@ -3089,50 +3515,536 @@ function stopRtspPush() {
 // пакеты и, если их много, пишем понятное событие с советом снизить битрейт.
 let remoteDropStreak = 0;
 let remoteCongestionAt = 0;
-function noteRemoteCongestion() {
+// Сколько реально пролезает до своего сервера. Замер у пользователя: отдача
+// через VPN 5–7 Мбит/с, а 1080p/60 шло на 6 Мбит/с со звуком — канал забивался,
+// хвост рос до 8 с (задержка «секунд 10»), потом пушер перезапускался и все
+// зрители в VRChat отваливались. Теперь при заторе битрейт снижается сам.
+let remoteBudgetKbps = 0;
+let remoteBacklogSec = 0;
+// Сколько канал до своего сервера реально принимает. Меряем без лишнего
+// трафика: пока сервер не успевает (хвост растёт), всё, что ушло за секунду, —
+// это и есть пропускная способность. Пока не упирались — неизвестна (0).
+let remoteCapacityKbps = 0;
+const remoteDrain = { at: 0, written: 0, backlog: 0 };
+function measureRemoteDrain(sink, written) {
+  const now = Date.now();
+  remoteDrain.written += written;
+  if (!remoteDrain.at) { remoteDrain.at = now; remoteDrain.backlog = sink.writableLength; return; }
+  const dt = (now - remoteDrain.at) / 1000;
+  if (dt < 1) return;
+  const ушло = remoteDrain.written - (sink.writableLength - remoteDrain.backlog);
+  // Мерим только когда канал забит (хвост больше полсекунды) — иначе видим
+  // битрейт потока, а не предел канала.
+  // Пушер, который только подключается (первые 10 с) или переподключается,
+  // stdin не читает вовсе: такой «замер» давал 0,6 Мбит/с на канале в 20 и
+  // навсегда ронял поток в 480p на 800 кбит/с.
+  const освоился = remoteChannelLive && Date.now() - (rtspPushStartedAt.get('remote') || 0) > 10000;
+  if (освоился && remoteBacklogSec > 0.5 && ушло > 0) {
+    const kbps = ушло * 8 / dt / 1000;
+    remoteCapacityKbps = remoteCapacityKbps ? Math.round(remoteCapacityKbps * 0.6 + kbps * 0.4) : Math.round(kbps);
+    запомнитьКанал();
+  }
+  remoteDrain.at = now; remoteDrain.written = 0; remoteDrain.backlog = sink.writableLength;
+}
+
+// Замер канала запоминается у сервера отдельно для «через VPN» и «напрямую»:
+// следующий эфир сразу стартует с подходящими битрейтом и разрешением, а не
+// с 1080p/60 на 4,5 Мбит/с в канал на 1,9 — затор, выброшенные кадры и
+// стоящая картинка у зрителя в первые минуты.
+let каналЗаписанВ = 0;
+// Сетевые карты с IPv4 — для выбора в настройках. VPN-адаптеры помечены.
+function сетевыеКарты() {
+  const карты = [];
+  for (const [name, list] of Object.entries(networkInterfaces())) {
+    for (const item of list || []) {
+      if (item.family !== 'IPv4' || item.internal || item.address.startsWith('169.254.')) continue;
+      карты.push({ name, address: item.address, vpn: VPN_NAME.test(name) || vpnAddress(item.address) });
+    }
+  }
+  return карты;
+}
+// Выбранная карта, если она сейчас есть (кабель вынули — идём как система).
+function выбраннаяКарта() {
+  const адрес = config.remoteBindAddress;
+  return адрес && сетевыеКарты().some(карта => карта.address === адрес) ? адрес : '';
+}
+
+// Настоящий адрес хоста через DNS-over-HTTPS. Системный DNS под mihomo отдаёт
+// подставные 198.18.x.x, а до них с выбранной карты мимо TUN не достучаться.
+const реальныеАдреса = new Map();
+async function dohA(name, type = 'A') {
+  const ответ = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`,
+    { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(6000) });
+  return ((await ответ.json()).Answer || []).map(запись => String(запись.data));
+}
+async function реальныйАдрес(host) {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return host;
+  const кеш = реальныеАдреса.get(host);
+  if (кеш && Date.now() - кеш.at < 10 * 60000) return кеш.ip;
+  const ip = (await dohA(host).catch(() => [])).find(адрес => /^\d+\.\d+\.\d+\.\d+$/.test(адрес)) || host;
+  реальныеАдреса.set(host, { ip, at: Date.now() });
+  return ip;
+}
+
+// Местный мост до host:port с выбранной сетевой карты — для клиентов, которые
+// сами к адресу привязаться не умеют (plink туннелей). Один на направление.
+const мосты = new Map();
+function мостДо(host, port) {
+  const ключ = `${host}:${port}`;
+  if (мосты.has(ключ)) return мосты.get(ключ);
+  const готов = new Promise((resolve, reject) => {
+    const мост = netCreateServer(async local => {
+      local.pause(); local.on('error', () => {});
+      const upstream = netConnect({ host: await реальныйАдрес(host), port, ...(выбраннаяКарта() ? { localAddress: выбраннаяКарта() } : {}) });
+      upstream.setNoDelay(true); local.setNoDelay(true);
+      upstream.on('error', () => local.destroy());
+      local.on('close', () => upstream.destroy());
+      upstream.on('close', () => local.destroy());
+      local.pipe(upstream); upstream.pipe(local); local.resume();
+    });
+    мост.on('error', error => { мосты.delete(ключ); reject(error); });
+    мост.listen(0, '127.0.0.1', () => resolve(мост.address().port));
+  });
+  мосты.set(ключ, готов);
+  return готов;
+}
+
+let remoteBridge = null;
+function startRemoteBridge() {
+  remoteBridge = netCreateServer(async local => {
+    local.pause(); local.on('error', () => {});
+    const цель = remoteRtspTarget(), адрес = выбраннаяКарта();
+    if (!цель) return local.destroy();
+    const upstream = netConnect({ host: await реальныйАдрес(цель.host), port: цель.port, ...(адрес ? { localAddress: адрес } : {}) });
+    local.resume();
+    upstream.setNoDelay(true); local.setNoDelay(true);
+    upstream.on('error', error => {
+      log(`Сетевая карта ${адрес || '(системная)'} не достаёт до сервера: ${error.message}`);
+      local.destroy();
+    });
+    local.on('close', () => upstream.destroy());
+    upstream.on('close', () => local.destroy());
+    local.pipe(upstream); upstream.pipe(local);
+  });
+  remoteBridge.on('error', error => { log(`Мост до своего сервера: ${error.message}`); remoteBridge = null; });
+  remoteBridge.listen(0, '127.0.0.1');
+}
+
+function mihomoPipes() {
+  try { return readdirSync('\\\\.\\pipe\\').filter(name => /mihomo|clash|verge/i.test(name)); }
+  catch { return []; }
+}
+
+function mihomoConnections(pipe) {
+  return new Promise(resolve => {
+    const request = http.get({ socketPath: `\\\\.\\pipe\\${pipe}`, path: '/connections', timeout: 2000 }, response => {
+      let text = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => { text += chunk; });
+      response.on('end', () => { try { resolve(JSON.parse(text).connections || null); } catch { resolve(null); } });
+    });
+    request.on('timeout', () => request.destroy());
+    request.on('error', () => resolve(null));
+  });
+}
+
+async function проверитьМаршрут() {
+  if (!vpnInterface || config.outputMode === 'local') { vpnRoute = ''; return; }
+  // Поток идёт с выбранной карты — мимо TUN, mihomo его и не видит. Так и для
+  // своего сервера, и для туннелей (Cloudflare, localhost.run, Serveo) — кроме
+  // Pinggy: его клиент к карте не привязать.
+  const черезКарту = config.outputMode === 'remote' || (config.outputMode === 'tunnel' && tunnelProvider !== 'Pinggy');
+  if (черезКарту && выбраннаяКарта()) { vpnRoute = 'direct'; return; }
+  // Наружу поток несут только эти процессы: ffmpeg (свой сервер) и клиенты туннелей.
+  const наши = /^(ffmpeg|cloudflared|pinggy|ssh|plink)\.exe$/i;
+  for (const pipe of mihomoPipes()) {
+    const list = await mihomoConnections(pipe);
+    if (!list) continue;
+    const свои = list.filter(item => наши.test(item.metadata?.process || '')
+      && !/^127\./.test(item.metadata?.destinationIP || ''));
+    // Своих соединений через mihomo нет — значит, и сказать нечего. Раньше
+    // здесь оставалось прошлое «через VPN» и висело, когда путь уже сменился.
+    if (!свои.length) { vpnRoute = ''; return; }
+    const мимо = свои.every(item => Array.isArray(item.chains) && item.chains.length === 1 && item.chains[0] === 'DIRECT');
+    const было = vpnRoute;
+    vpnRoute = мимо ? 'direct' : 'vpn';
+    if (было && было !== vpnRoute) remoteCapacityKbps = 0;
+    return;
+  }
+  vpnRoute = '';
+}
+
+function маршрут() { return vpnInterface && vpnRoute !== 'direct' ? 'vpn' : 'direct'; }
+function сохранённыйКанал() {
+  return Number(activeServer()?.channelKbps?.[маршрут()]) || 0;
+}
+function запомнитьКанал() {
+  const server = activeServer();
+  if (!server || !remoteCapacityKbps || Date.now() - каналЗаписанВ < 30000) return;
+  const было = сохранённыйКанал();
+  if (было && Math.abs(remoteCapacityKbps - было) / было < 0.15) return;
+  каналЗаписанВ = Date.now();
+  server.channelKbps = { ...(server.channelKbps || {}), [маршрут()]: remoteCapacityKbps };
+  saveConfig({ servers: savedServers() });
+}
+// Стартовый битрейт по прошлому замеру: 60% канала, как при заторе, плюс
+// 30% сверху — каждый эфир чуть пробует больше, иначе однажды замеренный
+// плохой канал ограничивал бы поток навсегда.
+function стартовыйБюджет() {
+  const канал = сохранённыйКанал();
+  return канал ? Math.max(800, Math.round(канал * 0.78 - 160)) : 0;
+}
+
+// VPN на этом ПК: у TUN-клиентов (mihomo/Clash, WireGuard, Amnezia, v2ray…)
+// свой интерфейс, у mihomo ещё и адреса 198.18.x.x. Через VPN поток до своего
+// сервера идёт кругом и упирается в его скорость — об этом стоит предупредить.
+const VPN_NAME = /mihomo|clash|meta|wintun|wireguard|amnezia|v2ray|xray|sing-?box|hiddify|nekoray|outline|openvpn|tap-windows|\btun\b|vpn/i;
+const vpnAddress = address => /^198\.(18|19)\./.test(address);
+function detectVpn() {
+  for (const [name, addresses] of Object.entries(networkInterfaces())) {
+    const адреса = addresses || [];
+    if (адреса.every(item => item.internal)) continue;
+    if (VPN_NAME.test(name) || адреса.some(item => vpnAddress(item.address))) return name;
+  }
+  return '';
+}
+
+// Подача на свой сервер с пониманием MPEG-TS. Затор нельзя лечить ни
+// перезапуском пушера (рвёт зрителей), ни выбрасыванием случайных кусков
+// (битые кадры). Поэтому режем ровно по 188-байтным пакетам и, если хвост
+// перевалил за секунду, выбрасываем всё до следующего ключевого кадра видео:
+// у зрителя короткий скачок вперёд, соединение живо, задержка не копится.
+const remoteGates = new WeakMap();
+function isVideoKeyframePacket(data, offset) {
+  if (data[offset] !== 0x47 || !(data[offset + 1] & 0x40)) return false;     // начало PES
+  const control = (data[offset + 3] >> 4) & 3;
+  if (control !== 3 || data[offset + 4] === 0 || !(data[offset + 5] & 0x40)) return false; // random_access
+  const payload = offset + 5 + data[offset + 4];
+  return payload + 4 <= offset + 188 && data[payload] === 0 && data[payload + 1] === 0 && data[payload + 2] === 1
+    && (data[payload + 3] & 0xf0) === 0xe0;                                  // поток видео
+}
+
+function writeRemote(pusher, chunk, секунда, свой = true) {
+  let gate = remoteGates.get(pusher);
+  if (!gate) remoteGates.set(pusher, gate = { rest: Buffer.alloc(0), dropping: false });
+  let data = gate.rest.length ? Buffer.concat([gate.rest, chunk]) : chunk;
+  // На стыке продюсеров старый мог оборваться посреди пакета — ищем синхронизацию.
+  let start = 0;
+  while (start + 376 < data.length && !(data[start] === 0x47 && data[start + 188] === 0x47 && data[start + 376] === 0x47)) start++;
+  const usable = start + Math.floor((data.length - start) / 188) * 188;
+  gate.rest = Buffer.from(data.subarray(usable));
+  data = data.subarray(start, usable);
+  if (!data.length) return;
+  const sink = pusher.stdin;
+  if (свой) remoteBacklogSec = sink.writableLength / Math.max(1, секунда);
+  if (!gate.dropping && sink.writableLength > Math.max(192 * 1024, секунда)) {
+    gate.dropping = true;
+    if (свой) remoteCongested();
+  }
+  if (свой) measureRemoteDrain(sink, 0);
+  if (gate.dropping) {
+    if (sink.writableLength > секунда * 0.3) return;
+    let offset = 0;
+    while (offset < data.length && !isVideoKeyframePacket(data, offset)) offset += 188;
+    if (offset >= data.length) return;
+    gate.dropping = false;
+    data = data.subarray(offset);
+  }
+  sink.write(data);
+  if (свой) remoteDrain.written += data.length;
+}
+
+// Затор на своём сервере: снижаем битрейт на 30% (до 800 кбит/с — лучше мыльная
+// картинка, чем рывки и отставание) и
+// тихо перезапускаем источник с того же места — стык проходит как смена трека.
+function remoteCongested() {
+  noteRemoteCongestion(true);
+  if (!remoteChannelLive || Date.now() - (rtspPushStartedAt.get('remote') || 0) < 10000) return;
+  // Битрейт выбран вручную — не трогаем: человек сам решил, что ему важнее.
+  if (Number(config.videoBitrate) > 0) return;
+  const сейчас = bitrateKbps(sessionProfile());
+  const новый = Math.max(800, Math.round(сейчас * 0.7));
+  if (новый >= сейчас) return;
+  remoteBudgetKbps = новый; бюджетМенялсяВ = Date.now();
+  log(`Свой сервер не успевает принимать поток — снижаю битрейт до ${новый} кбит/с (было ${сейчас})`);
+  if (activeKind === 'queue' && activeProcess && !queuePaused) transitionQueue('seek', currentSourcePosition());
+  else if (activeKind === 'screen') startScreen().catch(error => log(`Снижение битрейта: ${error.message}`));
+}
+let бюджетМенялсяВ = 0;
+function поднятьБюджет() {
+  if (config.outputMode !== 'remote' || !remoteBudgetKbps || Number(config.videoBitrate) > 0) return;
+  if (!activeKind || queuePaused || !remoteChannelLive || remoteBacklogSec > 0.2) return;
+  if (Date.now() - Math.max(бюджетМенялсяВ, remoteCongestionAt) < 60000) return;
+  const цель = configuredBitrateKbps(sessionProfile());
+  const новый = Math.round(remoteBudgetKbps * 1.25);
+  const было = remoteBudgetKbps;
+  remoteBudgetKbps = новый >= цель ? 0 : новый; бюджетМенялсяВ = Date.now();
+  if (!remoteBudgetKbps) remoteCapacityKbps = 0;
+  log(`Канал до своего сервера свободен — поднимаю битрейт: ${было} → ${remoteBudgetKbps || цель} кбит/с`);
+  if (activeKind === 'queue' && activeProcess) transitionQueue('seek', currentSourcePosition());
+  else if (activeKind === 'screen') startScreen().catch(error => log(`Подъём битрейта: ${error.message}`));
+}
+function noteRemoteCongestion(force = false) {
   // Пушер, который ещё подключается к серверу, stdin не читает вовсе — это не
   // перегруженный аплинк. Раньше каждый старт эфира на свой сервер и каждый
   // переподключенный пушер давали ложное «аплинк не тянет».
   if (!remoteChannelLive || Date.now() - (rtspPushStartedAt.get('remote') || 0) < 10000) return;
   remoteDropStreak++;
-  if (remoteDropStreak < 40 || Date.now() - remoteCongestionAt < 20000) return;
+  if ((!force && remoteDropStreak < 40) || Date.now() - remoteCongestionAt < 20000) return;
   remoteCongestionAt = Date.now();
   remoteDropStreak = 0;
   qualityStats.slowSpells++;
   recordStreamEvent('remote-congestion',
-    'свой сервер не успевает принимать поток — аплинк не тянет битрейт; снизьте качество или битрейт в настройках',
+    'свой сервер не успевает принимать поток — лишнее до ключевого кадра выброшено, битрейт снижается',
     { bitrateKbps: bitrateKbps(sessionProfile()) });
 }
 
-function pipeToRelay(child) {
-  // Сколько потока разрешено копить получателю, пока он не успевает. Раньше
-  // здесь стояли 4 МБ — на реальном битрейте это 5–10 секунд, и медленный свой
-  // сервер набирал их один раз при первой же просадке аплинка, а обратно они не
-  // рассасывались: до конца эфира зритель смотрел с этой форой. Держим примерно
-  // секунду потока: лишнее лучше отбросить (об этом скажет noteRemoteCongestion),
-  // чем возить его до вечера.
-  const допуск = Math.max(256 * 1024, bitrateKbps(sessionProfile()) * 125);
-  child.stdout.on('error', () => {});
-  // Обработчик ошибок релея вешается один раз при его запуске: раньше он
-  // добавлялся на каждый новый ролик, и за длинный эфир их набирались десятки
-  // на одном сокете — Node предупреждал об утечке.
-  // Релея может не быть те доли секунды, пока он поднимается после падения:
-  // раньше здесь летел TypeError, и трек помечался «не удалось открыть».
-  if (relayProcess) child.stdout.pipe(relayProcess.stdin, { end: false });
+// ── Метки времени по первому кадру ──────────────────────────────────────────
+// Раньше метка нового продюсера назначалась в момент запуска ffmpeg, а первый
+// кадр выходил через 0,5–3 с (открыть источник, поднять NVENC). Весь трек шёл
+// с этим опозданием: плеер VRChat на каждом стыке недобирал данных,
+// перебуферизовался и больше не догонял — задержка росла ступеньками
+// («со временем всё больше»). Теперь время первого пакета = «сейчас» (но не
+// раньше уже отданного), и все PTS/DTS/PCR продюсера сдвигаются на одну
+// величину — звук и видео вместе, без рассинхрона.
+const TS_WRAP = 2 ** 33;
+const readPts = (b, at) => ((b[at] >> 1) & 7) * 1073741824 + b[at + 1] * 4194304 + (b[at + 2] >> 1) * 32768 + b[at + 3] * 128 + (b[at + 4] >> 1);
+function writePts(b, at, value) {
+  const v = ((value % TS_WRAP) + TS_WRAP) % TS_WRAP;
+  b[at] = (b[at] & 0xf1) | ((Math.floor(v / 1073741824) & 7) << 1) | 1;
+  b[at + 1] = Math.floor(v / 4194304) & 0xff;
+  b[at + 2] = ((Math.floor(v / 32768) & 0x7f) << 1) | 1;
+  b[at + 3] = Math.floor(v / 128) & 0xff;
+  b[at + 4] = ((v & 0x7f) << 1) | 1;
+}
+const readPcr = (b, at) => b[at] * 33554432 + b[at + 1] * 131072 + b[at + 2] * 512 + b[at + 3] * 2 + (b[at + 4] >> 7);
+function writePcr(b, at, value) {
+  const v = ((value % TS_WRAP) + TS_WRAP) % TS_WRAP;
+  b[at] = Math.floor(v / 33554432) & 0xff;
+  b[at + 1] = Math.floor(v / 131072) & 0xff;
+  b[at + 2] = Math.floor(v / 512) & 0xff;
+  b[at + 3] = Math.floor(v / 2) & 0xff;
+  b[at + 4] = (b[at + 4] & 0x7f) | ((v & 1) << 7);
+}
+
+// Режет поток продюсера ровно по 188-байтным пакетам и сдвигает его метки.
+// state.target — время (с), с которого продюсер начал; известно с первого пакета.
+// ── Энергия музыки для живого фона ──────────────────────────────────────────
+// Маленький ffmpeg слушает только звук эфира: басы (до 180 Гц), моно 4 кГц —
+// меньше процента процессора. Громкость басов 20 раз в секунду уходит окнам,
+// подписанным на /api/energy. Никто не слушает или эфира нет — процесса нет.
+// Кормится тем же потоком, что уходит в эфир; не успевает — куски пропускаются,
+// эфир от этого не ждёт никогда.
+const слушателиЭнергии = new Set();
+let энергияFfmpeg = null;
+function кормитьЭнергию(chunk) {
+  if (!слушателиЭнергии.size) return;
+  if (!энергияFfmpeg) запуститьЭнергию();
+  const вход = энергияFfmpeg?.stdin;
+  if (вход?.writable && вход.writableLength < 512 * 1024) вход.write(chunk);
+}
+function запуститьЭнергию() {
+  const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-probesize', '500000', '-analyzeduration', '500000',
+    '-f', 'mpegts', '-i', 'pipe:0', '-map', '0:a:0?', '-vn',
+    '-af', 'lowpass=f=180,aresample=4000', '-ac', '1', '-f', 's16le', 'pipe:1'], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+  энергияFfmpeg = child;
+  child.stdin.on('error', () => {});
+  let хвост = Buffer.alloc(0);
+  const ОКНО = 200 * 2; // 50 мс при 4 кГц, по 2 байта
   child.stdout.on('data', chunk => {
+    хвост = хвост.length ? Buffer.concat([хвост, chunk]) : chunk;
+    while (хвост.length >= ОКНО) {
+      let сумма = 0;
+      for (let i = 0; i < ОКНО; i += 2) { const x = хвост.readInt16LE(i); сумма += x * x; }
+      хвост = хвост.subarray(ОКНО);
+      // −50…−10 дБ → 0…1: тишина ноль, плотный бас под единицу.
+      const дб = 10 * Math.log10(сумма / 200 / 1073741824 + 1e-12);
+      const уровень = Math.max(0, Math.min(1, (дб + 50) / 40)).toFixed(2);
+      for (const res of слушателиЭнергии) res.write(`data: ${уровень}\n\n`);
+    }
+  });
+  child.on('close', () => { if (энергияFfmpeg === child) энергияFfmpeg = null; });
+  child.on('error', () => { if (энергияFfmpeg === child) энергияFfmpeg = null; });
+}
+function остановитьЭнергию() {
+  if (!энергияFfmpeg) return;
+  try { энергияFfmpeg.stdin.end(); энергияFfmpeg.kill('SIGTERM'); } catch {}
+  энергияFfmpeg = null;
+}
+
+// Самая поздняя метка кадра в куске, в секундах (0 — меток нет).
+function maxChunkPts(chunk) {
+  let max = 0;
+  for (let o = 0; o + 188 <= chunk.length; o += 188) {
+    if (chunk[o] !== 0x47) continue;
+    const { ptsAt } = packetTimes(chunk, o);
+    if (ptsAt >= 0) max = Math.max(max, readPts(chunk, ptsAt) / 90000);
+  }
+  return max;
+}
+
+// Где в 188-байтном пакете лежат PCR, PTS и DTS (-1 — нет).
+function packetTimes(data, o) {
+  const control = (data[o + 3] >> 4) & 3;
+  let payload = o + 4, pcrAt = -1, ptsAt = -1, dtsAt = -1;
+  if (control & 2) {
+    const length = data[o + 4];
+    if (length >= 7 && (data[o + 5] & 0x10)) pcrAt = o + 6;
+    payload = o + 5 + length;
+  }
+  if ((control & 1) && (data[o + 1] & 0x40) && payload + 14 <= o + 188
+    && data[payload] === 0 && data[payload + 1] === 0 && data[payload + 2] === 1) {
+    const flags = data[payload + 7] >> 6;
+    if (flags & 2) ptsAt = payload + 9;
+    if (flags === 3) dtsAt = payload + 14;
+  }
+  return { pcrAt, ptsAt, dtsAt };
+}
+
+function retimeChunk(child, chunk) {
+  const st = child.__ts ||= { rest: Buffer.alloc(0), delta: null, target: 0 };
+  let data = st.rest.length ? Buffer.concat([st.rest, chunk]) : chunk;
+  let start = 0;
+  while (start + 376 < data.length && !(data[start] === 0x47 && data[start + 188] === 0x47 && data[start + 376] === 0x47)) start++;
+  const usable = start + Math.floor((data.length - start) / 188) * 188;
+  st.rest = Buffer.from(data.subarray(usable));
+  data = data.subarray(start, usable);
+  if (st.delta === null) {
+    // Равняемся по самой ранней метке кадра (DTS/PTS), а не по PCR: PCR идёт
+    // раньше кадров на задержку муксера, и выравнивание по нему давало дыру.
+    let первая = Infinity;
+    for (let o = 0; o + 188 <= data.length; o += 188) {
+      if (data[o] !== 0x47) continue;
+      const { ptsAt, dtsAt } = packetTimes(data, o);
+      if (dtsAt >= 0) первая = Math.min(первая, readPts(data, dtsAt));
+      else if (ptsAt >= 0) первая = Math.min(первая, readPts(data, ptsAt));
+    }
+    // Кадров ещё нет (только таблицы) — копим, пока не придёт первый.
+    if (первая === Infinity) { st.rest = Buffer.concat([Buffer.from(data), st.rest]); return Buffer.alloc(0); }
+    // Ровно следующий кадр за последним отданным: lastRelayPts — максимум и по
+    // звуку, так что назад не уходит ни одна дорожка. Любой запас сверху — дыра
+    // в метках, которую плеер VRChat выжидает, и задержка растёт с каждым стыком.
+    st.target = Math.max(streamTimestamp(), lastRelayPts + 1 / (sessionProfile().fps || 30));
+    st.delta = Math.round(st.target * 90000) - первая;
+  }
+  for (let o = 0; o + 188 <= data.length; o += 188) {
+    if (data[o] !== 0x47) continue;
+    const { pcrAt, ptsAt, dtsAt } = packetTimes(data, o);
+    if (pcrAt >= 0) writePcr(data, pcrAt, readPcr(data, pcrAt) + st.delta);
+    if (ptsAt >= 0) writePts(data, ptsAt, readPts(data, ptsAt) + st.delta);
+    if (dtsAt >= 0) writePts(data, dtsAt, readPts(data, dtsAt) + st.delta);
+  }
+  return data;
+}
+
+function pipeToRelay(child, first = null, firstReady = true) {
+  producerStartedAt = Date.now();
+  // Сколько потока может копить получатель, который не успевает. Перезапуск
+  // пушера рвёт всех его зрителей, поэтому запас большой: 8 с для своего
+  // сервера (короткая просадка аплинка его не трогает) и 10 с для локального
+  // MediaMTX — только чтобы зависший приёмник не съел всю память. Выкидывать
+  // отдельные чанки нельзя: чанк не равен TS-пакету, зритель получал зелёные блоки.
+  const секунда = Math.round(bitrateKbps(sessionProfile()) * 125);
+  const допуск = { remote: Math.max(2 * 1024 * 1024, секунда * 8), local: Math.max(2 * 1024 * 1024, секунда * 10) };
+  child.stdout.on('error', () => {});
+  // Данные не уходят раньше своего времени. Продюсер после старта кодировщика
+  // выдаёт кадры с опережением в 20–30 мс; новый трек обязан продолжать метки
+  // старого, поэтому опережение переходило в следующий и копилось: +0,02–0,07 с
+  // на каждое переключение, и плеер VRChat держал всё это в своём буфере как
+  // задержку. Кусок придерживается, пока часы эфира не дойдут до его метки.
+  const очередь = [];
+  let таймер = null, последний = 0;
+  const живой = () => child === activeProcess || child === outgoingProducer || child === standbyProcess;
+  const выдать = () => {
+    таймер = null;
+    // Продюсер уже сменили — его придержанный хвост лёг бы поверх нового.
+    if (!живой()) { очередь.length = 0; return; }
+    while (очередь.length && очередь[0][0] <= Date.now() + 2) deliver(очередь.shift()[1]);
+    if (очередь.length) таймер = setTimeout(выдать, Math.max(1, очередь[0][0] - Date.now()));
+  };
+  const send = (raw, готово = false) => {
+    const chunk = готово ? raw : retimeChunk(child, raw);
+    if (!chunk.length) return;
+    const метка = maxChunkPts(chunk);
+    const рано = метка ? Math.min(1000, Math.max(0, (метка - streamTimestamp()) * 1000)) : 0;
+    const когда = последний = Math.max(последний, Date.now() + рано);
+    if (!очередь.length && когда <= Date.now() + 2) { deliver(chunk); return; }
+    очередь.push([когда, chunk]);
+    таймер ||= setTimeout(выдать, Math.max(1, очередь[0][0] - Date.now()));
+  };
+  const deliver = chunk => {
     trackRelayClock(chunk);
+    кормитьЭнергию(chunk);
+    // Релея может не быть те доли секунды, пока он поднимается после падения.
+    // Обработчик его ошибок вешается один раз при запуске релея.
+    const relayIn = relayProcess?.stdin;
+    if (relayIn?.writable && !relayIn.write(chunk)) {
+      // Тот же backpressure, что давал pipe(): релей не успевает — ждём его.
+      child.stdout.pause();
+      relayIn.once('drain', () => child.stdout.resume());
+    }
     for (const [id, pusher] of rtspPushProcesses) {
       const sink = pusher.stdin;
       if (!sink?.writable) continue;
-      // Медленный получатель (свой сервер на слабом канале) не должен копить
-      // память, задержку и тормозить остальных — его чанки отбрасываются, но
-      // не молча.
-      if (sink.writableLength < допуск) {
-        sink.write(chunk);
-        if (id === 'remote') remoteDropStreak = 0;
-      } else if (id === 'remote') noteRemoteCongestion();
+      if (id === 'remote' && remoteChannelLive) { writeRemote(pusher, chunk, секунда); continue; }
+      // Локальный MediaMTX тоже не должен копить хвост: он превращается в
+      // задержку у зрителя. Тот же сброс до ключевого кадра, но без снижения битрейта.
+      if (id === 'local') { writeRemote(pusher, chunk, секунда, false); continue; }
+      if (sink.writableLength >= (допуск[id] || допуск.local)) {
+        // Пушер своего сервера, который ещё подключается, stdin не читает — это
+        // не перегрузка: ждём, как и noteRemoteCongestion, а не рвём по кругу.
+        if (id === 'remote' && (!remoteChannelLive || Date.now() - (rtspPushStartedAt.get('remote') || 0) < 10000)) continue;
+        if (id === 'remote') noteRemoteCongestion(true);
+        else log('Локальный RTSP не успевает принимать поток — переподключаю его');
+        pusher.kill('SIGTERM');
+        continue;
+      }
+      sink.write(chunk);
+      if (id === 'remote') remoteDropStreak = 0;
     }
-  });
+  };
+  if (first?.length) send(first, firstReady);
+  child.stdout.on('data', chunk => send(chunk));
+}
+
+// ── Стык треков без замершего кадра ─────────────────────────────────────────
+// Старт FFmpeg с NVENC занимает ~0,5 с. Раньше старый трек гасили сразу, и эти
+// полсекунды зритель смотрел на замерший кадр. Теперь старый продолжает идти
+// («уходящий»), пока новый запускается; новый начинает с метки времени на
+// момент своего запуска, а старый обрезается, как только дошёл до неё. Оба
+// отстают от настенных часов одинаково, поэтому стык ложится почти встык.
+let outgoingProducer = null;
+let handoffTimer = null;
+let handoffFlush = null;
+
+function releaseOutgoing() {
+  clearTimeout(handoffTimer); handoffTimer = null;
+  const old = outgoingProducer; outgoingProducer = null;
+  if (old) stopProducer(old);
+  const flush = handoffFlush; handoffFlush = null;
+  flush?.();
+}
+
+function abortHandoff() {
+  handoffFlush = null;
+  releaseOutgoing();
+}
+
+// Вместо stopProducer(activeProcess) при переходе: трек уходит, но звучит.
+function handOff() {
+  abortHandoff();
+  const old = activeProcess;
+  outgoingProducer = old; activeProcess = null; activeFilterControl = null;
+  const тишина = () => {
+    if (outgoingProducer !== old) return;
+    releaseOutgoing();
+    if (!activeProcess && activeKind === 'queue' && !queuePaused && !stopping) startStandby(sessionProfile('queue'));
+  };
+  // Уходящий доиграл, а новый ещё не открылся (ролик из сети разбирается) —
+  // заставка. И дольше 4 с старый не держим: человек нажал «дальше».
+  old.once('close', тишина);
+  handoffTimer = setTimeout(тишина, 4000);
+  consumeManualTransition();
 }
 
 let relayFailures = 0;
@@ -3161,6 +4073,7 @@ function scheduleRelayRecovery() {
 
 function startRelay(profile) {
   relayProfile = { ...profile };
+  relayBitrateKbps = Number(profile.bitrateKbps) || configuredBitrateKbps(profile);
   // Без низкого dts_delta_threshold: один мусорный PTS из оборванного пакета
   // «компенсировался» глобальным сдвигом в минус, таймстемпы заворачивались
   // через 2^33 и AVPro ломался до resync. Непрерывность обеспечивают
@@ -3179,7 +4092,7 @@ function startRelay(profile) {
     // relayProcess уже другой или пуст. Раньше и на это писалось «релей
     // остановился», пугая человека на каждой смене качества.
     if (relayProcess !== relay) return;
-    relayProcess = null; relayStartedAt = 0; relayProfile = null;
+    relayProcess = null; relayStartedAt = 0; relayProfile = null; relayBitrateKbps = 0;
     if (stopping || shuttingDown) return;
     // Релей умер сам. Раньше его не поднимал никто: HLS и RTSP вставали
     // насовсем, сторож перезапускал трек в пустоту («Cannot read properties of
@@ -3334,7 +4247,7 @@ function ensureRelay(profile = streamProfile()) {
     relayStartedAt = Date.now();
     resetQualityTelemetry();
     try { startRelay(profile); }
-    catch (error) { relayStartedAt = 0; relayProfile = null; throw error; }
+    catch (error) { relayStartedAt = 0; relayProfile = null; relayBitrateKbps = 0; throw error; }
   }
   startStandby(profile);
 }
@@ -3342,6 +4255,7 @@ function ensureRelay(profile = streamProfile()) {
 function startQueue(initialIndex = 0) {
   if (!queue.length) throw new Error('Очередь пуста. Добавьте ссылку или файл.');
   const wasLive = Boolean(activeKind);
+  if (!wasLive) encoder = pickEncoder(config.encoderMode);
   stopActive(false, true, true);
   stopping = false;
   activeKind = 'queue';
@@ -3390,13 +4304,17 @@ function spawnJson(command, args, timeout = 60000) {
 }
 
 async function resolveRemoteMedia(entryUrl) {
+  // Из сети берём не больше, чем уходит в эфир: при 720p/30 тянуть 4K/60 —
+  // лишние мегабиты и декодирование, из-за которых эфир «не успевал».
+  const профиль = streamProfile('queue');
+  const h = profileHeight(профиль), f = `[height<=${h}][fps<=${профиль.fps}]`;
   const preferred = [
-    'bestvideo[vcodec^=avc1][height<=1080]+bestaudio[acodec^=mp4a]',
-    'bestvideo[vcodec^=avc1][height<=1080]+bestaudio',
-    'bestvideo[vcodec^=vp9][height<=1080]+bestaudio',
-    'bestvideo[height<=1080]+bestaudio',
-    'best[vcodec^=avc1][height<=1080]',
-    'best[height<=1080]',
+    `bestvideo[vcodec^=avc1]${f}+bestaudio[acodec^=mp4a]`,
+    `bestvideo[vcodec^=avc1]${f}+bestaudio`,
+    `bestvideo${f}+bestaudio`,
+    `bestvideo[vcodec^=avc1][height<=${h}]+bestaudio`,
+    `bestvideo[height<=${h}]+bestaudio`,
+    `best[height<=${h}]`,
     'best',
   ].join('/');
   const data = await spawnJson(ytdlpPath(), ['--no-warnings', '--no-playlist', '--dump-single-json',
@@ -3417,6 +4335,14 @@ async function resolveRemoteMedia(entryUrl) {
   };
 }
 
+// Серия с аниме-сайта: прямую ссылку добываем каждый раз заново (живёт ~час).
+async function resolveAnimeMedia(item) {
+  const { url, duration } = await resolveAnime(item.sourceUrl);
+  if (duration && !item.duration) { item.duration = duration; saveQueueSoon(); }
+  return { title: item.title, duration: item.duration || duration, combinedUrl: url, videoUrl: null, audioUrl: null,
+    headers: null, hasVideo: true, hasAudio: true };
+}
+
 function resolveItem(item) {
   if (item.direct) {
     return Promise.resolve({ title: item.title, duration: item.duration, combinedUrl: item.sourceUrl,
@@ -3427,7 +4353,7 @@ function resolveItem(item) {
   }
   const cached = resolvedMedia.get(item.id);
   if (!cached || Date.now() - cached.createdAt > 12 * 60 * 1000) {
-    const promise = resolveRemoteMedia(item.sourceUrl).catch(error => { resolvedMedia.delete(item.id); throw error; });
+    const promise = (item.anime ? resolveAnimeMedia(item) : resolveRemoteMedia(item.sourceUrl)).catch(error => { resolvedMedia.delete(item.id); throw error; });
     resolvedMedia.set(item.id, { createdAt: Date.now(), promise });
   }
   return resolvedMedia.get(item.id).promise;
@@ -3497,8 +4423,49 @@ function clearMediaFailure(itemId) {
   if (item?.unavailable) { item.unavailable = false; saveQueue(); }
 }
 
-function cachedMediaPath(itemId) {
-  const directory = join(mediaCacheDir(), String(itemId));
+// Кеш привязан к адресу ролика, а не к id записи в очереди. Раньше ключом был
+// id, а загрузка сохранённого списка выдаёт каждому треку новый id — кеш не
+// находился, и уборка стирала его как «чужой». Тот же клип в другом списке
+// теперь сразу играет с диска.
+const ключиКеша = new Map();
+function cacheKey(item) {
+  let key = ключиКеша.get(item.sourceUrl);
+  if (!key) {
+    key = 'u' + crypto.createHash('sha1').update(item.sourceUrl).digest('hex').slice(0, 24);
+    ключиКеша.set(item.sourceUrl, key);
+  }
+  return key;
+}
+
+// Ролики, которые хранить стоит: текущая очередь и все сохранённые списки.
+function нужныеКлючиКеша() {
+  const keys = new Set();
+  for (const item of queue) if (!item.local) keys.add(cacheKey(item));
+  for (const template of templates) for (const item of template.items || []) if (!item.local && item.sourceUrl) keys.add(cacheKey(item));
+  return keys;
+}
+
+function занятыеКлючиКеша() {
+  return new Set(queue.filter(item => mediaCacheJobs.has(item.id) || item.id === currentId).map(cacheKey));
+}
+
+// Кеш, собранный старыми версиями (папки по id), переносим под новые ключи —
+// скачанное не пропадает.
+function перенестиСтарыйКеш() {
+  try {
+    const имеющиеся = new Set(readdirSync(mediaCacheDir()));
+    const все = [...queue, ...templates.flatMap(template => template.items || [])];
+    for (const item of все) {
+      if (item.local || !item.id || !имеющиеся.has(String(item.id))) continue;
+      const key = cacheKey(item);
+      if (имеющиеся.has(key)) continue;
+      try { renameSync(join(mediaCacheDir(), String(item.id)), join(mediaCacheDir(), key)); имеющиеся.add(key); } catch {}
+    }
+  } catch {}
+}
+
+function cachedMediaPath(key) {
+  const directory = join(mediaCacheDir(), String(key));
   try {
     return readdirSync(directory).map(name => join(directory, name))
       .find(file => !/\.(part|ytdl|temp)$/i.test(file) && statSync(file).isFile() && statSync(file).size > 1024) || '';
@@ -3514,10 +4481,15 @@ async function cachedMedia(item, filePath) {
 // На тесном диске кеш ужимается: иначе он доедает остаток места, а без места
 // ffmpeg не может дописывать сегменты и эфир встаёт рывками.
 function mediaCacheLimit() {
+  const ГБ = 1024 * 1024 * 1024;
   const заданный = Number(config.cacheLimitGb) || 0;
-  if (заданный > 0) return заданный * 1024 * 1024 * 1024;
-  // На тесном диске кеш ужимается сам, иначе он доедает остаток места.
-  return freeDiskMb !== null && freeDiskMb < 4000 ? 1024 * 1024 * 1024 : 4 * 1024 * 1024 * 1024;
+  if (заданный > 0) return заданный * ГБ;
+  // «Авто»: храним, пока есть место, оставляя диску 15 ГБ запаса (иначе
+  // ffmpeg встанет на записи сегментов), но не больше 100 ГБ. Раньше было
+  // 4 ГБ — на списке из 170 клипов кеш вытеснял сам себя по кругу.
+  if (freeDiskMb === null) return 4 * ГБ;
+  const кеш = (storageInfo.sizeMb || 0) * 1024 * 1024;
+  return Math.max(ГБ, Math.min(100 * ГБ, кеш + Math.max(0, freeDiskMb * 1024 * 1024 - 15 * ГБ)));
 }
 
 // Регулярная уборка: кеш по лимиту, папки удалённых треков, ненужные превью
@@ -3529,8 +4501,10 @@ function cleanupStorage() {
   listDrives().then(drives => { storageInfo = { ...storageInfo, drives }; }).catch(() => {});
   const alive = new Set(queue.map(item => item.id));
   try {
+    // Удаляем только то, чего нет ни в очереди, ни в одном сохранённом списке.
+    const нужные = нужныеКлючиКеша(), занятые = занятыеКлючиКеша();
     for (const name of readdirSync(mediaCacheDir())) {
-      if (alive.has(name) || mediaCacheJobs.has(name)) continue;
+      if (нужные.has(name) || занятые.has(name)) continue;
       rmSync(join(mediaCacheDir(), name), { recursive: true, force: true });
     }
   } catch {}
@@ -3547,6 +4521,7 @@ function cleanupStorage() {
 }
 
 let storageInfo = { sizeMb: 0, drives: [] };
+перенестиСтарыйКеш();
 
 function mediaCacheSizeMb() {
   try {
@@ -3567,21 +4542,31 @@ function trimMediaCache(maxBytes = mediaCacheLimit()) {
         const files = readdirSync(directory).map(file => join(directory, file)).filter(file => statSync(file).isFile());
         return [{ directory, size: files.reduce((sum, file) => sum + statSync(file).size, 0), modified: statSync(directory).mtimeMs }];
       } catch { return []; }
-    }).sort((left, right) => left.modified - right.modified);
+    });
+    // Вытесняем сначала то, чего нет в очереди, потом давно не игранное.
+    // Ближайшие треки (их прогрев только что скачал) не трогаем вовсе.
+    const вОчереди = new Set(queue.filter(item => !item.local).map(cacheKey));
+    const ближайшие = new Set(ближайшиеТреки(PREFETCH_AHEAD).map(cacheKey));
+    const занятые = занятыеКлючиКеша();
+    entries.sort((left, right) => (вОчереди.has(basename(left.directory)) - вОчереди.has(basename(right.directory))) || left.modified - right.modified);
     let total = entries.reduce((sum, entry) => sum + entry.size, 0);
     for (const entry of entries) {
       if (total <= maxBytes) break;
-      if (mediaCacheJobs.has(basename(entry.directory))) continue;
+      const key = basename(entry.directory);
+      if (занятые.has(key) || ближайшие.has(key)) continue;
       rmSync(entry.directory, { recursive: true, force: true }); total -= entry.size;
+      готовыеВКеше.delete(key);
     }
   } catch {}
 }
 
 function downloadRemoteMedia(item) {
-  const existing = cachedMediaPath(item.id);
+  const existing = cachedMediaPath(cacheKey(item));
   if (existing) {
+    // Касаемся папки: уборка по месту вытесняет давно не игранное первым.
+    try { const now = new Date(); utimesSync(join(mediaCacheDir(), cacheKey(item)), now, now); } catch {}
     return cachedMedia(item, existing).catch(() => {
-      try { rmSync(join(mediaCacheDir(), item.id), { recursive: true, force: true }); } catch {}
+      try { rmSync(join(mediaCacheDir(), cacheKey(item)), { recursive: true, force: true }); } catch {}
       return startCacheDownload(item);
     });
   }
@@ -3590,10 +4575,12 @@ function downloadRemoteMedia(item) {
 
 function startCacheDownload(item) {
   if (mediaCacheJobs.has(item.id)) return mediaCacheJobs.get(item.id);
-  const directory = join(mediaCacheDir(), item.id);
+  const directory = join(mediaCacheDir(), cacheKey(item));
   mkdirSync(directory, { recursive: true });
   let promise;
-  promise = new Promise((resolvePromise, reject) => {
+  // У серии с аниме-сайта yt-dlp качает не страницу, а свежую прямую ссылку.
+  const источник = item.anime ? resolveAnime(item.sourceUrl).then(media => media.url) : Promise.resolve(item.sourceUrl);
+  promise = источник.then(sourceUrl => new Promise((resolvePromise, reject) => {
     log(`Буферизация трека: ${item.title}`);
     // Во время эфира качаем бережно: четыре потока на полной скорости забивают
     // канал, и картинка у зрителя начинает отставать, хотя сам поток исправен.
@@ -3605,7 +4592,7 @@ function startCacheDownload(item) {
       // «Requested format is not available» — такие ролики не кешировались никогда.
       '--socket-timeout', '20', '-f',
       'bv*[vcodec^=avc1][height<=?1080]+ba[ext=m4a]/b[ext=mp4][height<=?1080]/best[height<=?1080]',
-      '--merge-output-format', 'mp4', '--remux-video', 'mp4', '-o', join(directory, 'source.%(ext)s'), item.sourceUrl];
+      '--merge-output-format', 'mp4', '--remux-video', 'mp4', '-o', join(directory, 'source.%(ext)s'), sourceUrl];
     const child = inBackground(spawn(ytdlpPath(), args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
     mediaCacheProcesses.set(child, item.id);
     let stderr = '';
@@ -3622,12 +4609,13 @@ function startCacheDownload(item) {
         return reject(Object.assign(new Error('Загрузка остановлена.'), { cancelled: true }));
       }
       if (code !== 0) return reject(new Error((stderr || `yt-dlp завершился с кодом ${code}`).trim().split(/\r?\n/).pop()));
-      const file = cachedMediaPath(item.id);
+      const file = cachedMediaPath(cacheKey(item));
       if (!file) return reject(new Error('Загруженный файл не найден.'));
       cachedMedia(item, file).then(resolvePromise, reject);
     });
-  }).then(media => {
-    log(`Трек буферизирован: ${item.title}`); готовыеВКеше.add(item.id); trimMediaCache(); return media;
+  })).then(media => {
+    log(`Трек буферизирован: ${item.title}`); готовыеВКеше.add(cacheKey(item)); trimMediaCache();
+    storageInfo = { ...storageInfo, sizeMb: mediaCacheSizeMb() }; return media;
   }).finally(() => { if (mediaCacheJobs.get(item.id) === promise) mediaCacheJobs.delete(item.id); });
   mediaCacheJobs.set(item.id, promise);
   return promise;
@@ -3641,13 +4629,28 @@ function stableQueueMedia(item) {
   if (item.local) return resolveItem(item);
   // Живой поток скачать нельзя: он бесконечный. Играем напрямую.
   if (item.live) return resolveItem(item);
-  const готовый = cachedMediaPath(item.id);
+  const готовый = cachedMediaPath(cacheKey(item));
   // Прямая ссылка на файл — это уже готовый mp4. Гонять его через yt-dlp
   // бессмысленно: тот разбирает страницы, а не файлы, и на таких ссылках
   // просто падает с 404. Играем прямо из сети.
   if (!готовый && item.direct) return resolveItem(item);
-  if (!готовый && cacheDeclinedNow(item.id)) return resolveItem(item);
-  if (!готовый && Number(item.duration) > CACHE_MAX_SECONDS) return resolveItem(item);
+  // Ещё не скачан — не ждём загрузку (раньше до 20 с заставки): включаем сразу
+  // из сети, как в браузере, а на диск он докачивается фоном к следующему разу.
+  if (!готовый) {
+    if (!cacheDeclinedNow(item.id) && !(Number(item.duration) > CACHE_MAX_SECONDS)) {
+      downloadRemoteMedia(item).then(() => clearMediaFailure(item.id)).catch(error => {
+        // Загрузку оборвал старт эфира или переход — докачиваем чуть позже,
+        // иначе играющий ролик так и оставался только в сети.
+        if (error.cancelled) {
+          setTimeout(() => { if (queue.includes(item) && !cachedMediaPath(cacheKey(item))) downloadRemoteMedia(item).catch(() => {}); }, 3000);
+          return;
+        }
+        logDetail(`Буфер не собрался для «${item.title}»: ${error.message}`);
+        declineCache(item.id, error.message);
+      });
+    }
+    return resolveItem(item);
+  }
   return downloadRemoteMedia(item).then(media => { clearMediaFailure(item.id); return media; }).catch(error => {
     if (error.cancelled) return resolveItem(item);
     // Прямой поток YouTube живёт минуты и часто отдаёт 403 — на него
@@ -3833,7 +4836,18 @@ function preloadNext(index) {
 // треки — тогда «следующий», клик по списку и повтор идут из локального файла
 // и переключаются мгновенно. Всю очередь качать нельзя: на плейлисте в полсотни
 // роликов это часы работы yt-dlp фоном, и эфир от такой нагрузки дёргается.
-const PREFETCH_AHEAD = 2;
+const PREFETCH_AHEAD = 10;
+const ПРОГРЕВ_СЕРИЙ = 3;
+
+// Ближайшие по порядку воспроизведения треки из сети, начиная со следующего.
+function ближайшиеТреки(count, fromIndex = queueIndex) {
+  const out = [];
+  for (let шаг = 0; шаг < Math.min(count, queue.length); шаг++) {
+    const item = queue[(Math.max(0, fromIndex) + шаг) % queue.length];
+    if (item && !item.local) out.push(item);
+  }
+  return out;
+}
 // Паузы между остановкой прежнего источника и запуском следующего. Числа
 // подобраны замерами: меньше — ffmpeg не успевает освободить устройство
 // захвата, больше — переход становится заметен глазу.
@@ -3851,18 +4865,31 @@ async function prefetchQueue(fromIndex = queueIndex) {
   if (prefetching) { prefetchPending = fromIndex; return; }
   prefetching = true;
   try {
-    const ближайшие = [];
-    for (let шаг = 0; шаг <= PREFETCH_AHEAD; шаг++) ближайшие.push(queue[(Math.max(0, fromIndex) + шаг) % queue.length]);
-    for (const item of ближайшие) {
+    // Сначала ближайшие 10 — целиком, чтобы переключения шли с диска. Потом
+    // фоном вся остальная очередь, пока кешу хватает места: так к середине
+    // списка всё уже лежит локально и ждать не приходится вовсе.
+    const ближайшие = ближайшиеТреки(queue.length, fromIndex);
+    for (const [номер, item] of ближайшие.entries()) {
       if (shuttingDown) return;
+      if (номер >= PREFETCH_AHEAD && (storageInfo.sizeMb || 0) * 1024 * 1024 > mediaCacheLimit() * 0.9) break;
       // Пометка «недоступен» живёт в queue.json, а память об ошибках — только до
       // перезапуска: без этой проверки каждый запуск заново гонял yt-dlp по
       // удалённому ролику.
       if (!item || item.local || item.direct || item.live || item.unavailable || item.id === currentId) continue;
-      if (cachedMediaPath(item.id) || cacheDeclinedNow(item.id) || mediaFailure(item.id)) continue;
+      // Серии по 350 МБ: весь сериал на 366 серий — это 120 ГБ и часы загрузки.
+      // Качаем только ближайшие три, остальные играют прямо с сайта (с
+      // перемоткой, как в браузере), а к своему времени подкачаются сами.
+      if (item.anime && номер >= ПРОГРЕВ_СЕРИЙ) continue;
+      if (cachedMediaPath(cacheKey(item)) || cacheDeclinedNow(item.id) || mediaFailure(item.id)) continue;
       if (!queue.some(entry => entry.id === item.id)) continue;
-      try { await stableQueueMedia(item); }
+      // Прогрев качает по одному и ждёт каждый: stableQueueMedia для
+      // нескачанного сразу отдаёт сеть и не ждёт загрузку — всё качалось бы разом.
+      if (Number(item.duration) > CACHE_MAX_SECONDS) continue;
+      try { await downloadRemoteMedia(item); clearMediaFailure(item.id); }
       catch (error) {
+        // Загрузку оборвали мы сами (старт эфира, переход) — это не отказ
+        // источника: откладывать ролик на 5 минут нельзя, прогрев вернётся сам.
+        if (error.cancelled) continue;
         declineCache(item.id, error.message);
         log(`Прогрев «${item.title}»: ${error.message}`);
       }
@@ -3881,17 +4908,110 @@ async function prefetchQueue(fromIndex = queueIndex) {
 // программному пути, поэтому флаг безопасен для любых источников.
 const HWACCEL = ['-hwaccel', 'auto'];
 
-function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
+// Порты для zmq берём у системы: расчёт от PORT пересекался у двух копий
+// программы, zmq не мог занять порт, и FFmpeg падал на старте трека.
+function freePort() {
+  return new Promise((resolvePromise, reject) => {
+    const probe = netCreateServer(); probe.unref(); probe.on('error', reject);
+    probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolvePromise(port)); });
+  });
+}
+
+async function nextFilterControl() {
+  return { videoPort: await freePort(), audioPort: await freePort() };
+}
+
+// Фильтр zmq в FFmpeg — REP-сокет. Говорим с ним сами по ZMTP 3.0 (NULL, без
+// шифрования): приветствие, READY, запрос из пустого разделителя и текста.
+// Раньше для этого запускался отдельный .NET-помощник на 25 МБ — ~300 мс на
+// каждую команду и лишний вес в установщике.
+function zmqFrame(flags, body) {
+  if (body.length < 256) return Buffer.concat([Buffer.from([flags, body.length]), body]);
+  const head = Buffer.alloc(9); head[0] = flags | 2; head.writeBigUInt64BE(BigInt(body.length), 1);
+  return Buffer.concat([head, body]);
+}
+
+function zmqRequest(port, text, timeoutMs = 1500) {
+  return new Promise((resolvePromise, reject) => {
+    const socket = netConnect(port, '127.0.0.1');
+    const greeting = Buffer.alloc(64); greeting[0] = 0xff; greeting[9] = 0x7f; greeting[10] = 3; greeting.write('NULL', 12);
+    const ready = Buffer.from('\x05READY\x0bSocket-Type\x00\x00\x00\x03REQ', 'latin1');
+    let buffer = Buffer.alloc(0), greeted = false;
+    const finish = (error, value) => { clearTimeout(timer); socket.destroy(); error ? reject(error) : resolvePromise(value); };
+    const timer = setTimeout(() => finish(new Error('FFmpeg не ответил на команду')), timeoutMs);
+    socket.on('error', error => finish(error));
+    socket.on('connect', () => socket.write(greeting));
+    socket.on('data', chunk => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (!greeted) {
+        if (buffer.length < 64) return;
+        buffer = buffer.subarray(64); greeted = true;
+        socket.write(Buffer.concat([zmqFrame(4, ready), zmqFrame(1, Buffer.alloc(0)), zmqFrame(0, Buffer.from(text))]));
+      }
+      while (buffer.length >= 2) {
+        const flags = buffer[0], head = flags & 2 ? 9 : 2;
+        if (buffer.length < head) return;
+        const size = flags & 2 ? Number(buffer.readBigUInt64BE(1)) : buffer[1];
+        if (buffer.length < head + size) return;
+        const body = buffer.subarray(head, head + size); buffer = buffer.subarray(head + size);
+        // Команды (READY) и пустой разделитель пропускаем; ответ — последний кадр.
+        if (!(flags & 4) && !(flags & 1) && size) return finish(null, body.toString());
+      }
+    });
+  });
+}
+
+async function sendFilterCommand(port, target, command, value) {
+  if (!port) throw new Error('Медиапоток ещё не готов к настройке.');
+  const reply = await zmqRequest(port, `${target} ${command} ${value}`);
+  if (!/^0\s/.test(reply)) throw new Error(`FFmpeg не принял настройку: ${reply.slice(0, 120)}`);
+}
+
+function setptsExpression(speed) {
+  const value = Math.max(0.5, Math.min(2, Number(speed) || 1));
+  return `if(isnan(PREV_OUTPTS),PTS/${value},PREV_OUTPTS+(PTS-PREV_INPTS)/${value})`;
+}
+
+// Скорость и громкость меняются командой в уже идущий FFmpeg — без разрыва.
+// Не вышло (FFmpeg без zmq, трек ещё открывается) — прежний путь: перезапуск
+// трека с той же позиции. Позицию берём ДО смены скорости в настройках.
+async function applyMediaLive(hot, position) {
+  // Пока команда шла, трек мог смениться или встать на паузу — тогда позицию
+  // не трогаем: она уже чужая.
+  const child = activeProcess, generation = playGeneration;
+  const тотЖе = () => activeProcess === child && generation === playGeneration && !queuePaused;
+  try { await hot(); if (тотЖе()) { sourcePosition = position; currentStartedAt = Date.now(); } }
+  catch (error) {
+    if (!тотЖе()) return;
+    if (activeFilterControl) log(`Настройка на лету не прошла (${error.message}) — перезапускаю трек с той же позиции`);
+    transitionQueue('seek', position);
+  }
+}
+
+async function hotMediaVolume(volume) {
+  const control = activeFilterControl;
+  if (!control || control.child !== activeProcess) throw new Error('Медиапоток ещё не готов к настройке.');
+  await sendFilterCommand(control.audioPort, 'volume@media_volume', 'volume', Number(volume).toFixed(3));
+}
+
+async function hotMediaSpeed(speed) {
+  const control = activeFilterControl;
+  if (!control || control.child !== activeProcess) throw new Error('Медиапоток ещё не готов к настройке.');
+  await Promise.all([
+    sendFilterCommand(control.audioPort, 'atempo@media_tempo', 'tempo', Number(speed).toFixed(3)),
+    sendFilterCommand(control.videoPort, 'setpts@media_pts', 'expr', setptsExpression(speed)),
+  ]);
+}
+
+function queueProducerArgs(media, timestampOffset, seekPosition = 0, control = null) {
   const profile = sessionProfile('queue');
   const height = profileHeight(profile);
   const width = Math.round(height * 16 / 9 / 2) * 2;
   const args = ['-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts'];
-  // Темп чтения обязан совпадать со скоростью воспроизведения: setpts и atempo
-  // ниже сжимают время в speed раз. С «-re» (темп 1×) на скорости 2× поток шёл
-  // вдвое медленнее реального времени — фризы и ложное снижение качества, а на
-  // 0,5× убегал вперёд, и каждые 45 с срабатывала пересборка канала с resync.
+  // Темп держат realtime/arealtime ПОСЛЕ фильтров. Благодаря этому скорость и
+  // громкость можно менять командами FFmpeg без убийства процесса и провала
+  // звука. Пейсинг входа (-re/-readrate) для горячей скорости не подходит.
   const speed = Math.max(0.5, Math.min(2, Number(config.playbackSpeed) || 1));
-  const pace = speed === 1 ? ['-re'] : ['-readrate', String(speed)];
   let inputIndex = 0, videoIndex = null, audioIndex = null;
 
   // Заголовки должны стоять перед каждым сетевым входом
@@ -3904,10 +5024,10 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   }
   if (media.videoUrl && media.audioUrl && media.videoUrl !== media.audioUrl) {
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
-    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', ...HWACCEL, ...pace, '-i', media.videoUrl);
+    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', ...HWACCEL, '-i', media.videoUrl);
     videoIndex = inputIndex++;
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
-    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', ...pace, '-i', media.audioUrl);
+    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', '-i', media.audioUrl);
     audioIndex = inputIndex++;
   } else {
     const source = media.combinedUrl || media.videoUrl || media.audioUrl;
@@ -3919,7 +5039,7 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
     // видео просто игнорируется) и всегда держим темп реального времени:
     // без него готовый плейлист проглатывается вдвое быстрее и эфир уезжает.
     if (media.live) args.push('-live_start_index', '-1');
-    args.push(...HWACCEL, ...pace, '-i', source);
+    args.push(...HWACCEL, '-i', source);
     if (media.hasVideo) videoIndex = inputIndex;
     if (media.hasAudio) audioIndex = inputIndex;
     inputIndex++;
@@ -3928,11 +5048,11 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   if (videoIndex === null) {
     // -re обязателен: без него lavfi-подложка генерируется со скоростью CPU и
     // разносит таймлайн (аудио-треки без видео ломали плеер именно так).
-    args.push(...pace, '-f', 'lavfi', '-i', `color=c=0x080611:s=${width}x${height}:r=${profile.fps}`);
+    args.push('-f', 'lavfi', '-i', `color=c=0x080611:s=${width}x${height}:r=${profile.fps}`);
     videoIndex = inputIndex++;
   }
   if (audioIndex === null) {
-    args.push(...pace, '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000');
+    args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000');
     audioIndex = inputIndex++;
   }
 
@@ -3940,10 +5060,18 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0) {
   // Заглавная V берёт только настоящее видео и пропускает обложку альбома.
   // Субтитры и служебные дорожки VRChat не понимает вовсе — отрезаем их явно,
   // вместе с главами и метаданными файла.
+  // Адрес ZMQ проходит два уровня разбора filtergraph, поэтому каждой ':'
+  // нужны три обратные косые черты (официальный синтаксис FFmpeg). String.raw
+  // не даёт JavaScript съесть один из уровней экранирования.
+  const videoControl = control ? `,zmq=bind_address=${String.raw`tcp\\\://127.0.0.1\\\:${control.videoPort}`}` : '';
+  const audioControl = control ? `,azmq=bind_address=${String.raw`tcp\\\://127.0.0.1\\\:${control.audioPort}`}` : '';
+  // Выражение setpts — в одинарных кавычках: с «\,» свежий FFmpeg всё равно
+  // резал его по запятым («No such filter: 'PTS/1'») и ни один трек не стартовал.
+  const pts = `'${setptsExpression(speed)}'`;
   args.push('-map', `${videoIndex}:V:0`, '-map', `${audioIndex}:a:0`,
     '-sn', '-dn', '-map_chapters', '-1', '-map_metadata', '-1', '-shortest',
-    '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS/${speed}`,
-    '-af', `atempo=${speed},volume=${mediaVolume.toFixed(2)},alimiter=limit=0.97:level=disabled,aresample=async=1000:first_pts=0`,
+    '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts@media_pts=${pts},realtime${videoControl}`,
+    '-af', `atempo@media_tempo=${speed},volume@media_volume=${mediaVolume.toFixed(2)},alimiter=limit=0.97:level=disabled,aresample=async=1000:first_pts=0,arealtime${audioControl}`,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...producerEncodeArgs(profile), '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
     '-max_muxing_queue_size', '4096',
     '-output_ts_offset', timestampOffset.toFixed(3), '-mpegts_flags', 'resend_headers', '-muxdelay', '0', '-muxpreload', '0', '-flush_packets', '1', '-f', 'mpegts', 'pipe:1');
@@ -3967,7 +5095,7 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
     if (item?.local && item.missing) {
       // Заставку поднимаем до ожидания диска: сетевая папка может молчать
       // десятки секунд, и всё это время у релея не было бы источника.
-      if (!activeProcess && !queuePaused) startStandby(sessionProfile('queue'));
+      if (!activeProcess && !outgoingProducer && !queuePaused) startStandby(sessionProfile('queue'));
       файлаНет = await access(item.sourceUrl).then(() => false, () => true);
       // Пока ждали диск, могли нажать «Стоп», паузу или выбрать другой трек.
       if (stopping || generation !== playGeneration || queuePaused || manualTransition) {
@@ -4010,7 +5138,7 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
   // фриз — снижал качество до конца эфира и пересобирал канал. Если источник
   // не готов быстро, на это время показываем заставку.
   const заставка = setTimeout(() => {
-    if (generation === playGeneration && !activeProcess && !queuePaused && !stopping) startStandby(sessionProfile('queue'));
+    if (generation === playGeneration && !activeProcess && !outgoingProducer && !queuePaused && !stopping) startStandby(sessionProfile('queue'));
   }, 500);
   try {
     // Ждать источник бесконечно нельзя: пока висит preparingNext, любое
@@ -4034,14 +5162,32 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
         }, ждать);
       }),
     ]).finally(() => { if (запасной) { clearTimeout(запасной); запасной = null; } });
+    const control = ffmpegHasZmq ? await nextFilterControl().catch(() => null) : null;
     if (stopping || generation !== playGeneration || queuePaused) return;
     // A seek/jump issued while yt-dlp was resolving supersedes this item.
     if (manualTransition) return;
     currentDuration = media.duration || item.duration || null;
     stopStandby();
-    const child = onAirProducer(spawn('ffmpeg', queueProducerArgs(media, markProducerTimestamp(nextProducerTimestamp()), sourcePosition), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
+    const offset = markProducerTimestamp(nextProducerTimestamp());
+    const child = onAirProducer(spawn('ffmpeg', queueProducerArgs(media, offset, sourcePosition, control), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
     activeProcess = child;
-    pipeToRelay(child);
+    activeFilterControl = control && { ...control, child };
+    if (outgoingProducer) {
+      // Старый ещё звучит: первые куски нового придерживаем, пока старый не
+      // дойдёт до метки нового. Больше секунды не ждём — лучше короткая дыра
+      // во времени, чем задержка, растущая на каждом переходе.
+      // Старый режем, только когда известна метка нового (его первый пакет):
+      // до этого новый ещё открывается, и отрезанный заранее старый давал паузу.
+      // Новый выдал первый пакет — значит, готов. Старый обрываем сразу, а
+      // метку новому ставим уже после этого: ровно следующий кадр за последним
+      // отданным. Раньше метка бралась заранее, старый доигрывал до неё минус
+      // два кадра, плюс 40 мс запаса — дыра ~0,07 с на каждом стыке, плеер
+      // VRChat её выжидал, и задержка росла с каждым переключением.
+      const held = [];
+      const hold = chunk => { held.push(chunk); if (held.length === 1) releaseOutgoing(); };
+      handoffFlush = () => { child.stdout.off('data', hold); pipeToRelay(child, held.length ? Buffer.concat(held) : null, false); };
+      child.stdout.on('data', hold);
+    } else pipeToRelay(child);
     currentStartedAt = Date.now();
     playbackBusy = false;
     log(`Сейчас играет: ${item.title}`);
@@ -4053,6 +5199,7 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
       if (activeProcess !== child) return;
       const ranFor = currentStartedAt ? (Date.now() - currentStartedAt) / 1000 : 0;
       activeProcess = null;
+      if (activeFilterControl?.child === child) activeFilterControl = null;
       currentStartedAt = null;
       if (stopping || generation !== playGeneration) return;
       const transition = manualTransition;
@@ -4139,23 +5286,27 @@ function stopActive(clearCurrent = true, keepTunnel = true, keepRelay = true) {
   stopping = true;
   stopMediaCacheDownloads();
   stopWindowWatch();
+  остановитьЭнергию();
   playGeneration++;
   preparingNext = false;
   activeAuxProcess?.stdout?.unpipe();
   activeWindowProcess?.stdout?.unpipe();
   if (!keepAudioHelper) stopAudioHelper(activeAuxProcess);
   if (!keepWindowHelper) stopWindowHelper(activeWindowProcess);
+  abortHandoff();
   stopProducer(activeProcess);
   // На паузе в эфире стоит стоп-кадр трека — он живёт на месте заставки, и
   // startStandby его не трогал: после «Стоп» зрители так и видели замерший
   // кадр фильма вместо экрана ожидания.
   if (queuePaused) stopStandby();
-  if (!keepRelay) { stopStandby(); stopRtspPush(); relayProcess?.kill('SIGTERM'); relayProcess = null; relayStartedAt = 0; relayProfile = null; }
+  if (!keepRelay) { stopStandby(); stopRtspPush(); relayProcess?.kill('SIGTERM'); relayProcess = null; relayStartedAt = 0; relayProfile = null; relayBitrateKbps = 0; }
   if (!keepTunnel) stopPublicTunnel();
   activeProcess = null; activeKind = null;
+  activeFilterControl = null;
   if (!keepAudioHelper) { activeAuxProcess = null; audioHelperKey = ''; }
   if (!keepWindowHelper) { activeWindowProcess = null; windowHelperKey = ''; }
   audioLevelDb = -96; audioSamples = 0; audioSquares = 0;
+  if (!keepAudioHelper) activeAudioStartedAt = 0;
   queuePaused = false; manualTransition = null; playbackBusy = false;
   if (clearCurrent) { currentId = null; currentStartedAt = null; currentDuration = null; }
   // Новый эфир начинается с того качества, которое выбрал человек.
@@ -4177,6 +5328,7 @@ function transitionQueue(type, value = null) {
   if (activeKind !== 'queue') throw new Error('Очередь сейчас не играет.');
   if (type === 'pause') {
     if (queuePaused) return;
+    abortHandoff();
     const pausingPendingSeek = manualTransition?.type === 'seek' || playbackBusy;
     const visiblePosition = Number(value);
     pausedPosition = Number.isFinite(visiblePosition) ? Math.max(0, Math.min(currentDuration || Number.MAX_SAFE_INTEGER, visiblePosition)) : currentSourcePosition();
@@ -4213,7 +5365,7 @@ function transitionQueue(type, value = null) {
     playbackBusy = true; playbackRevision++;
     manualTransition = { type: 'jump', index: target, position: 0 };
   }
-  if (activeProcess) stopProducer(activeProcess);
+  if (activeProcess) handOff();
   else consumeManualTransition();
 }
 
@@ -4225,11 +5377,29 @@ function transitionQueueTo(index, position = 0) {
   sourcePosition = Math.max(0, Number(position) || 0); pausedPosition = sourcePosition; currentStartedAt = null;
   playbackBusy = true; playbackRevision++;
   manualTransition = { type: 'jump', index: target, position: Math.max(0, Number(position) || 0) };
-  if (activeProcess) stopProducer(activeProcess);
+  if (activeProcess) handOff();
   else consumeManualTransition();
 }
 
-function playbackCommand(body) {
+// Естественный конец трека встречаем заранее. Позиция по настенным часам
+// опережает то, что уже ушло в эфир, ровно на отставание потока, — поэтому в
+// момент, когда она дошла до длительности, у старого в запасе как раз столько,
+// сколько новому нужно на запуск, и метка нового совпадает с концом старого.
+setInterval(() => {
+  if (activeKind !== 'queue' || !activeProcess || outgoingProducer || queuePaused || preparingNext
+    || manualTransition || stopping || !currentDuration || !currentStartedAt) return;
+  const item = queue[queueIndex];
+  if (!item || item.live) return;
+  const осталось = (currentDuration - currentSourcePosition()) / (Number(config.playbackSpeed) || 1);
+  if (осталось > 0.05 || осталось < -2) return;
+  let next = config.loopMode === 'one' ? queueIndex : queueIndex + 1;
+  if (next >= queue.length) { if (config.loopMode !== 'all') return; next = 0; }
+  sourcePosition = 0; pausedPosition = 0; currentStartedAt = null; playbackRevision++;
+  manualTransition = { type: 'jump', index: next, position: 0 };
+  handOff();
+}, 100).unref?.();
+
+async function playbackCommand(body) {
   const action = String(body.action || '');
   if (action === 'pause') transitionQueue('pause', body.position);
   else if (action === 'resume') transitionQueue('resume');
@@ -4240,7 +5410,7 @@ function playbackCommand(body) {
   else if (action === 'jump') {
     const index = queue.findIndex(item => item.id === String(body.id || ''));
     if (index < 0) throw new Error('Трек больше не найден в очереди.');
-    if (activeKind !== 'queue') startQueue(index);
+    if (activeKind !== 'queue') { requireReadyOutput(); startQueue(index); }
     else transitionQueueTo(index, 0);
   }
   else if (action === 'loop') saveConfig({ loopMode: ['once', 'one', 'all'].includes(body.mode) ? body.mode : 'once' });
@@ -4250,19 +5420,15 @@ function playbackCommand(body) {
     saveConfig({ playbackSpeed: speed });
     if (activeKind === 'queue') {
       if (queuePaused) pausedPosition = position;
-      else transitionQueue('seek', position);
+      else await applyMediaLive(() => hotMediaSpeed(speed), position);
     }
   } else if (action === 'volume') {
-    const position = activeKind === 'queue' ? currentSourcePosition() : 0;
     // До 4× — как и ползунок в настройках (400%). Раньше здесь стоял предел 2,
     // и усиление выше 200% при живом эфире молча срезалось: ползунок ехал, а
     // громче не становилось.
     const volume = Math.max(0, Math.min(4, Number(body.volume) || 0));
     saveConfig({ mediaVolume: volume });
-    if (activeKind === 'queue') {
-      if (queuePaused) pausedPosition = position;
-      else transitionQueue('seek', position);
-    }
+    if (activeKind === 'queue' && !queuePaused) await applyMediaLive(() => hotMediaVolume(volume), currentSourcePosition());
   } else throw new Error('Неизвестная команда плеера.');
   return status();
 }
@@ -4308,11 +5474,58 @@ async function directMediaInfo(rawUrl) {
   } catch { return null; }
 }
 
-async function addUrl(rawUrl) {
+// Серии по выбору из окна добавления: одна, с выбранной до конца или все.
+async function addAnime(rawUrl, choice = {}) {
+  let серии;
+  try { серии = await listAnime(rawUrl, choice || {}); }
+  catch (error) { throw new Error(`Не удалось получить серии: ${error.message}`); }
+  if (серии.length > 2000) throw new Error('Слишком много серий за раз — добавьте по сезонам.');
+  const added = серии.map(серия => ({ id: crypto.randomUUID(), title: серия.title, sourceUrl: серия.sourceUrl,
+    duration: null, thumbnail: серия.thumbnail || '', local: false, hasVideo: true, hasAudio: true, anime: true }));
+  queue.push(...added);
+  saveQueue();
+  log(`Добавлено серий: ${added.length}${added.length === 1 ? ` — ${added[0].title}` : ''}`);
+  prefetchQueue(0);
+  дозаполнитьДлительности();
+  return added;
+}
+
+// Длительность серий — без скачивания: из плейлиста потока (два запроса к
+// сайту на серию). По одной и с паузой, чтобы 366 серий не легли пачкой
+// запросов на сайт и не тормозили эфир; очередь сразу показывает 24:26.
+let длительностиИдут = false;
+const длительностьПробовали = new Set();
+async function дозаполнитьДлительности() {
+  if (длительностиИдут) return;
+  длительностиИдут = true;
+  try {
+    for (;;) {
+      const item = queue.find(entry => entry.anime && !entry.duration && !длительностьПробовали.has(entry.id));
+      if (!item || shuttingDown) return;
+      длительностьПробовали.add(item.id);
+      try {
+        const { duration } = await resolveAnime(item.sourceUrl);
+        if (duration && queue.includes(item)) { item.duration = duration; saveQueueSoon(); }
+      } catch {}
+      await new Promise(resolve => setTimeout(resolve, 700));
+    }
+  } finally { длительностиИдут = false; }
+}
+let сохранениеОчереди = null;
+function saveQueueSoon() {
+  сохранениеОчереди ||= setTimeout(() => { сохранениеОчереди = null; saveQueue(); }, 3000);
+}
+
+// Разобранный, но ещё не подтверждённый плейлист: второй раз его не разбираем.
+const ждутПодтверждения = new Map();
+const СПРОСИТЬ_ОТ = 10;
+
+async function addUrl(rawUrl, options = {}) {
   if (!validWebUrl(rawUrl)) throw new Error('Вставьте полную ссылку с http:// или https://');
   const host = new URL(rawUrl).hostname.toLowerCase();
   if (host === 'open.spotify.com') throw new Error('Spotify не отдаёт полный трек. Для Spotify используйте захват окна и звук компьютера.');
   if (!tools.ytdlp) throw new Error('Компонент загрузки видео не найден.');
+  if (isAnimeUrl(rawUrl)) return addAnime(rawUrl, options.anime);
   const direct = DIRECT_LIVE.test(rawUrl) || DIRECT_FILE.test(rawUrl);
   if (direct) {
     const live = DIRECT_LIVE.test(rawUrl);
@@ -4336,9 +5549,14 @@ async function addUrl(rawUrl) {
   // Сначала обычный разбор, затем «общий» — он вытаскивает плеер прямо со
   // страницы. Так добавляются аниме-сайты и прочие площадки, для которых
   // отдельного разборщика нет.
-  let flat;
-  try {
-    flat = await spawnJson(ytdlpPath(), ['--no-warnings', '--flat-playlist', '--dump-single-json', rawUrl], 70000);
+  // «Только это видео» из ссылки, где есть и ролик, и плейлист (YouTube ?v=…&list=…).
+  const одно = new URL(rawUrl).searchParams.get('v');
+  const отложенный = ждутПодтверждения.get(rawUrl);
+  ждутПодтверждения.delete(rawUrl);
+  let flat = options.confirm === 'all' && отложенный && Date.now() - отложенный.at < 10 * 60000 ? отложенный.flat : null;
+  const толькоОдно = options.confirm === 'single' && одно ? ['--no-playlist'] : [];
+  if (!flat) try {
+    flat = await spawnJson(ytdlpPath(), ['--no-warnings', ...толькоОдно, '--flat-playlist', '--dump-single-json', rawUrl], 70000);
   } catch (error) {
     log(`Пробую разобрать страницу целиком: ${host}`);
     logDetail(`Обычный разбор не удался для ${rawUrl}: ${error.message}`);
@@ -4346,6 +5564,9 @@ async function addUrl(rawUrl) {
       flat = await spawnJson(ytdlpPath(), ['--no-warnings', '--force-generic-extractor', '--dump-single-json', rawUrl], 90000);
     } catch (generic) {
       logDetail(`Общий разбор тоже не удался для ${rawUrl}: ${generic.message}`);
+      // Большинство русских аниме-сайтов встраивают плеер Kodik — берём его.
+      const kodik = await findKodikOnPage(rawUrl).catch(() => null);
+      if (kodik) return addAnime(kodik, options.anime);
       if (/confirm you.?re not a bot|Sign in to confirm|not a bot/i.test(error.message + generic.message)) {
         throw new Error('YouTube не отдаёт это видео (за VPN его общий IP часто в чёрном списке проверки «вы не бот»). Попробуйте другой ролик, отключите VPN или вставьте прямую ссылку на файл.');
       }
@@ -4354,7 +5575,13 @@ async function addUrl(rawUrl) {
   }
   const entries = Array.isArray(flat.entries) ? flat.entries.filter(Boolean) : [];
   const candidates = entries.length ? entries : [flat];
-  if (candidates.length > 200) throw new Error('За один раз можно добавить до 200 элементов.');
+  if (candidates.length > 2000) throw new Error('За один раз можно добавить до 2000 видео.');
+  // Много видео разом — сперва спросить: случайно вставленный плейлист на
+  // сотню роликов иначе молча забивал очередь и начинал качаться.
+  if (candidates.length > СПРОСИТЬ_ОТ && !options.confirm) {
+    ждутПодтверждения.set(rawUrl, { flat, at: Date.now() });
+    return { ask: { count: candidates.length, title: flat.title || '', single: Boolean(одно) } };
+  }
   const added = candidates.map(entry => {
     let sourceUrl = entry.webpage_url || entry.url || rawUrl;
     if (!validWebUrl(sourceUrl) && entry.id && /youtube|youtu\.be/.test(host)) sourceUrl = `https://www.youtube.com/watch?v=${entry.id}`;
@@ -4802,6 +6029,13 @@ function prepareLivePlaylist(raw, segmentLimit, startOffset) {
   return [...header, ...lines.slice(bodyStart), ''].join('\n');
 }
 
+// Отступ старта для зрителей туннеля (EXT-X-START): запас на его джиттер.
+const TUNNEL_START_OFFSET = 3;
+// Окно плейлиста для туннеля, сегментов по ~1 с. Было 12: плеер VRChat
+// стартовал ближе к началу окна, и задержка у зрителей доходила до 8–9 с.
+// 6 — всё ещё вдвое больше отступа старта, запас на джиттер туннеля есть.
+const TUNNEL_WINDOW = 6;
+
 // Свои адреса: только они имеют право на пульт управления.
 const LOCAL_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`]);
 const OWN_ORIGIN = `http://127.0.0.1:${PORT}`;
@@ -4818,7 +6052,7 @@ const server = http.createServer(async (req, res) => {
     // поток. Теперь адрес берётся у самого туннеля.
     const tunnelHost = (() => { try { return tunnelUrl ? new URL(tunnelUrl).hostname.toLowerCase() : ''; } catch { return ''; } })();
     const publicTunnelHost = (tunnelHost && requestHost === tunnelHost)
-      || /\.(trycloudflare\.com|pinggy-free\.link|free\.pinggy\.net|lhr\.life|serveo\.net)$/.test(requestHost);
+      || /\.(trycloudflare\.com|pinggy-free\.link|free\.pinggy\.net|lhr\.life|serveo\.net|serveousercontent\.com)$/.test(requestHost);
     if (publicTunnelHost && !url.pathname.startsWith('/stream/') && !url.pathname.startsWith('/media/')) {
       return json(res, 404, { error: 'Через публичную ссылку доступен только медиапоток.' });
     }
@@ -4876,7 +6110,7 @@ const server = http.createServer(async (req, res) => {
       // Играющий и качающийся треки не трогаем: файл занят, и эфир оборвётся.
       try {
         for (const name of readdirSync(mediaCacheDir())) {
-          if (mediaCacheJobs.has(name) || name === currentId) continue;
+          if (занятыеКлючиКеша().has(name)) continue;
           rmSync(join(mediaCacheDir(), name), { recursive: true, force: true });
         }
       } catch {}
@@ -4962,8 +6196,30 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/queue') {
-      const body = await readBody(req); const added = await addUrl(String(body.url || '').trim());
-      return json(res, 201, { added, status: status() });
+      const body = await readBody(req);
+      const result = await addUrl(String(body.url || '').trim(), { anime: body.anime, confirm: body.confirm });
+      // Большой плейлист — сначала спрашиваем, ничего не добавляя.
+      if (result.ask) return json(res, 200, { ask: result.ask });
+      return json(res, 201, { added: result, status: status() });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/energy') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+      res.write('retry: 3000\n\n');
+      слушателиЭнергии.add(res);
+      req.on('close', () => { слушателиЭнергии.delete(res); if (!слушателиЭнергии.size) остановитьЭнергию(); });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/tunnels/test') {
+      if (activeKind) throw new Error('Остановите эфир — проверка забьёт канал и помешает зрителям.');
+      проверитьТуннели().catch(error => log(`Проверка туннелей: ${error.message}`));
+      return json(res, 200, status());
+    }
+    if (req.method === 'POST' && url.pathname === '/api/queue/inspect') {
+      // Для аниме-сайтов — сведения для окна выбора: серии, озвучки, качество.
+      const rawUrl = String((await readBody(req)).url || '').trim();
+      if (!validWebUrl(rawUrl) || !isAnimeUrl(rawUrl)) return json(res, 200, { kind: 'other' });
+      try { return json(res, 200, { kind: 'anime', ...await inspectAnime(rawUrl) }); }
+      catch (error) { throw new Error(`Не удалось получить серии: ${error.message}`); }
     }
     if (req.method === 'POST' && url.pathname === '/api/queue/local') {
       const body = await readBody(req); const added = await addLocalFiles(Array.isArray(body.paths) ? body.paths : []);
@@ -4973,15 +6229,49 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req); const id = saveQueueTemplate(body);
       return json(res, 201, { id, status: status() });
     }
+    if (req.method === 'POST' && url.pathname === '/api/templates/current/save') {
+      // «Сохранить» в открытый список — и из окна, и из вопроса при выходе.
+      const template = currentTemplate();
+      if (!template) throw new Error('Открытого списка нет — сохраните очередь как новый список.');
+      saveQueueTemplate({ id: template.id, name: template.name });
+      return json(res, 200, status());
+    }
+    if (req.method === 'POST' && /^\/api\/templates\/[^/]+\/rename$/.test(url.pathname)) {
+      const template = templates.find(item => item.id === decodeURIComponent(url.pathname.split('/')[3]));
+      if (!template) throw new Error('Список не найден.');
+      const name = String((await readBody(req)).name || '').trim().slice(0, 80);
+      if (!name) throw new Error('Введите название списка.');
+      template.name = name; template.updatedAt = new Date().toISOString(); saveTemplates();
+      log(`Список переименован: ${name}`);
+      return json(res, 200, status());
+    }
     if (req.method === 'POST' && /^\/api\/templates\/[^/]+\/load$/.test(url.pathname)) {
       const id = decodeURIComponent(url.pathname.split('/')[3]); const body = await readBody(req);
       applyQueueTemplate(id, Boolean(body.append)); return json(res, 200, status());
     }
     if (req.method === 'DELETE' && url.pathname.startsWith('/api/templates/')) {
       const id = decodeURIComponent(url.pathname.split('/').pop());
-      const before = templates.length; templates = templates.filter(item => item.id !== id);
-      if (templates.length === before) throw new Error('Шаблон не найден.');
+      const удаляемый = templates.find(item => item.id === id);
+      if (!удаляемый) throw new Error('Шаблон не найден.');
+      backupTemplate(удаляемый);
+      templates = templates.filter(item => item.id !== id);
+      if (config.currentTemplateId === id) saveConfig({ currentTemplateId: '' });
       saveTemplates(); return json(res, 200, status());
+    }
+    if (req.method === 'POST' && url.pathname === '/api/queue/move') {
+      // Перетаскивание в очереди: ролик встаёт на новое место, играющий
+      // продолжает играть, а «следующий» считается уже по новому порядку.
+      const body = await readBody(req);
+      const from = queue.findIndex(item => item.id === String(body.id || ''));
+      if (from < 0) throw new Error('Ролик не найден в очереди.');
+      const to = Math.max(0, Math.min(queue.length - 1, Math.round(Number(body.to) || 0)));
+      if (from !== to) {
+        const [item] = queue.splice(from, 1);
+        queue.splice(to, 0, item);
+        if (currentId) queueIndex = Math.max(0, queue.findIndex(entry => entry.id === currentId));
+        saveQueue(); prefetchQueue(0);
+      }
+      return json(res, 200, status());
     }
     if (req.method === 'DELETE' && url.pathname.startsWith('/api/queue/')) {
       const id = decodeURIComponent(url.pathname.split('/').pop());
@@ -4998,18 +6288,24 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, status());
     }
     if (req.method === 'DELETE' && url.pathname === '/api/queue') {
-      if (activeKind === 'queue') stopActive(); queue = []; resolvedMedia.clear(); mediaFailures.clear(); cacheDeclined.clear(); saveQueue(); return json(res, 200, status());
+      if (activeKind === 'queue') stopActive(); queue = []; resolvedMedia.clear(); mediaFailures.clear(); cacheDeclined.clear(); saveQueue();
+      // Очистили очередь — дальше собирается новый список, а не правится старый.
+      saveConfig({ currentTemplateId: '' });
+      return json(res, 200, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/config') {
       const body = await readBody(req);
       const next = {
         outputMode: ['local', 'tunnel', 'remote'].includes(body.outputMode) ? body.outputMode : (config.outputMode || 'local'),
         cacheRoot: typeof body.cacheRoot === 'string' ? body.cacheRoot.trim().slice(0, 300) : config.cacheRoot,
-        videoBitrate: Math.max(0, Math.min(20000, Number(body.videoBitrate ?? config.videoBitrate ?? 0) || 0)),
+        videoBitrate: ближайшийБитрейт(body.videoBitrate ?? config.videoBitrate),
         autoQuality: body.autoQuality === undefined ? config.autoQuality !== false : Boolean(body.autoQuality),
         encoderMode: ['auto', 'gpu', 'cpu'].includes(body.encoderMode) ? body.encoderMode : (config.encoderMode || 'auto'),
         whiteIp: body.whiteIp === undefined ? (config.whiteIp || '') : String(body.whiteIp).trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0].slice(0, 60).replace(/[^a-z0-9.:-]/gi, ''),
-        tunnelProvider: ['auto', 'cloudflare', 'pinggy', 'localhostrun'].includes(body.tunnelProvider) ? body.tunnelProvider : (config.tunnelProvider || 'auto'),
+        tunnelProvider: ['auto', ...Object.keys(ТУННЕЛИ)].includes(body.tunnelProvider) ? body.tunnelProvider : (config.tunnelProvider || 'auto'),
+        // Только адрес одной из карт этого ПК — чужое значение не пройдёт.
+        remoteBindAddress: body.remoteBindAddress === undefined ? (config.remoteBindAddress || '')
+          : сетевыеКарты().some(карта => карта.address === body.remoteBindAddress) ? body.remoteBindAddress : '',
         cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
         // Только настоящий булев: строка «false» из кривого запроса не должна
         // превращаться в true и молча прятать окно вместо выхода.
@@ -5034,11 +6330,14 @@ const server = http.createServer(async (req, res) => {
         playbackSpeed: [0.5, 0.75, 1, 1.25, 1.5, 2].includes(Number(body.playbackSpeed)) ? Number(body.playbackSpeed) : (config.playbackSpeed || 1),
         captureVolume: Math.max(0, Math.min(6, Number(body.captureVolume ?? config.captureVolume ?? 1.5))),
         localAppVolume: Math.max(0.02, Math.min(1, Number(body.localAppVolume ?? config.localAppVolume ?? 1))),
+        muteLocalApp: body.muteLocalApp === undefined ? Boolean(config.muteLocalApp) : Boolean(body.muteLocalApp),
+        muteDevice: body.muteDevice === undefined ? String(config.muteDevice || '') : String(body.muteDevice || '').slice(0, 300),
         mediaVolume: Math.max(0, Math.min(4, Number(body.mediaVolume ?? config.mediaVolume ?? 1))),
         mediaQuality: ['480p', '720p', '1080p'].includes(body.mediaQuality) ? body.mediaQuality : (config.mediaQuality || '720p'),
         mediaFps: body.mediaFps === 60 ? 60 : (body.mediaFps === 30 ? 30 : (config.mediaFps || 30)),
       };
       const previousOutput = config.outputMode;
+      const previousConfig = { ...config };
       const previousRemoteTarget = remoteRtspTarget();
       const previousEncoderMode = config.encoderMode;
       const previousTunnelProvider = config.tunnelProvider;
@@ -5055,8 +6354,18 @@ const server = http.createServer(async (req, res) => {
         } catch { return json(res, 400, { error: `Не удаётся писать в ${target}. Выберите другой диск.` }); }
       }
       saveConfig(next);
+      // Сниженный под затор битрейт относится к конкретному каналу до сервера.
+      if (previousOutput !== config.outputMode || previousConfig.activeServerId !== config.activeServerId
+        || previousConfig.videoBitrate !== config.videoBitrate) remoteBudgetKbps = 0;
+      if (previousOutput !== config.outputMode || previousConfig.activeServerId !== config.activeServerId) remoteCapacityKbps = 0;
+      // Сменили карту — поток переподключается через неё, замер канала заново.
+      if ((previousConfig.remoteBindAddress || '') !== config.remoteBindAddress) {
+        remoteCapacityKbps = 0; remoteBudgetKbps = 0;
+        log(config.remoteBindAddress ? `Поток на свой сервер — через сетевую карту ${config.remoteBindAddress}` : 'Поток на свой сервер — как решит система');
+        if (relayProcess) syncRtspPush();
+      }
       const encoderChanged = previousEncoderMode !== config.encoderMode;
-      if (encoderChanged) {
+      if (encoderChanged && !activeKind) {
         encoder = pickEncoder(config.encoderMode);
         log(`Кодировщик: ${encoder.label}`);
       }
@@ -5096,22 +6405,52 @@ const server = http.createServer(async (req, res) => {
         outputSwitchTimer = setTimeout(syncRtspPush, 250);
       }
       if (applyLive && activeKind) {
-        const desired = streamProfile(activeKind);
-        // Пересборка сессии сама поднимает источник заново — второй раз не надо.
-        // Смена кодировщика профиль не меняет, поэтому пересобираем явно.
-        if (relayProcess && (encoderChanged || !sameProfile(relayProfile, desired))) restartRelaySession(desired);
-        else if (activeKind === 'screen') await startScreen();
-        else if (activeKind === 'queue' && currentId) transitionQueue('seek', currentSourcePosition());
-      } else if (encoderChanged && relayProcess && activeKind) {
-        // Настройки применили без «применить на лету», но эфир идёт — всё равно
-        // перезапускаем сессию, иначе новый кодировщик подхватится только со следующим треком.
-        restartRelaySession(streamProfile(activeKind));
+        const formatFields = ['quality', 'fps', 'mediaQuality', 'mediaFps', 'encoderMode'];
+        // Битрейт меняется на лету: перезапускается только источник, стык
+        // проходит как смена трека, зрители не отключаются.
+        if (previousConfig.videoBitrate !== config.videoBitrate) {
+          log(`Битрейт эфира: ${config.videoBitrate ? `${config.videoBitrate} кбит/с` : 'авто'} — применяю сразу`);
+          if (activeKind === 'queue' && activeProcess && !queuePaused) transitionQueue('seek', currentSourcePosition());
+          else if (activeKind === 'screen') await startScreen();
+        }
+        const sourceFields = ['captureMode', 'captureMonitorId', 'captureWindowHandle', 'regionX', 'regionY',
+          'regionWidth', 'regionHeight'];
+        const audioSourceFields = ['audioMode', 'captureAudioDevice', 'audioOutputId', 'audioProcessId', 'muteDevice'];
+        const formatChanged = formatFields.some(key => previousConfig[key] !== config[key]);
+        const sourceChanged = sourceFields.some(key => previousConfig[key] !== config[key]);
+        const audioSourceChanged = audioSourceFields.some(key => previousConfig[key] !== config[key]);
+        const audioControlChanged = ['captureVolume', 'localAppVolume', 'muteLocalApp']
+          .some(key => previousConfig[key] !== config[key]);
+        // Разрешение/FPS/кодировщик — формат уже открытой H.264-сессии. Его
+        // смена требует переинициализации AVPro, поэтому сохраняем выбор для
+        // следующего эфира, но текущий relay/pusher не трогаем.
+        if (formatChanged) log('Формат сохранён и применится при следующем запуске эфира — текущий канал не прерываю');
+        if (activeKind === 'screen') {
+          // Помощник звука переживает перезапуск захвата со старыми настройками —
+          // громкость и «не слышать у себя» досылаем ему отдельно.
+          if (sourceChanged) { await startScreen(); updateAudioHelperControls(); }
+          else if (audioSourceChanged && !(await replaceAudioHelperLive())) await startScreen();
+          else if (audioControlChanged && !updateAudioHelperControls() && config.audioMode === 'device') {
+            log('Громкость микрофона применится при следующем запуске эфира');
+          }
+        } else if (activeKind === 'queue' && currentId) {
+          // Позиция — по прежней скорости: config уже сохранён с новой.
+          const position = sourcePosition + (currentStartedAt ? (Date.now() - currentStartedAt) / 1000 * (Number(previousConfig.playbackSpeed) || 1) : 0);
+          // На паузе ничего не шлём: «продолжить» и так перезапускает трек с новыми настройками.
+          if (!queuePaused && (previousConfig.playbackSpeed !== config.playbackSpeed || previousConfig.mediaVolume !== config.mediaVolume)) {
+            await applyMediaLive(async () => {
+              if (previousConfig.playbackSpeed !== config.playbackSpeed) await hotMediaSpeed(config.playbackSpeed);
+              if (previousConfig.mediaVolume !== config.mediaVolume) await hotMediaVolume(config.mediaVolume);
+            }, position);
+          }
+        }
       }
       return json(res, 200, status());
     }
-    if (req.method === 'POST' && url.pathname === '/api/start/screen') { await startScreen(); return json(res, 200, status()); }
+    if (req.method === 'POST' && url.pathname === '/api/start/screen') { requireReadyOutput(); await startScreen(); return json(res, 200, status()); }
     if (req.method === 'POST' && url.pathname === '/api/start/queue') {
       const body = await readBody(req).catch(() => ({}));
+      requireReadyOutput();
       const индекс = body.id ? queue.findIndex(item => item.id === String(body.id)) : 0;
       startQueue(индекс < 0 ? 0 : индекс);
       return json(res, 200, status());
@@ -5127,7 +6466,7 @@ const server = http.createServer(async (req, res) => {
       return void serveRangeMp4(req, res, item.sourceUrl);
     }
     if (req.method === 'POST' && url.pathname === '/api/skip') { transitionQueue('next'); return json(res, 200, status()); }
-    if (req.method === 'POST' && url.pathname === '/api/playback') { const body = await readBody(req); return json(res, 200, playbackCommand(body)); }
+    if (req.method === 'POST' && url.pathname === '/api/playback') { const body = await readBody(req); return json(res, 200, await playbackCommand(body)); }
     if (req.method === 'POST' && url.pathname === '/api/stop') { stopActive(); return json(res, 200, status()); }
     if (req.method === 'POST' && url.pathname === '/api/shutdown') {
       shuttingDown = true;
@@ -5136,7 +6475,23 @@ const server = http.createServer(async (req, res) => {
       if (hlsHealthTimer) clearInterval(hlsHealthTimer);
       stopUnityBuild();
       if (unityCaptureProcess) { try { unityCaptureProcess.stdin.write('q\n'); } catch {} }
-      stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); json(res, 200, { ok: true }); setTimeout(() => server.close(() => process.exit(0)), 100); return;
+      stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); json(res, 200, { ok: true });
+      // Перед выходом обязательно возвращаем звук приложениям, уведённым
+      // «не слышать у себя». Раньше выход был через 100 мс, лаунчер тут же
+      // гасил всё дерево процессов вместе с помощником — и Spotify оставался
+      // без звука. Даём помощнику секунду закрыться штатно и добиваем возврат сами.
+      setTimeout(() => {
+        const helper = join(ROOT, 'tools', 'VRCast.AudioCapture.exe');
+        if (existsSync(helper) && existsSync(join(DATA_DIR, 'routed-apps.txt'))) {
+          try { spawnSync(helper, ['--unroute-pending'], { windowsHide: true, stdio: 'ignore', timeout: 3000 }); } catch {}
+        }
+        server.close(() => process.exit(0));
+      }, 1000);
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/stream/speedtest.bin') {
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': SPEEDTEST.length, 'Cache-Control': 'no-store' });
+      return void res.end(SPEEDTEST);
     }
     if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/stream/')) {
       const head = req.method === 'HEAD';
@@ -5150,8 +6505,8 @@ const server = http.createServer(async (req, res) => {
         const preview = url.pathname === '/stream/preview.m3u8';
         // ponytail: локальное окно 4×1с — минимальная задержка для AVPro на этом
         // же ПК; публичное окно шире, потому что туннель добавляет джиттер.
-        const liveWindow = publicTunnelHost ? 10 : 4;
-        const liveOffset = publicTunnelHost ? 3 : 1.5;
+        const liveWindow = publicTunnelHost ? TUNNEL_WINDOW : 4;
+        const liveOffset = publicTunnelHost ? TUNNEL_START_OFFSET : 1.5;
         const playlist = prepareLivePlaylist(живой, preview ? 60 : liveWindow, preview ? 2 : liveOffset);
         res.writeHead(200, { 'Content-Type': mime['.m3u8'], 'Cache-Control': 'no-cache, no-store, must-revalidate',
           'CDN-Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': 'no-store', 'Surrogate-Control': 'no-store',
@@ -5173,7 +6528,11 @@ const server = http.createServer(async (req, res) => {
       // Версию в адресах стилей и скриптов подставляем на лету: иначе WebView2
       // отдаёт файлы прошлой версии из кеша и обновлённый интерфейс не виден.
       if (relative === 'index.html') {
-        const html = readFileSync(join(PUBLIC_DIR, 'index.html'), 'utf8').replace(/\?v=[0-9.]+/g, `?v=${APP_VERSION}`);
+        // Метка = версия + время изменения файлов: при одинаковой версии
+        // WebView брал из кеша старые app.js и styles.css, и новый интерфейс
+        // не появлялся после обновления.
+        const метка = `${APP_VERSION}-${['app.js', 'styles.css'].map(name => { try { return Math.round(statSync(join(PUBLIC_DIR, name)).mtimeMs).toString(36); } catch { return '0'; } }).join('')}`;
+        const html = readFileSync(join(PUBLIC_DIR, 'index.html'), 'utf8').replace(/\?v=[0-9.]+/g, `?v=${метка}`);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(html);
         return;
@@ -5186,11 +6545,20 @@ const server = http.createServer(async (req, res) => {
     // и журнал забивался сотней одинаковых строк.
     const скачивается = /spawn ffmpeg ENOENT/i.test(String(error.message)) && !tools.ffmpeg;
     if (!скачивается) log(`Ошибка: ${error.message}`);
-    json(res, 400, { error: скачивается ? 'Кодировщик ещё скачивается, подождите' : error.message });
+    json(res, Number(error.statusCode) || 400, { error: скачивается ? 'Кодировщик ещё скачивается, подождите' : error.message,
+      code: error.code || undefined });
   }
 });
 
 server.listen(PORT, HOST, () => {
+  restoreRoutedApps();
+  дозаполнитьДлительности();
+  startRemoteBridge();
+  vpnInterface = detectVpn();
+  if (vpnInterface) log(`Включён VPN (${vpnInterface}) — проверю, идёт ли поток через него или по правилу мимо`);
+  setInterval(() => { vpnInterface = detectVpn(); }, 30000).unref?.();
+  setInterval(() => { проверитьМаршрут().catch(() => {}); }, 10000).unref?.();
+  setInterval(поднятьБюджет, 5000).unref?.();
   log(`VRCast Bridge открыт: http://${HOST}:${PORT}`);
   log(`Кодировщик: ${encoder.label} · FFmpeg: ${tools.ffmpeg ? 'готов' : 'не найден'} · yt-dlp: ${tools.ytdlp ? 'готов' : 'не найден'}`);
   logDetail(`=== запуск VRCast Bridge ${APP_VERSION} · ffmpeg: ${tools.ffmpeg ? 'есть' : 'нет'} · yt-dlp: ${ytdlpPath()} · кодировщик: ${encoder.label} ===`);
