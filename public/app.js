@@ -617,7 +617,7 @@ function paintTunnelSpeeds(state){
     if(option.value==='auto')continue;
     option.dataset.base||=option.textContent;
     const итог=проверка.results?.[option.value];
-    const хвост=проверка.current===option.value?' · проверяю…':итог?.error?' · не отвечает':скорости[option.value]?` · ~${мбит(скорости[option.value])}`:option.value==='pinggy'?' · не для VRChat':'';
+    const хвост=проверка.running&&!итог?' · проверяю…':итог?.error?' · не отвечает':скорости[option.value]?` · ~${мбит(скорости[option.value])}`:'';
     setText(option,option.dataset.base+хвост);
   }
   const кнопка=$('#testTunnels');

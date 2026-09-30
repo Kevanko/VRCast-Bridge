@@ -9,7 +9,8 @@ import { connect as netConnect, createServer as netCreateServer } from 'node:net
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
 
-const APP_VERSION = '0.60.3';
+// VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
+const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.60.4';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -1003,10 +1004,11 @@ const ТУННЕЛИ = {
   cloudflare: { name: 'Cloudflare', url: /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i },
   localhostrun: { name: 'localhost.run', url: /https:\/\/[a-z0-9-]+\.lhr\.life/i, ssh: 'localhost.run' },
   serveo: { name: 'Serveo', url: /https:\/\/[a-z0-9.-]+\.serveousercontent\.com/i, ssh: 'serveo.net' },
-  pinggy: { name: 'Pinggy', url: /https:\/\/[a-z0-9-]+\.run\.pinggy-free\.link/i },
+  // Pinggy убран: бесплатный подменяет поток страницей-предупреждением,
+  // в VRChat такая ссылка не играет.
 };
 const ключТуннеля = имя => Object.keys(ТУННЕЛИ).find(ключ => ТУННЕЛИ[ключ].name === имя) || '';
-const туннельДоступен = ключ => ключ === 'cloudflare' ? Boolean(tools.cloudflared) : ключ === 'pinggy' ? Boolean(tools.pinggy) : Boolean(PLINK());
+const туннельДоступен = ключ => ключ === 'cloudflare' ? Boolean(tools.cloudflared) : Boolean(PLINK());
 
 // Ключ SSH-сервера узнаём первым подключением и держим до перезапуска.
 const sshКлючи = new Map();
@@ -1038,10 +1040,6 @@ async function командаТуннеля(ключ) {
     return { cmd: CLOUDFLARED(), args: ['tunnel', '--no-autoupdate', '--protocol', 'http2',
       ...(мимо.length ? ['--edge-bind-address', карта, ...мимо.flatMap(адрес => ['--edge', адрес])] : []),
       '--url', `http://127.0.0.1:${PORT}`], ready: текст => /Registered tunnel connection/i.test(текст) };
-  }
-  if (ключ === 'pinggy') {
-    pinggyStarted = true;
-    return { cmd: PINGGY(), args: ['--noTui', '-l', `http://127.0.0.1:${PORT}`], env: pinggyEnvironment(), ready: () => true };
   }
   const host = ТУННЕЛИ[ключ].ssh;
   // С выбранной картой plink идёт через местный мост, иначе — напрямую.
@@ -1075,44 +1073,52 @@ function запомнитьСкоростьТуннеля(ключ, kbps) {
   saveConfig({ tunnelSpeeds: { ...(config.tunnelSpeeds || {}), [ключ]: Math.round(было ? было * 0.5 + kbps * 0.5 : kbps) } });
 }
 
-// «Проверить все»: по очереди поднимаем каждый сервис отдельно от эфира,
-// меряем, сколько он реально отдаёт, и гасим. Pinggy не проверяем: бесплатный
-// подменяет поток страницей-предупреждением, в VRChat он не играет.
+// «Проверить»: все сервисы поднимаются разом (адрес — самое долгое, до 20 с),
+// а скорость меряется по очереди, чтобы замеры не делили канал. Раньше всё
+// шло строго по одному, и проверка тянулась полторы минуты.
 let проверкаТуннелей = { running: false, current: '', results: {} };
 async function проверитьТуннели() {
   if (проверкаТуннелей.running) return;
-  проверкаТуннелей = { running: true, current: '', results: {} };
+  проверкаТуннелей = { running: true, current: 'all', results: {} };
+  const дети = [];
+  const ошибка = (ключ, error) => {
+    проверкаТуннелей.results[ключ] = { error: error.message };
+    const подсказка = ключ === 'cloudflare' && vpnInterface && !выбраннаяКарта()
+      ? ' — включён VPN: выберите свою сетевую карту в «Сеть и серверы», тогда Cloudflare пойдёт мимо него' : '';
+    log(`Проверка ${ТУННЕЛИ[ключ].name}: ${error.message}${подсказка}`);
+  };
   try {
-    for (const ключ of Object.keys(ТУННЕЛИ).filter(k => k !== 'pinggy' && туннельДоступен(k))) {
-      if (shuttingDown) return;
-      проверкаТуннелей.current = ключ;
-      let child = null;
+    const ключи = Object.keys(ТУННЕЛИ).filter(туннельДоступен);
+    const адреса = await Promise.all(ключи.map(async ключ => {
       try {
         const команда = await командаТуннеля(ключ);
-        const адрес = await new Promise((resolve, reject) => {
-          const таймер = setTimeout(() => reject(new Error('не ответил за 25 с')), 25000);
-          child = поднятьТуннель(команда, ключ, url => { clearTimeout(таймер); resolve(url); });
+        return await new Promise((resolve, reject) => {
+          const таймер = setTimeout(() => reject(new Error('не ответил за 20 с')), 20000);
+          const child = поднятьТуннель(команда, ключ, url => { clearTimeout(таймер); resolve(url); });
+          дети.push(child);
           child.on('close', () => { clearTimeout(таймер); reject(new Error('отключился')); });
         });
-        // Новый адрес (особенно у Cloudflare) начинает открываться не сразу —
-        // до четырёх попыток с паузой.
-        let rawKbps = 0, ttfbMs = 0;
-        for (let попытка = 0; попытка < 4 && !(rawKbps > 50); попытка++) {
-          await new Promise(resolve => setTimeout(resolve, 3000));
-          ({ rawKbps, ttfbMs } = await measureTunnelKbps(адрес));
-        }
-        if (!(rawKbps > 50)) throw new Error('ссылка не отдаёт данные');
-        запомнитьСкоростьТуннеля(ключ, rawKbps);
-        проверкаТуннелей.results[ключ] = { kbps: Math.round(rawKbps), ttfbMs };
-        log(`Проверка ${ТУННЕЛИ[ключ].name}: ~${(rawKbps / 1000).toFixed(1)} Мбит/с, ответ ${ttfbMs} мс`);
-      } catch (error) {
-        проверкаТуннелей.results[ключ] = { error: error.message };
-        const подсказка = ключ === 'cloudflare' && vpnInterface && !выбраннаяКарта()
-          ? ' — включён VPN: выберите свою сетевую карту в «Сеть и серверы», тогда Cloudflare пойдёт мимо него' : '';
-        log(`Проверка ${ТУННЕЛИ[ключ].name}: ${error.message}${подсказка}`);
-      } finally { try { child?.kill('SIGTERM'); } catch {} }
+      } catch (error) { ошибка(ключ, error); return null; }
+    }));
+    for (const [номер, ключ] of ключи.entries()) {
+      const адрес = адреса[номер];
+      if (!адрес || shuttingDown) continue;
+      проверкаТуннелей.current = ключ;
+      // Новый адрес (особенно у Cloudflare) начинает открываться не сразу.
+      let rawKbps = 0, ttfbMs = 0;
+      for (let попытка = 0; попытка < 4 && !(rawKbps > 50); попытка++) {
+        await new Promise(resolve => setTimeout(resolve, попытка ? 2500 : 1000));
+        ({ rawKbps, ttfbMs } = await measureTunnelKbps(адрес));
+      }
+      if (!(rawKbps > 50)) { ошибка(ключ, new Error('ссылка не отдаёт данные')); continue; }
+      запомнитьСкоростьТуннеля(ключ, rawKbps);
+      проверкаТуннелей.results[ключ] = { kbps: Math.round(rawKbps), ttfbMs };
+      log(`Проверка ${ТУННЕЛИ[ключ].name}: ~${(rawKbps / 1000).toFixed(1)} Мбит/с, ответ ${ttfbMs} мс`);
     }
-  } finally { проверкаТуннелей = { ...проверкаТуннелей, running: false, current: '' }; }
+  } finally {
+    for (const child of дети) { try { child.kill('SIGTERM'); } catch {} }
+    проверкаТуннелей = { ...проверкаТуннелей, running: false, current: '' };
+  }
 }
 
 async function startTunnelCandidate(ключ) {
@@ -1144,23 +1150,19 @@ function startPublicTunnel() {
   let провайдер = config.tunnelProvider || 'auto';
   if (провайдер !== 'auto' && !(ТУННЕЛИ[провайдер] && туннельДоступен(провайдер))) провайдер = 'auto';
   const запустить = ключ => startTunnelCandidate(ключ).catch(error => logDetail(`Туннель ${ТУННЕЛИ[ключ].name}: ${error.message}`));
-  // Pinggy — крайний случай, а не гонщик наравне: бесплатный подменяет поток
-  // страницей-предупреждением, и в VRChat такая ссылка не играет. Поэтому в
-  // «Авто» он поднимается, только если за 6 секунд никто не отозвался.
   if (провайдер !== 'auto') запустить(провайдер);
   else {
-    // Сначала самый быстрый по прошлым замерам; ответил за 6 с — он и будет.
-    // Нет — поднимаем остальных наперегонки, Pinggy ещё через 6 с.
+    // Сначала самый быстрый по прошлым замерам, и ему 15 секунд форы: Cloudflare
+    // регистрируется 10–15 с, и при фору в 6 с медленный localhost.run успевал
+    // первым — «Авто» брал его вместо быстрого (так было у друга). Не ответил —
+    // поднимаем остальных наперегонки.
     const скорость = ключ => Number(config.tunnelSpeeds?.[ключ]) || 0;
-    const порядок = Object.keys(ТУННЕЛИ).filter(ключ => ключ !== 'pinggy' && туннельДоступен(ключ)).sort((a, b) => скорость(b) - скорость(a));
+    const порядок = Object.keys(ТУННЕЛИ).filter(туннельДоступен).sort((a, b) => скорость(b) - скорость(a));
     const ещё = () => !tunnelUrl && !stopping && config.outputMode === 'tunnel';
     const [лучший, ...остальные] = скорость(порядок[0]) ? порядок : [null, ...порядок];
     if (лучший) запустить(лучший);
-    const резерв = () => {
-      for (const ключ of остальные) запустить(ключ);
-      if (туннельДоступен('pinggy')) tunnelFallbackTimer = setTimeout(() => { if (ещё()) запустить('pinggy'); }, 6000);
-    };
-    if (лучший) tunnelFallbackTimer = setTimeout(() => { if (ещё()) резерв(); }, 6000);
+    const резерв = () => { for (const ключ of остальные) запустить(ключ); };
+    if (лучший) tunnelFallbackTimer = setTimeout(() => { if (ещё()) резерв(); }, 15000);
     else резерв();
   }
   // Один выбранный туннель ждём меньше: если он не отозвался за 18 секунд, он в
@@ -1961,7 +1963,8 @@ let updateRetryTimer = null;
 async function checkForUpdate() {
   if (!process.env.VRCAST_EXE) return;
   try {
-    const response = await fetch(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, {
+    // VRCAST_UPDATE_API — только для тестов: подставной «GitHub» с релизом.
+    const response = await fetch(process.env.VRCAST_UPDATE_API || `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, {
       headers: { 'User-Agent': 'VRCast-Bridge', Accept: 'application/vnd.github+json' },
       signal: AbortSignal.timeout(15000),
     });
@@ -2515,7 +2518,10 @@ function attachProcessLogs(child, label) {
     const lines = pending.split(/\r?\n/);
     pending = lines.pop() || '';
     for (const line of lines) {
-      if (/error|failed|invalid|exception|denied|403|429|non-monoton/i.test(line)) log(`${label}: ${line.trim().slice(0, 260)}`);
+      // «cannot be applied», «not found», «Unrecognized option» — ffmpeg так
+      // говорит о несовместимых параметрах. Раньше эти строки отсекались, и в
+      // журнале у друга была только «Error parsing options» без причины.
+      if (/error|failed|invalid|exception|denied|403|429|non-monoton|cannot be applied|not found|unrecognized/i.test(line)) log(`${label}: ${line.trim().slice(0, 260)}`);
     }
   });
   child.on('error', error => log(`${label}: ${error.message}`));
@@ -3246,7 +3252,7 @@ async function startScreenInner() {
     const captureHeight = height;
     stopWindowWatcher();
     windowHelperArgs = ['--hwnd', String(config.captureWindowHandle), '--width', String(captureWidth), '--height', String(captureHeight), '--fps', String(profile.fps)];
-    args.push('-fflags', 'nobuffer', '-thread_queue_size', '8', '-use_wallclock_as_timestamps', '1', '-f', 'rawvideo', '-pixel_format', 'nv12', '-video_size', `${captureWidth}x${captureHeight}`, '-framerate', String(profile.fps), '-i', 'pipe:4');
+    args.push('-fflags', 'nobuffer', ...очередьВхода(8), '-use_wallclock_as_timestamps', '1', '-f', 'rawvideo', '-pixel_format', 'nv12', '-video_size', `${captureWidth}x${captureHeight}`, '-framerate', String(profile.fps), '-i', 'pipe:4');
   } else if (config.captureMode === 'window') {
     // Окна на экране нет: показываем подложку и ждём его возвращения.
     startWindowWatcher(config.captureWindowHandle);
@@ -3254,9 +3260,9 @@ async function startScreenInner() {
   } else if (config.captureMode === 'monitor' && (ddagrabOutput = await ddagrabIndexFor(captureRect)) !== null) {
     // Это не генератор вроде color или anullsrc, а живой источник со своим
     // темпом, поэтому «-re» здесь не нужен — так же, как и для gdigrab.
-    args.push('-thread_queue_size', '16', '-f', 'lavfi', '-i', `ddagrab=output_idx=${ddagrabOutput}:framerate=${profile.fps}`);
+    args.push(...очередьВхода(16), '-f', 'lavfi', '-i', `ddagrab=output_idx=${ddagrabOutput}:framerate=${profile.fps}`);
   } else {
-    args.push('-fflags', 'nobuffer', '-thread_queue_size', '16', '-f', 'gdigrab', '-draw_mouse', '1', '-framerate', String(profile.fps));
+    args.push('-fflags', 'nobuffer', ...очередьВхода(16), '-f', 'gdigrab', '-draw_mouse', '1', '-framerate', String(profile.fps));
     if (captureRect) args.push('-offset_x', String(captureRect.x), '-offset_y', String(captureRect.y), '-video_size', `${captureRect.width}x${captureRect.height}`, '-i', 'desktop');
     else args.push('-i', 'desktop');
   }
@@ -3269,9 +3275,9 @@ async function startScreenInner() {
     // async образуют петлю (всплеск → тишина → всплеск дальше), разгоняющую
     // аудио-таймлайн на сотни секунд. Хелпер сам держит темп 1.0x по Stopwatch,
     // поэтому счётчик семплов ffmpeg — точные и монотонные таймстемпы.
-    args.push('-fflags', 'nobuffer', '-thread_queue_size', '16', '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:3', '-map', '0:v:0', '-map', '1:a:0');
+    args.push('-fflags', 'nobuffer', ...очередьВхода(16), '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:3', '-map', '0:v:0', '-map', '1:a:0');
   } else if (config.audioMode === 'device' && config.captureAudioDevice) {
-    args.push('-thread_queue_size', '32', '-f', 'dshow', '-i', `audio=${config.captureAudioDevice}`, '-map', '0:v:0', '-map', '1:a:0');
+    args.push(...очередьВхода(32), '-f', 'dshow', '-i', `audio=${config.captureAudioDevice}`, '-map', '0:v:0', '-map', '1:a:0');
   } else args.push('-re', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0');
   // Кадр от Desktop Duplication лежит в памяти видеокарты — забираем его перед фильтрами.
   const fromGpu = ddagrabOutput === null ? '' : 'hwdownload,format=bgra,';
@@ -4118,6 +4124,22 @@ function scheduleRelayRecovery() {
   relayRecoveryTimer.unref?.();
 }
 
+// Очередь пакетов на входе. В свежих сборках FFmpeg (с сентября 2026)
+// -thread_queue_size стал только выходным параметром: перед -i он валит весь
+// запуск («cannot be applied to input url … Error parsing options»). У друзей
+// с новой сборкой из-за этого не поднимался релей — и никакая ссылка не
+// работала. Один раз спрашиваем у своего ffmpeg, понимает ли он его на входе.
+let входнаяОчередь = null;
+function очередьВхода(размер) {
+  if (входнаяОчередь === null) {
+    const проба = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-thread_queue_size', '8', '-f', 'lavfi', '-i', 'nullsrc=s=16x16:d=0.04', '-f', 'null', '-'],
+      { windowsHide: true, timeout: 8000, encoding: 'utf8' });
+    входнаяОчередь = проба.status === 0;
+    if (!входнаяОчередь) log('FFmpeg новой версии: очередь входа задаётся по-новому — подстраиваюсь');
+  }
+  return входнаяОчередь ? ['-thread_queue_size', String(размер)] : [];
+}
+
 function startRelay(profile) {
   relayProfile = { ...profile };
   relayBitrateKbps = Number(profile.bitrateKbps) || configuredBitrateKbps(profile);
@@ -4126,7 +4148,7 @@ function startRelay(profile) {
   // через 2^33 и AVPro ломался до resync. Непрерывность обеспечивают
   // output_ts_offset продюсеров, а не коррекции демуксера.
   const args = ['-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts+discardcorrupt',
-    '-probesize', '1000000', '-analyzeduration', '1000000', '-thread_queue_size', '1024', '-f', 'mpegts', '-i', 'pipe:0',
+    '-probesize', '1000000', '-analyzeduration', '1000000', ...очередьВхода(1024), '-f', 'mpegts', '-i', 'pipe:0',
     '-map', '0:v:0', '-map', '0:a:0', ...relayOutputArgs(profile)];
   relayProcess = onAir(spawn('ffmpeg', args, { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] }));
   relayProcess.stdin.on('error', error => {
@@ -5071,15 +5093,15 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0, control = n
   }
   if (media.videoUrl && media.audioUrl && media.videoUrl !== media.audioUrl) {
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
-    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', ...HWACCEL, '-i', media.videoUrl);
+    args.push(...headerArgs, ...очередьВхода(1024), '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', ...HWACCEL, '-i', media.videoUrl);
     videoIndex = inputIndex++;
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
-    args.push(...headerArgs, '-thread_queue_size', '1024', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', '-i', media.audioUrl);
+    args.push(...headerArgs, ...очередьВхода(1024), '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', '-i', media.audioUrl);
     audioIndex = inputIndex++;
   } else {
     const source = media.combinedUrl || media.videoUrl || media.audioUrl;
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
-    args.push('-thread_queue_size', '1024');
+    args.push(...очередьВхода(1024));
     if (!media.cached && /^https?:/i.test(source)) args.push(...headerArgs, '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3');
     // Плейлист .m3u8 бывает и живым эфиром, и обычным видео — снаружи не
     // различить. Поэтому начинаем с последнего куска (для эфира это край, для
