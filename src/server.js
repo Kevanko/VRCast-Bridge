@@ -9,7 +9,7 @@ import { connect as netConnect, createServer as netCreateServer } from 'node:net
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
 
-const APP_VERSION = '0.60.1';
+const APP_VERSION = '0.60.2';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -958,6 +958,11 @@ async function measureTunnelKbps(url) {
 // честно называем его — «в вашей сети он недоступен», а не общая фраза.
 function tunnelFailMessage() {
   const имя = ТУННЕЛИ[config.tunnelProvider]?.name;
+  // Самая частая причина — VPN: Cloudflare через него не подключается (узлы
+  // на порту 7844 рвутся). Лечится выбором своей сетевой карты — говорим прямо.
+  if (vpnInterface && !выбраннаяКарта() && (!имя || config.tunnelProvider === 'cloudflare')) {
+    return `Включён VPN (${vpnInterface}) — через него ${имя ? `«${имя}»` : 'туннели'} часто не подключается. Настройки → «Сеть и серверы» → «Сетевая карта для потока»: выберите свою карту (Wi-Fi или Ethernet), и ссылка пойдёт мимо VPN. Или возьмите Serveo.`;
+  }
   return имя
     ? `«${имя}» не отвечает — в вашей сети он, похоже, недоступен. Выберите «Авто» или другой туннель.`
     : 'Не удалось подключить ни один публичный канал. Отключите VPN/фильтр или выберите другой туннель.';
@@ -1102,7 +1107,9 @@ async function проверитьТуннели() {
         log(`Проверка ${ТУННЕЛИ[ключ].name}: ~${(rawKbps / 1000).toFixed(1)} Мбит/с, ответ ${ttfbMs} мс`);
       } catch (error) {
         проверкаТуннелей.results[ключ] = { error: error.message };
-        log(`Проверка ${ТУННЕЛИ[ключ].name}: ${error.message}`);
+        const подсказка = ключ === 'cloudflare' && vpnInterface && !выбраннаяКарта()
+          ? ' — включён VPN: выберите свою сетевую карту в «Сеть и серверы», тогда Cloudflare пойдёт мимо него' : '';
+        log(`Проверка ${ТУННЕЛИ[ключ].name}: ${error.message}${подсказка}`);
       } finally { try { child?.kill('SIGTERM'); } catch {} }
     }
   } finally { проверкаТуннелей = { ...проверкаТуннелей, running: false, current: '' }; }

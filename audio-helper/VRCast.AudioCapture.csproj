@@ -6,7 +6,15 @@
     <Nullable>enable</Nullable>
     <AssemblyName>VRCast.AudioCapture</AssemblyName>
     <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>false</SelfContained>
+    <!-- Самодостаточный: у друзей без установленного .NET 9 помощник падал с
+         «app-launch-failed» (0x80008096), и захват экрана не запускался вовсе.
+         Обрезка только среды выполнения (partial): наш код и NAudio целиком,
+         COM-взаимодействие проверено вживую — захват процесса, устройства, увод звука. -->
+    <SelfContained>true</SelfContained>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <DebugType>none</DebugType>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

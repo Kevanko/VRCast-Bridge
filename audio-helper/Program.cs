@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Text.Json;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
@@ -19,8 +18,23 @@ if (args.Contains("--list-devices", StringComparer.OrdinalIgnoreCase))
     using var enumerator = new MMDeviceEnumerator();
     string? main = null;
     try { using var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia); main = device.ID; } catch { }
-    Console.WriteLine(JsonSerializer.Serialize(enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
-        .Select(device => new { id = device.ID, name = device.FriendlyName, isDefault = device.ID == main }).ToArray()));
+    // JSON вручную: помощник собирается с обрезкой среды выполнения (чтобы не
+    // требовать установленный .NET), а там сериализация через рефлексию отключена.
+    // Всё не-ASCII — как \uXXXX, ровно как раньше отдавал JsonSerializer.
+    static string Строка(string? s)
+    {
+        var sb = new System.Text.StringBuilder("\"");
+        foreach (var c in s ?? "")
+        {
+            if (c == '"' || c == '\\') sb.Append('\\').Append(c);
+            else if (c < 0x20 || c > 0x7e) sb.Append("\\u").Append(((int)c).ToString("x4"));
+            else sb.Append(c);
+        }
+        return sb.Append('"').ToString();
+    }
+    var записи = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+        .Select(device => $"{{\"id\":{Строка(device.ID)},\"name\":{Строка(device.FriendlyName)},\"isDefault\":{(device.ID == main ? "true" : "false")}}}");
+    Console.WriteLine($"[{string.Join(",", записи)}]");
     return;
 }
 
