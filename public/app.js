@@ -1932,8 +1932,11 @@ function paintUpdateDialog(update){
   const качается=update.installing&&!update.ready;
   const ставится=update.installing&&update.ready;
   // «Готова к установке» писалось и тогда, когда файл ещё даже не скачан.
+  // На 100% ещё идёт проверка подписи файла — говорим об этом, а не молчим.
+  const проверяется=качается&&процент>=100;
   const строка=update.error?`Не удалось: ${update.error}`
     :ставится?'Устанавливаю, программа перезапустится…'
+    :проверяется?'Скачано. Проверяю подпись файла…'
     :качается?(update.totalMb?`Скачиваю ${update.version} — ${update.doneMb||0} из ${update.totalMb} МБ`:'Начинаю загрузку…')
     :update.ready?`Версия ${update.version} скачана и готова к установке.`
     :`Вышла версия ${update.version}. «Обновить» — скачаю и установлю, программа перезапустится.`;
@@ -1942,9 +1945,19 @@ function paintUpdateDialog(update){
   const ширина=`${качается?процент:0}%`, полоса=$('#updateBar').firstElementChild;
   if(полоса.style.width!==ширина)полоса.style.width=ширина;
   setDisabled($('#updateNow'),Boolean(update.installing));
-  setText($('#updateNow'),update.error?'Повторить':ставится?'Устанавливаю…':качается?`Скачиваю ${процент}%`:'Обновить');
+  setText($('#updateNow'),update.error?'Повторить':ставится?'Устанавливаю…':проверяется?'Проверяю…':качается?`Скачиваю ${процент}%`:'Обновить');
+}
+// Файл скачан и подпись сошлась — подменяет его сама оболочка программы.
+// Не справилась за 20 секунд (старая оболочка или сбой) — просим сервер
+// запустить запасной сценарий через скрипт.
+function запуститьПодмену(){
+  if(ui.подменаЗапрошена)return;
+  ui.подменаЗапрошена=true;
+  window.location.href='vrcast://apply-update';
+  setTimeout(()=>{ api('/api/update/apply-script',{method:'POST'}).catch(()=>{}); },20000);
 }
 function offerUpdate(update){
+  if(update?.swapReady)запуститьПодмену();
   if(!update?.available||!update.version)return;
   // Закрытое окно не перерисовываем на каждом опросе — его никто не видит.
   if(updateDialog.open)paintUpdateDialog(update);

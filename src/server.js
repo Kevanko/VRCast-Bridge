@@ -9,7 +9,7 @@ import { connect as netConnect, createServer as netCreateServer } from 'node:net
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
 
-const APP_VERSION = '0.60.2';
+const APP_VERSION = '0.60.3';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -2141,8 +2141,11 @@ async function startUpdateInstall() {
       await downloadUpdate(updateState.assetUrl, updateState.assetSize || 0);
     }
     if (!updateState.ready) { installingUpdate = false; updateState = { ...updateState, installing: false }; return; }
-    applyUpdate();
-    setTimeout(() => { stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); }, 400);
+    // Подменяет файл сама оболочка (vrcast://apply-update): окно увидит
+    // swapReady и отдаст ей команду. Скрипт через WMI — только запасной путь
+    // (/api/update/apply-script), если оболочка за 20 секунд не справилась.
+    updateState = { ...updateState, swapReady: true };
+    log(`Обновление ${updateState.version} проверено — передаю установку оболочке`);
   } catch (error) {
     installingUpdate = false;
     updateState = { ...updateState, installing: false, error: error.message };
@@ -6174,6 +6177,14 @@ const server = http.createServer(async (req, res) => {
         .then(startUpdateInstall)
         .catch(error => log(`Установка обновления: ${error.message}`));
       return json(res, 202, status());
+    }
+    if (req.method === 'POST' && url.pathname === '/api/update/apply-script') {
+      // Запасной путь: оболочка не подменила файл сама — старый сценарий
+      // через cmd-скрипт (ждёт закрытия, копирует, запускает).
+      applyUpdate();
+      json(res, 200, { ok: true });
+      setTimeout(() => { stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); server.close(() => process.exit(0)); }, 400);
+      return;
     }
     if (req.method === 'POST' && url.pathname === '/api/servers') {
       const body = await readBody(req);

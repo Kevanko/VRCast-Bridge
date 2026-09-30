@@ -48,7 +48,27 @@ internal static class Program
         // Если уже запущена ДРУГАЯ версия, новый запуск её закрывает и продолжает:
         // иначе после обновления снова открывалось старое окно, и выглядело это
         // так, будто обновление не сработало.
-        var singleInstance = new Mutex(true, "Local\\VRCastBridge.Desktop", out var firstInstance);
+        // После самообновления новую версию запускает старая и сразу закрывается.
+        // Ждём, пока она отпустит блокировку одного экземпляра, — иначе новая
+        // решила бы, что программа уже открыта, и молча вышла. Заодно убираем
+        // переименованный старый файл, как только он освободится.
+        Mutex singleInstance;
+        bool firstInstance;
+        if (args.Any(arg => arg.Equals("--after-update", StringComparison.OrdinalIgnoreCase)))
+        {
+            singleInstance = new Mutex(false, "Local\\VRCastBridge.Desktop");
+            try { firstInstance = singleInstance.WaitOne(TimeSpan.FromSeconds(20)); }
+            catch (AbandonedMutexException) { firstInstance = true; }
+            var old = Environment.ProcessPath + ".old";
+            _ = Task.Run(async () =>
+            {
+                for (var attempt = 0; attempt < 30 && File.Exists(old); attempt++)
+                {
+                    try { File.Delete(old); } catch { await Task.Delay(1000); }
+                }
+            });
+        }
+        else singleInstance = new Mutex(true, "Local\\VRCastBridge.Desktop", out firstInstance);
         if (!firstInstance && !noWindow)
         {
             var runningVersion = GetServerVersion().GetAwaiter().GetResult();
@@ -1120,6 +1140,12 @@ internal sealed class MainWindow : Form
                 {
                     args.Cancel = true;
                     BeginInvoke(Close);
+                    return;
+                }
+                if (args.Uri.StartsWith("vrcast://apply-update", StringComparison.OrdinalIgnoreCase))
+                {
+                    args.Cancel = true;
+                    BeginInvoke(ApplyUpdateSwap);
                 }
             };
             // На первом запуске программа докачивает Node и кодировщик — это минуты.
@@ -1189,6 +1215,45 @@ internal sealed class MainWindow : Form
             await Task.Delay(300);
         }
         if (!_closing) BeginInvoke(() => ShowFailure());
+    }
+
+    // Самообновление без посредников. Раньше подмену делал cmd-скрипт, запущенный
+    // через PowerShell и WMI; на части компьютеров (правило антивируса против
+    // запуска процессов через WMI, сломанный PowerShell) он не стартовал, сервер
+    // уже был закрыт — и окно навсегда застывало на «100%». Запущенный exe нельзя
+    // перезаписать, но можно переименовать: уводим себя в .old, кладём новую
+    // версию на своё место, запускаем её и выходим. Новая удалит .old сама.
+    private bool _updating;
+    private async void ApplyUpdateSwap()
+    {
+        if (_updating) return;
+        var target = Environment.ProcessPath;
+        var update = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "update", "VRCast Bridge.exe");
+        if (string.IsNullOrEmpty(target) || !File.Exists(update)) return;
+        _updating = true;
+        var old = target + ".old";
+        try
+        {
+            // Сервер закрываем штатно: он останавливает захват и возвращает звук
+            // приложениям, которые уводил «не слышать у себя».
+            await Task.Run(Program.ShutdownServer);
+            await Program.WaitForServerExit(TimeSpan.FromSeconds(6));
+            if (File.Exists(old)) File.Delete(old);
+            File.Move(target, old);
+            File.Copy(update, target, true);
+        }
+        catch (Exception error)
+        {
+            // Не вышло — возвращаем старый файл на место, чтобы не остаться без программы.
+            try { if (!File.Exists(target) && File.Exists(old)) File.Move(old, target); } catch { }
+            _updating = false;
+            MessageBox.Show(this, $"Не удалось установить обновление:\n{error.Message}\n\nСкачайте новую версию со страницы релизов на GitHub.",
+                "VRCast Bridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Application.Restart();
+            return;
+        }
+        try { Process.Start(new ProcessStartInfo(target, "--after-update") { UseShellExecute = true }); } catch { }
+        Environment.Exit(0);
     }
 
     private void ShowFailure()
