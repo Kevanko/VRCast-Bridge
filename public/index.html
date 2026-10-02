@@ -437,8 +437,13 @@
           <div class="seg" data-for="phoneAccess" role="radiogroup" aria-label="Пульт для телефона"></div>
           <select id="phoneAccess" hidden><option value="off" data-short="Выкл">Выключен</option><option value="on" data-short="Вкл">Включён</option></select></div>
         <div class="setting-row" id="phonePairRow" hidden><span><b>Код привязки телефона</b><small id="phonePairNote">Нужен один раз, чтобы менять настройки эфира с телефона</small></span>
-          <span style="display:flex;gap:8px;align-items:center"><code id="phonePin" style="font-size:18px;letter-spacing:2px">------</code>
+          <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end"><code id="phonePin" style="font-size:18px;letter-spacing:2px;white-space:nowrap">------</code>
           <button class="btn" id="phonePinNew" type="button">Новый</button><button class="btn" id="phoneUnpair" type="button">Отвязать все</button></span></div>
+        <div class="setting-row"><span><b>Имя этого ПК в сети</b><small>Так ПК увидят телефоны. Пусто — имя компьютера</small></span>
+          <input id="deviceNameInput" type="text" maxlength="40" style="width:170px" aria-label="Имя этого ПК в сети"></div>
+        <div class="setting-row"><span><b>PIN для подключения</b><small id="accessPinNote">Необязательно. Если задан, телефон спросит его один раз. Поток в сети остаётся открытым</small></span>
+          <input id="accessPinInput" type="text" inputmode="numeric" maxlength="8" placeholder="нет" autocomplete="off" style="width:110px" aria-label="PIN для подключения"></div>
+        <div class="setting-row" id="pairedListRow" hidden><span><b>Привязанные устройства</b><small id="pairedListNote">Телефоны, которые вошли по коду или PIN</small></span><div id="pairedList" style="display:flex;flex-direction:column;gap:6px;align-items:flex-end"></div></div>
         <div class="setting-row"><span><b>Порт программы</b><small id="portNote">По умолчанию 4717</small></span>
           <input id="portInput" type="number" min="1024" max="65400" step="1" inputmode="numeric" style="width:92px" aria-label="Порт программы"></div>
         <div class="setting-row"><span><b>Обновления</b><small id="updateNote">Проверяю…</small></span><button class="btn" id="checkUpdate" type="button"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg>Проверить</button></div>

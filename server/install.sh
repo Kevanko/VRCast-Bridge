@@ -19,6 +19,70 @@ MACHINE="${VRCAST_MACHINE:-}"
 fail() { if [ -n "$MACHINE" ]; then echo "VRCAST_ERR $*"; else echo "${R}✗ $*${N}" >&2; fi; exit 1; }
 step() { [ -n "$MACHINE" ] || echo "${C}›${N} $*"; }
 
+write_config() {
+cat <<EOF
+logLevel: error
+readTimeout: 10s
+writeTimeout: 10s
+# Очередь исходящих пакетов на зрителя: запас для медленных каналов и VR-клиентов.
+writeQueueSize: 1024
+rtspAddress: :$PORT
+rtpAddress: :$RTP
+rtcpAddress: :$((RTP + 1))
+multicastRTPPort: $((RTP + 2))
+multicastRTCPPort: $((RTP + 3))
+rtspAuthMethods: [digest]
+rtmp: no
+hls: yes
+hlsAddress: :$HLSPORT
+hlsVariant: mpegts
+hlsSegmentCount: 4
+hlsSegmentDuration: 1s
+hlsAlwaysRemux: no
+# Экран телефона без ПК: приложение публикует WebRTC (WHIP) на путь phone с тем же ключом.
+webrtc: yes
+webrtcAddress: :$WEBRTC_PORT
+webrtcLocalUDPAddress: :$WEBRTC_UDP
+webrtcIPsFromInterfaces: no
+webrtcAdditionalHosts: [$IP]
+srt: no
+moq: no
+api: no
+metrics: no
+pprof: no
+playback: no
+authInternalUsers:
+- user: any
+  permissions:
+  - action: read
+- user: vrcast
+  pass: $KEY
+  permissions:
+  - action: publish
+paths:
+  live:
+    # Программа пропала (перезапуск, сон ПК, обрыв) — зрителям идёт заставка,
+    # соединение не рвётся; вернулась — поток продолжается сам.
+    alwaysAvailable: yes
+    alwaysAvailableTracks:
+    - codec: H264
+    - codec: MPEG4Audio
+      sampleRate: 48000
+      channelCount: 2
+  # Путь для экрана телефона: без заставки и без требований к кодекам.
+  phone: {}
+  all_others: {}
+EOF
+}
+
+# VRCAST_PRINT_CONFIG=1 — только напечатать mediamtx.yml (для проверки, без установки).
+if [ -n "${VRCAST_PRINT_CONFIG:-}" ]; then
+  PORT="${VRCAST_PORT:-8554}"; KEY="${VRCAST_KEY:-test-key}"; IP="${VRCAST_IP:-127.0.0.1}"
+  RTP=$(( PORT + 1 + (PORT + 1) % 2 )); HLSPORT=$(( PORT + 10 )); WEBRTC_PORT=$(( PORT + 11 )); WEBRTC_UDP=$(( PORT + 12 ))
+  write_config
+  exit 0
+fi
+
 [ "$(id -u)" -eq 0 ] || fail "Нужны права root: запустите через sudo."
 command -v curl >/dev/null 2>&1 || fail "Нет curl: apt install curl (или yum install curl)."
 command -v systemctl >/dev/null 2>&1 || fail "Нет systemd — нужен обычный Linux-сервер (Ubuntu, Debian, CentOS…)."
@@ -50,55 +114,13 @@ KEY=$(cat "$KEY_FILE")
 # MediaMTX требует чётный RTP-порт; UDP-порты держим рядом с RTSP, чтобы не лезть в чужие.
 RTP=$(( PORT + 1 + (PORT + 1) % 2 ))
 HLSPORT=$(( PORT + 10 ))
+WEBRTC_PORT=$(( PORT + 11 ))
+WEBRTC_UDP=$(( PORT + 12 ))
+IP=$(curl -fsS --max-time 6 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 
 step "Пишу настройку и службу…"
 id vrcast-relay >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin vrcast-relay 2>/dev/null || true
-cat > "$DIR/mediamtx.yml" <<EOF
-logLevel: error
-readTimeout: 10s
-writeTimeout: 10s
-# Очередь исходящих пакетов на зрителя: запас для медленных каналов и VR-клиентов.
-writeQueueSize: 1024
-rtspAddress: :$PORT
-rtpAddress: :$RTP
-rtcpAddress: :$((RTP + 1))
-multicastRTPPort: $((RTP + 2))
-multicastRTCPPort: $((RTP + 3))
-rtspAuthMethods: [digest]
-rtmp: no
-hls: yes
-hlsAddress: :$HLSPORT
-hlsVariant: mpegts
-hlsSegmentCount: 4
-hlsSegmentDuration: 1s
-hlsAlwaysRemux: no
-webrtc: no
-srt: no
-moq: no
-api: no
-metrics: no
-pprof: no
-playback: no
-authInternalUsers:
-- user: any
-  permissions:
-  - action: read
-- user: vrcast
-  pass: $KEY
-  permissions:
-  - action: publish
-paths:
-  live:
-    # Программа пропала (перезапуск, сон ПК, обрыв) — зрителям идёт заставка,
-    # соединение не рвётся; вернулась — поток продолжается сам.
-    alwaysAvailable: yes
-    alwaysAvailableTracks:
-    - codec: H264
-    - codec: MPEG4Audio
-      sampleRate: 48000
-      channelCount: 2
-  all_others: {}
-EOF
+write_config > "$DIR/mediamtx.yml"
 chmod 600 "$DIR/mediamtx.yml"
 if id vrcast-relay >/dev/null 2>&1; then chown -R vrcast-relay: "$DIR"; RUN_AS="User=vrcast-relay
 Group=vrcast-relay"; else RUN_AS=""; fi
@@ -157,6 +179,10 @@ card() {
   echo "  3. Сверху выберите «Свой сервер» — ссылка для VRChat появится сама:"
   echo "     ${D}rtspt://$ip:$PORT/live${N}"
   echo
+  echo "  ${B}Телефон без ПК${N}"
+  echo "  В приложении: «Без ПК» → адрес и ключ → «Транслировать экран». Ссылка для VRChat:"
+  echo "     ${D}rtspt://$ip:$PORT/phone${N}  ${D}(порты TCP $((PORT + 11)) и UDP $((PORT + 12)) должны быть открыты)${N}"
+  echo
   echo "  ${D}Ключ никому не показывайте: с ним можно вещать на ваш сервер.${N}"
   echo "  ${D}Команды: vrcast status · key · update · restart · logs · uninstall${N}"
   echo
@@ -184,7 +210,7 @@ case "${1:-help}" in
     [ "$a" = y ] || [ "$a" = Y ] || exit 0
     systemctl disable --now vrcast-relay >/dev/null 2>&1
     rm -f /etc/systemd/system/vrcast-relay.service; systemctl daemon-reload
-    if command -v ufw >/dev/null 2>&1; then ufw delete allow "$PORT/tcp" >/dev/null 2>&1; ufw delete allow "$((PORT + 10))/tcp" >/dev/null 2>&1; fi
+    if command -v ufw >/dev/null 2>&1; then ufw delete allow "$PORT/tcp" >/dev/null 2>&1; ufw delete allow "$((PORT + 10))/tcp" >/dev/null 2>&1; ufw delete allow "$((PORT + 11))/tcp" >/dev/null 2>&1; ufw delete allow "$((PORT + 12))/udp" >/dev/null 2>&1; fi
     rm -rf "$DIR" /usr/local/bin/vrcast
     echo "${G}Удалено.${N}"
     ;;
@@ -208,11 +234,14 @@ systemctl restart vrcast-relay
 
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   ufw allow "$PORT/tcp" >/dev/null 2>&1 || true; ufw allow "$HLSPORT/tcp" >/dev/null 2>&1 || true
-  step "Открыл порты $PORT и $HLSPORT в ufw"
+  ufw allow "$WEBRTC_PORT/tcp" >/dev/null 2>&1 || true; ufw allow "$WEBRTC_UDP/udp" >/dev/null 2>&1 || true
+  step "Открыл порты $PORT, $HLSPORT и $WEBRTC_PORT/$WEBRTC_UDP (экран телефона) в ufw"
 fi
 if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
   firewall-cmd --permanent --add-port="$PORT/tcp" >/dev/null 2>&1 || true
   firewall-cmd --permanent --add-port="$HLSPORT/tcp" >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port="$WEBRTC_PORT/tcp" >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port="$WEBRTC_UDP/udp" >/dev/null 2>&1 || true
   firewall-cmd --reload >/dev/null 2>&1 || true
   step "Открыл порты $PORT и $HLSPORT в firewalld"
 fi
@@ -228,9 +257,8 @@ if ! systemctl is-active --quiet vrcast-relay; then
 fi
 
 if [ -n "$MACHINE" ]; then
-  IP=$(curl -fsS --max-time 6 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
-  echo "VRCAST_OK ip=$IP port=$PORT hls=$HLSPORT key=$KEY"
+  echo "VRCAST_OK ip=$IP port=$PORT hls=$HLSPORT key=$KEY webrtc=$WEBRTC_PORT"
   exit 0
 fi
-echo "${G}✓ Готово.${N} ${D}Если у хостера есть свой файрвол в панели — откройте там TCP $PORT.${N}"
+echo "${G}✓ Готово.${N} ${D}Если у хостера есть свой файрвол в панели — откройте там TCP $PORT, TCP $WEBRTC_PORT и UDP $WEBRTC_UDP (последние два — для экрана телефона).${N}"
 /usr/local/bin/vrcast key

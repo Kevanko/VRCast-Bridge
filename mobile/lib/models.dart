@@ -62,6 +62,7 @@ class BridgeState {
     required this.deliveryPhase,
     required this.deliveryReady,
     required this.deliveryError,
+    this.json = const {},
     DateTime? receivedAt,
   }) : receivedAt = receivedAt ?? DateTime.now();
 
@@ -102,7 +103,20 @@ class BridgeState {
   final String deliveryPhase;
   final bool deliveryReady;
   final String deliveryError;
+  final Map<String, dynamic> json; // как пришло с ПК: из него делается локальная копия
   final DateTime receivedAt;
+
+  /// Последнее известное состояние ПК для показа без связи: очередь, настройки и ссылки на месте,
+  /// а «идёт эфир» сбрасывается — без связи про эфир ничего не известно.
+  factory BridgeState.offlineFrom(Map<String, dynamic> json) {
+    final copy = Map<String, dynamic>.from(json)
+      ..['running'] = false
+      ..['activeKind'] = ''
+      ..['currentId'] = ''
+      ..['phoneSource'] = false
+      ..['delivery'] = {'mode': (json['config'] as Map?)?['outputMode'] ?? 'local', 'phase': '', 'ready': false, 'error': ''};
+    return BridgeState.fromJson(copy);
+  }
 
   QueueItem? get current {
     for (final item in queue) {
@@ -172,6 +186,7 @@ class BridgeState {
       deliveryPhase: '${delivery['phase'] ?? ''}',
       deliveryReady: delivery['ready'] == true,
       deliveryError: '${delivery['error'] ?? ''}',
+      json: json,
       servers: [
         for (final item in (config['servers'] as List? ?? const []))
           ServerChoice('${(item as Map)['id']}', '${item['name'] ?? item['id']}', item['reachable'] as bool?),

@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
+import 'own_server.dart';
+
 /// Параметры отправки экрана под профиль эфира ПК: во сколько раз уменьшить картинку,
 /// какой битрейт и сколько кадров в секунду. ПК всё равно кодирует эфир в свой профиль
 /// (высота 480/720/1080), поэтому отправлять с телефона больше нет смысла.
@@ -14,11 +16,17 @@ import 'package:http/http.dart' as http;
   final scale = longSide <= target ? 1.0 : longSide / target;
   final fallback = {'480p': 1500000, '720p': 3000000, '1080p': 5000000}[quality] ?? 3000000;
   // Канал до ПК — домашняя сеть: битрейт эфира берём с запасом, но в разумных пределах.
-  final bitrate = bitrateKbps > 0 ? (bitrateKbps * 1000).clamp(1500000, 8000000) : fallback;
+  final bitrate = bitrateKbps > 0 ? (bitrateKbps * 1000).clamp(800000, 8000000) : fallback;
   return (scale: scale, bitrate: bitrate, fps: fps >= 60 ? 60 : 30);
 }
 
-/// Передаёт экран телефона на ПК: запись экрана → WebRTC → WHIP в MediaMTX на ПК.
+/// Из списка кодеков телефона оставляет H.264 (его читает плеер VRChat); пусто, если телефон так не умеет.
+List<RTCRtpCodecCapability> h264Codecs(List<RTCRtpCodecCapability> all) => all.where((c) => c.mimeType.toLowerCase() == 'video/h264').toList();
+
+/// Битрейт отправки напрямую на свой сервер: по интернету экономнее, чем по домашней сети.
+int directBitrateKbps(String quality) => {'480p': 1200, '720p': 2500, '1080p': 4000}[quality] ?? 2500;
+
+/// Передаёт экран телефона на ПК или на свой сервер: запись экрана → WebRTC → WHIP в MediaMTX на ПК.
 class PhoneStream {
   static const _native = MethodChannel('vrcast/screen');
 
@@ -27,15 +35,33 @@ class PhoneStream {
   Timer? _keyframes;
   MediaStream? _stream;
   Uri? _resource; // адрес сессии WHIP, по нему её закрывают
+  Map<String, String> _auth = const {};
   bool live = false;
   DateTime? startedAt;
   String _profileKey = '';
   String lastApplied = ''; // для диагностики и тестов
+  String selectedCodec = ''; // что выбрано для отправки: «H.264» или «нет H.264» (тогда кодек по умолчанию)
+  bool get lacksH264 => selectedCodec == 'нет H.264';
   final _changes = StreamController<void>.broadcast();
   Stream<void> get changes => _changes.stream;
 
-  /// [pc] — адрес ПК (http://хост:порт), [webrtcPort] — порт WebRTC на нём.
-  Future<void> start(Uri pc, int webrtcPort, {String quality = '720p', int fps = 30, int bitrateKbps = 0}) async {
+  /// Сообщить подписчикам, что состояние изменилось (нужно заглушкам в тестах).
+  @visibleForTesting
+  void emitChange() => _changes.add(null);
+
+  /// Экран телефона → ПК. [pc] — адрес ПК (http://хост:порт), [webrtcPort] — порт WebRTC на нём.
+  Future<void> start(Uri pc, int webrtcPort, {String quality = '720p', int fps = 30, int bitrateKbps = 0}) =>
+      _publish(pc.replace(port: webrtcPort, path: '/phone/whip'), const {},
+          quality: quality, fps: fps, bitrateKbps: bitrateKbps, h264: false, hint: 'ПК не принял поток. Включён ли «Пульт для телефона»?');
+
+  /// Экран телефона → свой сервер напрямую, без ПК. Видео H.264: его понимает плеер в VRChat.
+  Future<void> startDirect(OwnServer server, {String quality = '720p', int fps = 30}) =>
+      _publish(server.whip, {'Authorization': server.basicAuth},
+          quality: quality, fps: fps, bitrateKbps: directBitrateKbps(quality), h264: true,
+          hint: 'Сервер не принял поток. Он должен быть обновлён («Настроить с нуля» в программе на ПК), а порты TCP ${server.rtspPort + 11} и UDP ${server.rtspPort + 12} открыты.');
+
+  Future<void> _publish(Uri whip, Map<String, String> headers,
+      {required String quality, required int fps, required int bitrateKbps, required bool h264, required String hint}) async {
     if (live) return;
     // Согласие на запись экрана берём заранее: службу переднего плана Android 14+
     // разрешает запускать только после него.
@@ -46,8 +72,13 @@ class PhoneStream {
       _stream = stream;
       final connection = await createPeerConnection({'iceServers': <Map<String, Object>>[], 'sdpSemantics': 'unified-plan'});
       _pc = connection;
-      final sender = await connection.addTrack(stream.getVideoTracks().first, stream);
-      _sender = sender;
+      final transceiver = await connection.addTransceiver(
+        track: stream.getVideoTracks().first,
+        kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendOnly, streams: [stream]),
+      );
+      _sender = transceiver.sender;
+      if (h264) await _preferH264(transceiver);
       await applyProfile(quality: quality, fps: fps, bitrateKbps: bitrateKbps);
 
       final gathered = Completer<void>();
@@ -59,11 +90,17 @@ class PhoneStream {
       await gathered.future.timeout(const Duration(seconds: 4), onTimeout: () {});
       final local = await connection.getLocalDescription();
 
-      final whip = pc.replace(port: webrtcPort, path: '/phone/whip');
-      final response = await http.post(whip, headers: {'Content-Type': 'application/sdp'}, body: local!.sdp).timeout(const Duration(seconds: 10));
-      if (response.statusCode != 201) throw 'ПК не принял поток (${response.statusCode}). Включён ли «Пульт для телефона»?';
+      final http.Response response;
+      try {
+        response = await http.post(whip, headers: {'Content-Type': 'application/sdp', ...headers}, body: local!.sdp).timeout(const Duration(seconds: 10));
+      } on TimeoutException {
+        throw 'Нет ответа от ${whip.host}. $hint';
+      }
+      if (response.statusCode == 401) throw 'Сервер отклонил ключ. Проверьте ключ в настройках сервера.';
+      if (response.statusCode != 201) throw '$hint (ответ ${response.statusCode})';
       final location = response.headers['location'];
       if (location != null) _resource = whip.resolve(location);
+      _auth = headers;
       await connection.setRemoteDescription(RTCSessionDescription(response.body, 'answer'));
       connection.onConnectionState = (state) {
         if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed || state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) stop();
@@ -71,7 +108,7 @@ class PhoneStream {
       stream.getVideoTracks().first.onEnded = stop;
       live = true;
       startedAt = DateTime.now();
-      // Статичный экран кадров почти не даёт, а ПК без них не может начать читать поток и
+      // Статичный экран кадров почти не даёт, а приёмник без них не может начать читать поток и
       // считает эфир зависшим. Подталкиваем кодек чаще секунды: кадры идут без пауз.
       _keyframes = Timer.periodic(const Duration(milliseconds: 600), (_) => _forceKeyframe());
       Timer(const Duration(milliseconds: 500), _forceKeyframe);
@@ -79,6 +116,24 @@ class PhoneStream {
     } catch (e) {
       await stop();
       rethrow;
+    }
+  }
+
+  /// Плеер VRChat (AVPro) читает только H.264. Если кодека нет, остаётся выбор по умолчанию.
+  Future<void> _preferH264(RTCRtpTransceiver transceiver) async {
+    try {
+      final capabilities = await getRtpSenderCapabilities('video');
+      final all = capabilities.codecs ?? const <RTCRtpCodecCapability>[];
+      final h264 = h264Codecs(all);
+      debugPrint('PhoneStream: кодеки телефона: ${all.map((c) => c.mimeType).toSet().join(', ')}');
+      if (h264.isEmpty) {
+        selectedCodec = 'нет H.264';
+      } else {
+        await transceiver.setCodecPreferences(h264);
+        selectedCodec = 'H.264';
+      }
+    } catch (e) {
+      debugPrint('PhoneStream: H.264 недоступен ($e), останется кодек по умолчанию');
     }
   }
 
@@ -131,7 +186,7 @@ class PhoneStream {
     final wasLive = live || _pc != null;
     live = false;
     _resource = null;
-    if (resource != null) http.delete(resource).timeout(const Duration(seconds: 3)).catchError((Object _) => http.Response('', 0));
+    if (resource != null) http.delete(resource, headers: _auth).timeout(const Duration(seconds: 3)).catchError((Object _) => http.Response('', 0));
     for (final track in _stream?.getTracks() ?? const <MediaStreamTrack>[]) {
       await track.stop();
     }

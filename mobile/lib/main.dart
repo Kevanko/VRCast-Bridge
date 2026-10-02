@@ -6,6 +6,15 @@ import 'screens.dart';
 
 void main() => runApp(const VrcastRemoteApp());
 
+/// Без растяжения и «резинки» при перетягивании за край (Android 12+ тянет содержимое без предела).
+class NoStretchScrollBehavior extends MaterialScrollBehavior {
+  const NoStretchScrollBehavior();
+  @override
+  Widget buildOverscrollIndicator(BuildContext context, Widget child, ScrollableDetails details) => child;
+  @override
+  ScrollPhysics getScrollPhysics(BuildContext context) => const ClampingScrollPhysics();
+}
+
 class VrcastRemoteApp extends StatelessWidget {
   const VrcastRemoteApp({super.key});
 
@@ -13,12 +22,13 @@ class VrcastRemoteApp extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
         title: 'VRCast Bridge',
         debugShowCheckedModeBanner: false,
+        scrollBehavior: const NoStretchScrollBehavior(),
         theme: ThemeData(useMaterial3: true, brightness: Brightness.dark, colorSchemeSeed: accent, scaffoldBackgroundColor: const Color(0xFF0E0C18)),
         home: const Root(),
       );
 }
 
-/// Либо выбор ПК, либо пульт для выбранного.
+/// Главный экран всегда один: с ПК или без него. Подключение к ПК только добавляет синхронизацию.
 class Root extends StatefulWidget {
   const Root({super.key});
   @override
@@ -27,29 +37,34 @@ class Root extends StatefulWidget {
 
 class _RootState extends State<Root> {
   Remote? _remote;
-  bool _loading = true;
 
   @override
   void initState() {
     super.initState();
     Prefs.instance.load().then((_) {
       final last = Prefs.instance.last;
-      if (last != null && Prefs.instance.autoConnect) _connect(last.name, last.base);
-      if (mounted) setState(() => _loading = false);
+      if (!mounted) return;
+      if (last != null && Prefs.instance.autoConnect) {
+        _connect(last.name, last.base);
+      } else {
+        setState(() => _remote = Remote.local());
+      }
     });
   }
 
   void _connect(String name, Uri base) {
-    _remote?.dispose();
-    final remote = Remote(Api(base, token: Prefs.instance.tokens[base.toString()]), pcName: name)..start();
+    final previous = _remote;
+    final remote = Remote(Api(base, token: Prefs.instance.tokens[base.toString()]), pcName: Prefs.instance.nameFor(base.authority, name))..start();
     Prefs.instance.remember(name, base.toString());
     setState(() => _remote = remote);
+    previous?.dispose();
   }
 
   void _disconnect() {
-    _remote?.dispose();
+    final previous = _remote;
     Prefs.instance.leave();
-    setState(() => _remote = null);
+    setState(() => _remote = Remote.local());
+    previous?.dispose();
   }
 
   @override
@@ -60,8 +75,8 @@ class _RootState extends State<Root> {
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) return const Scaffold(body: Center(child: CircularProgressIndicator()));
     final remote = _remote;
-    return remote == null ? ConnectScreen(onPick: _connect) : HomeScreen(remote: remote, onDisconnect: _disconnect);
+    if (remote == null) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    return HomeScreen(key: ValueKey(remote), remote: remote, onConnect: _connect, onDisconnect: _disconnect);
   }
 }

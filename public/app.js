@@ -742,7 +742,7 @@ function render(state) {
   // Любая отрисовка не из опроса (ответ на нажатие) сбрасывает сравнение:
   // следующий опрос обязан перерисовать, даже если совпал с прошлым опросом.
   ui.lastPollText='';
-  ui.status=state; ui.progressAt=Date.now();  const ready=state.tools.ffmpeg&&state.tools.ytdlp;
+  ui.status=state; ui.progressAt=Date.now(); paintPairedList(); const ready=state.tools.ffmpeg&&state.tools.ytdlp;
   if(ui.seekPending&&!state.playback?.busy&&Number(state.playback?.revision)>=ui.seekRevision)ui.seekPending=false;
   const streamReady=Boolean(state.stream?.ready), streamStalled=state.stream?.state==='stalled';
   // Связь с ядром пропала — старое «В эфире»/«Готово» было бы враньём.
@@ -1799,7 +1799,7 @@ $('#capturePreview').addEventListener('error',()=>{
   ui.frameTimer=setTimeout(()=>{ if(captureFramesWanted())$('#capturePreview').src=`/api/capture-preview?time=${Date.now()}`; },1000);
 });
 
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#closeAction').value=state.config.closeToTray===false?'exit':'tray';paintCloseNote();$('#phoneAccess').value=state.config.lanAccess?'on':'off';paintPhoneNote();$('#portInput').value=state.config.port||state.port||4717;paintPortNote(state);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#muteLocalApp').checked=Boolean(state.config.muteLocalApp);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode,false);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#closeAction').value=state.config.closeToTray===false?'exit':'tray';paintCloseNote();$('#phoneAccess').value=state.config.lanAccess?'on':'off';paintPhoneNote();$('#portInput').value=state.config.port||state.port||4717;paintPortNote(state);$('#deviceNameInput').value=state.config.deviceName||'';$('#accessPinInput').value=state.config.accessPin||'';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#muteLocalApp').checked=Boolean(state.config.muteLocalApp);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode,false);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
   ui.windowHidden=document.hidden; document.documentElement.classList.toggle('window-hidden',document.hidden);
   render(state);
   // Опрос запускаем до списка источников: тот идёт через PowerShell и может
@@ -2102,9 +2102,24 @@ $('#closeAction').addEventListener('change',async()=>{
   catch(error){ ui.configEditUntil=0; toast(error.message,true); }
 });
 
+function paintPairedList(){
+  const phones=ui.status?.config?.pairedPhones||[], on=$('#phoneAccess').value==='on';
+  $('#pairedListRow').hidden=!on||!phones.length;
+  const box=$('#pairedList'); box.textContent='';
+  for(const phone of phones){
+    const row=document.createElement('div'); row.style.cssText='display:flex;gap:6px;align-items:center';
+    const name=document.createElement('span'); name.textContent=phone.name; name.title=new Date(phone.at).toLocaleString('ru-RU');
+    const rename=document.createElement('button'); rename.className='btn'; rename.type='button'; rename.textContent='Переименовать';
+    rename.addEventListener('click',async()=>{ const value=prompt('Имя устройства',phone.name); if(!value||!value.trim()) return; try{ await api('/api/pair/rename',{method:'POST',body:JSON.stringify({id:phone.id,name:value.trim()})}); render(await api('/api/status')); }catch(error){ toast(error.message,true); } });
+    const remove=document.createElement('button'); remove.className='btn'; remove.type='button'; remove.textContent='Отвязать';
+    remove.addEventListener('click',async()=>{ try{ await api('/api/pair/remove',{method:'POST',body:JSON.stringify({id:phone.id})}); render(await api('/api/status')); toast('Устройство отвязано'); }catch(error){ toast(error.message,true); } });
+    row.append(name,rename,remove); box.append(row);
+  }
+}
 async function paintPhonePin(){
   const on=$('#phoneAccess').value==='on';
   $('#phonePairRow').hidden=!on;
+  paintPairedList();
   if(!on) return;
   try{
     const info=await api('/api/pair/pin');
@@ -2112,6 +2127,16 @@ async function paintPhonePin(){
     setText($('#phonePairNote'),info.phones?`Привязано телефонов: ${info.phones}. Код меняется после каждой привязки`:'Введите этот код в приложении на телефоне: Настройки → Эфир на ПК');
   }catch{}
 }
+$('#deviceNameInput').addEventListener('change',async()=>{
+  try{ render(await api('/api/config',{method:'POST',body:JSON.stringify({deviceName:$('#deviceNameInput').value})})); toast('Имя ПК сохранено'); }
+  catch(error){ toast(error.message,true); }
+});
+$('#accessPinInput').addEventListener('change',async()=>{
+  const value=$('#accessPinInput').value.trim();
+  if(value&&!/^\d{4,8}$/.test(value)){ toast('PIN — от 4 до 8 цифр',true); $('#accessPinInput').value=ui.status?.config?.accessPin||''; return; }
+  try{ render(await api('/api/config',{method:'POST',body:JSON.stringify({accessPin:value})})); toast(value?'PIN включён':'PIN выключен'); }
+  catch(error){ toast(error.message,true); }
+});
 $('#phonePinNew').addEventListener('click',async()=>{ try{ await api('/api/pair/pin/rotate',{method:'POST',body:'{}'}); paintPhonePin(); }catch(error){ toast(error.message,true); } });
 $('#phoneUnpair').addEventListener('click',async()=>{ try{ await api('/api/pair/clear',{method:'POST',body:'{}'}); paintPhonePin(); toast('Все телефоны отвязаны'); }catch(error){ toast(error.message,true); } });
 

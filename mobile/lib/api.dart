@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+import 'own_server.dart';
 
 /// Разбор потока Server-Sent Events: отдаёт тело каждого события (строки data:).
 Stream<String> parseSse(Stream<List<int>> bytes) async* {
@@ -20,8 +21,9 @@ Stream<String> parseSse(Stream<List<int>> bytes) async* {
 }
 
 class ApiException implements Exception {
-  ApiException(this.message);
+  ApiException(this.message, {this.code = ''});
   final String message;
+  final String code; // 'pin' — ПК просит PIN, 'pairing' — нужна привязка
   @override
   String toString() => message;
 }
@@ -49,7 +51,7 @@ class Api {
     final response = await http.Response.fromStream(await _client.send(request).timeout(const Duration(seconds: 8)));
     final decoded = response.body.isEmpty ? <String, dynamic>{} : jsonDecode(response.body);
     final map = decoded is Map ? decoded.cast<String, dynamic>() : <String, dynamic>{};
-    if (response.statusCode >= 400) throw ApiException('${map['error'] ?? 'Ошибка ${response.statusCode}'}');
+    if (response.statusCode >= 400) throw ApiException('${map['error'] ?? 'Ошибка ${response.statusCode}'}', code: '${map['code'] ?? ''}');
     return map;
   }
 
@@ -62,7 +64,13 @@ class Api {
     final request = http.Request('GET', uri('/api/events'))..headers['Accept'] = 'text/event-stream';
     if (token != null) request.headers['X-VRCast-Token'] = token!;
     final response = await _client.send(request).timeout(const Duration(seconds: 8));
-    if (response.statusCode != 200) throw ApiException('Сервер ответил ${response.statusCode}');
+    if (response.statusCode != 200) {
+      var code = '';
+      try {
+        code = '${(jsonDecode(await response.stream.bytesToString()) as Map)['code'] ?? ''}';
+      } catch (_) {}
+      throw ApiException(code == 'pin' ? 'Этот ПК просит PIN' : 'Сервер ответил ${response.statusCode}', code: code);
+    }
     await for (final text in parseSse(response.stream)) {
       yield BridgeState.fromJson((jsonDecode(text) as Map).cast<String, dynamic>());
     }
@@ -83,6 +91,17 @@ class Api {
       return false;
     }
   }
+
+  /// Свои серверы с ключами (только привязанному телефону): чтобы работать без ПК.
+  Future<List<OwnServer>> exportServers() async {
+    final data = await _send('GET', '/api/servers/export');
+    return [for (final item in (data['servers'] as List? ?? const [])) OwnServer.fromJson((item as Map).cast<String, dynamic>())];
+  }
+
+  /// Серверы телефона отправляются на ПК (нужна привязка): там они появятся в списке серверов.
+  Future<void> importServers(List<OwnServer> servers) => _send('POST', '/api/servers/import', {
+        'servers': [for (final s in servers) {'name': s.name, 'host': s.host, 'rtspPort': s.rtspPort, 'publishKey': s.key}],
+      });
 
   /// Настройки эфира на ПК (outputMode, tunnelProvider, activeServerId, quality, fps, encoderMode, whiteIp).
   Future<void> setStream(Map<String, Object?> values) => _send('POST', '/api/config', values);

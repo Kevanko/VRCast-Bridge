@@ -1,32 +1,63 @@
 import 'dart:async';
 
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
 import 'models.dart';
+import 'own_server.dart';
 import 'phone_stream.dart';
 
 enum Link { idle, connecting, online, offline }
 
 /// Соединение с одним ПК: живое состояние по SSE и команды.
 class Remote extends ChangeNotifier {
-  Remote(this.api, {this.pcName = ''});
+  Remote(this.api, {this.pcName = '', PhoneStream? phone})
+      : isLocal = false,
+        phone = phone ?? PhoneStream() {
+    _listenPhone();
+  }
+
+  /// Без ПК: приложение работает от своих данных (последняя копия очереди и настроек ПК, свои серверы).
+  /// Подключение к ПК потом ничего не ломает: данные синхронизируются в обе стороны.
+  Remote.local({PhoneStream? phone})
+      : api = Api(Uri.parse('http://127.0.0.1:1')),
+        pcName = '',
+        isLocal = true,
+        phone = phone ?? PhoneStream() {
+    _listenPhone();
+    final cached = Prefs.instance.cachedState;
+    try {
+      state = BridgeState.offlineFrom(cached == null ? <String, dynamic>{} : (jsonDecode(cached) as Map).cast<String, dynamic>());
+    } catch (_) {
+      state = BridgeState.offlineFrom(const {});
+    }
+    link = Link.offline;
+  }
 
   final Api api;
   final String pcName;
+  final bool isLocal;
+  bool _phoneViaPc = false;
+  bool needsPin = false; // ПК закрыт PIN-кодом, ключа у телефона нет
+
+  bool get online => link == Link.online;
+
+  void _listenPhone() => _phoneSub = phone.changes.listen((_) => notifyListeners());
   BridgeState? state;
   Link link = Link.idle;
   String? error;
   bool _closed = false;
   Timer? _tick;
-  final PhoneStream phone = PhoneStream();
+  final PhoneStream phone;
+  bool _serversSynced = false;
   StreamSubscription<void>? _phoneSub;
 
   /// Подключаемся и держим соединение: при обрыве пробуем снова.
   void start() {
-    if (link != Link.idle) return;
-    _phoneSub = phone.changes.listen((_) => notifyListeners());
+    if (isLocal || link != Link.idle) return;
     _loop();
     _tick = Timer.periodic(const Duration(milliseconds: 500), (_) {
       if (state?.isPlaying == true) notifyListeners();
@@ -39,18 +70,27 @@ class Remote extends ChangeNotifier {
       link = state == null ? Link.connecting : Link.offline;
       notifyListeners();
       try {
+        var first = true; // новое соединение приняли — значит ключ верный; на лету просьбу о PIN события не сбрасывают
         await for (final next in api.events()) {
           if (_closed) return;
+          if (first) { needsPin = false; first = false; }
           state = next; link = Link.online; error = null; delay = 1;
           // ПК остановил эфир с телефона (или он оборвался) — выключаем и запись экрана.
           final since = phone.startedAt;
           if (phone.live && !next.phoneSource && since != null && DateTime.now().difference(since).inSeconds > 8) phone.stop();
+          Prefs.instance.cacheState(next.json);
+          if (!_serversSynced) { _serversSynced = true; syncAll(); }
+          Prefs.instance.mirrorProfile(next.profileQuality, next.profileFps);
           // Качество, частоту кадров и битрейт отправки берём из профиля ПК: поменяли там — телефон подстроился.
           if (phone.live) phone.applyProfile(quality: next.profileQuality, fps: next.profileFps, bitrateKbps: next.profileBitrateKbps);
           notifyListeners();
         }
       } catch (e) {
         error = '$e';
+        if (e is ApiException && e.code == 'pin' && !needsPin) {
+          needsPin = true;
+          notifyListeners();
+        }
       }
       if (_closed) return;
       link = Link.offline;
@@ -62,18 +102,90 @@ class Remote extends ChangeNotifier {
 
   /// Команда: ошибку показываем, а состояние придёт событием.
   Future<String?> run(Future<void> Function() action) async {
+    if (!online) return 'Нет связи с ПК. Подключитесь к ПК, чтобы управлять эфиром.';
     try {
       await action();
       return null;
     } catch (e) {
+      // Устройство отвязали на ПК или сменили PIN: ключ больше не годится — просим ввести PIN заново.
+      if (e is ApiException && e.code == 'pin' && !needsPin) {
+        needsPin = true;
+        notifyListeners();
+      }
       return '$e';
     }
   }
 
   Future<String?> playback(String action, [Map<String, Object?> extra = const {}]) => run(() => api.playback(action, extra));
 
-  /// Экран телефона → ПК → эфир.
+  /// Двусторонняя синхронизация при подключении: накопленные без связи ссылки уходят в очередь ПК,
+  /// серверы переходят в обе стороны (для серверов нужна привязка).
+  Future<void> syncAll() async {
+    await pushPendingLinks();
+    if (api.token != null) await syncServers();
+  }
+
+  /// Ссылки, добавленные без связи, отправляем в очередь ПК; что не ушло, остаётся ждать.
+  Future<int> pushPendingLinks() async {
+    var sent = 0;
+    for (final url in [...Prefs.instance.pendingLinks]) {
+      try {
+        await api.addLink(url, confirm: true);
+        Prefs.instance.removePendingLink(url);
+        sent++;
+      } catch (_) {
+        break;
+      }
+    }
+    if (sent > 0) notifyListeners();
+    return sent;
+  }
+
+  /// PIN введён: получаем ключ, дальше соединение переустанавливается само.
+  void acceptToken(String token) {
+    api.token = token;
+    Prefs.instance.setToken(api.base.toString(), token);
+    needsPin = false;
+    _serversSynced = false;
+    notifyListeners();
+  }
+
+  /// Серверы: с ПК на телефон и с телефона на ПК. Возвращает, сколько новых серверов получил телефон.
+  Future<int> syncServers() async {
+    try {
+      final added = Prefs.instance.mergeServers(await api.exportServers());
+      if (Prefs.instance.ownServers.isNotEmpty) await api.importServers(Prefs.instance.ownServers);
+      notifyListeners();
+      return added;
+    } catch (_) {
+      _serversSynced = false;
+      return 0;
+    }
+  }
+
+  /// Куда пойдёт экран телефона: через ПК (он есть и на связи) или напрямую на свой сервер.
+  String get streamTarget {
+    if (online) return 'через ПК';
+    final server = Prefs.instance.currentOwnServer;
+    return server == null ? '' : 'на сервер «${server.name}»';
+  }
+
+  /// Экран телефона в эфир: через ПК, если он на связи, иначе прямо на свой сервер. Режима переключать не нужно.
   Future<String?> startPhoneBroadcast() async {
+    if (!online) {
+      final server = Prefs.instance.currentOwnServer;
+      if (server == null) return 'ПК не на связи, и своего сервера нет. Добавьте сервер в настройках или подключитесь к ПК.';
+      try {
+        _phoneViaPc = false;
+        await phone.startDirect(server, quality: Prefs.instance.standaloneQuality, fps: Prefs.instance.standaloneFps);
+        notifyListeners();
+        return null;
+      } catch (e) {
+        await phone.stop();
+        return '$e';
+      }
+    }
+    _phoneViaPc = true;
     try {
       final info = await api.lanInfo();
       final s = state;
@@ -90,7 +202,7 @@ class Remote extends ChangeNotifier {
 
   Future<String?> stopPhoneBroadcast() async {
     await phone.stop();
-    return run(api.stop);
+    return _phoneViaPc && online ? run(api.stop) : null;
   }
 
   @override
@@ -125,6 +237,17 @@ class Prefs extends ChangeNotifier {
   List<SavedPc> pcs = [];
   SavedPc? last;
   Map<String, String> tokens = {}; // адрес ПК → ключ привязки
+  // Работа без ПК: свои серверы и качество, которое подхватывается с ПК, когда он есть.
+  // Что накоплено без связи: ссылки уйдут в очередь ПК при подключении; последнее состояние ПК — для показа без связи.
+  List<String> pendingLinks = [];
+  // Как называется этот телефон (его видит ПК в списке устройств) и свои имена для найденных устройств.
+  String deviceName = 'Телефон';
+  Map<String, String> aliases = {};
+  String? cachedState;
+  List<OwnServer> ownServers = [];
+  String? ownServerId;
+  String standaloneQuality = '720p';
+  int standaloneFps = 30;
 
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
@@ -133,6 +256,14 @@ class Prefs extends ChangeNotifier {
     defaultPort = p.getInt('defaultPort') ?? 4717;
     pcs = [for (final raw in p.getStringList('pcs') ?? const []) if (raw.contains('\n')) SavedPc(raw.split('\n').first, raw.split('\n').last)];
     tokens = {for (final raw in p.getStringList('tokens') ?? const []) if (raw.contains('\n')) raw.split('\n').first: raw.split('\n').last};
+    ownServers = [for (final raw in p.getStringList('ownServers') ?? const []) OwnServer.fromJson((jsonDecode(raw) as Map).cast<String, dynamic>())];
+    ownServerId = p.getString('ownServerId');
+    pendingLinks = p.getStringList('pendingLinks') ?? [];
+    deviceName = p.getString('deviceName') ?? 'Телефон';
+    aliases = {for (final raw in p.getStringList('aliases') ?? const []) if (raw.contains('\n')) raw.split('\n').first: raw.split('\n').last};
+    cachedState = p.getString('cachedState');
+    standaloneQuality = p.getString('standaloneQuality') ?? '720p';
+    standaloneFps = p.getInt('standaloneFps') ?? 30;
     final l = p.getStringList('lastPc');
     last = l != null && l.length == 2 ? SavedPc(l[0], l[1]) : null;
     notifyListeners();
@@ -143,6 +274,14 @@ class Prefs extends ChangeNotifier {
     await p.setBool('autoConnect', autoConnect);
     await p.setBool('preview', preview);
     await p.setInt('defaultPort', defaultPort);
+    await p.setStringList('ownServers', [for (final s in ownServers) jsonEncode(s.toJson())]);
+    ownServerId == null ? await p.remove('ownServerId') : await p.setString('ownServerId', ownServerId!);
+    await p.setStringList('pendingLinks', pendingLinks);
+    await p.setString('deviceName', deviceName);
+    await p.setStringList('aliases', [for (final e in aliases.entries) '${e.key}\n${e.value}']);
+    cachedState == null ? await p.remove('cachedState') : await p.setString('cachedState', cachedState!);
+    await p.setString('standaloneQuality', standaloneQuality);
+    await p.setInt('standaloneFps', standaloneFps);
     await p.setStringList('tokens', [for (final e in tokens.entries) '${e.key}\n${e.value}']);
     await p.setStringList('pcs', [for (final pc in pcs) '${pc.name}\n${pc.url}']);
     last == null ? await p.remove('lastPc') : await p.setStringList('lastPc', [last!.name, last!.url]);
@@ -166,6 +305,87 @@ class Prefs extends ChangeNotifier {
       });
 
   void leave() => update(() => last = null);
+
+  /// Имя устройства: своё, если задали, иначе то, что назвал сам ПК.
+  String nameFor(String authority, String fallback) {
+    final alias = aliases[authority];
+    return alias == null || alias.trim().isEmpty ? fallback : alias;
+  }
+
+  void setAlias(String authority, String? name) => update(() {
+        final value = name?.trim() ?? '';
+        value.isEmpty ? aliases.remove(authority) : aliases[authority] = value.length > 40 ? value.substring(0, 40) : value;
+      });
+
+  void setDeviceName(String name) => update(() => deviceName = name.trim().isEmpty ? 'Телефон' : name.trim());
+
+  void addPendingLink(String url) => update(() {
+        if (!pendingLinks.contains(url)) pendingLinks = [...pendingLinks, url];
+      });
+
+  void removePendingLink(String url) => update(() => pendingLinks = pendingLinks.where((e) => e != url).toList());
+
+  /// Локальная копия состояния ПК; пишем только когда изменилось то, что видно без связи.
+  void cacheState(Map<String, dynamic> json) {
+    // Только то, что меняется редко: ход воспроизведения и таймеры в копию не попадают, иначе запись шла бы каждую секунду.
+    final performance = (json['performance'] as Map?) ?? const {};
+    final trimmed = <String, dynamic>{
+      for (final key in const ['queue', 'config', 'rtsp', 'playbackUrl'])
+        if (json.containsKey(key)) key: json[key],
+      'performance': {for (final key in const ['encoder', 'outputProfile', 'desiredProfile']) if (performance.containsKey(key)) key: performance[key]},
+    };
+    (trimmed['config'] as Map?)?.remove('pairedPhones');
+    (trimmed['config'] as Map?)?.remove('accessPin');
+    (trimmed['rtsp'] as Map?)?.remove('remote');
+    final encoded = jsonEncode(trimmed);
+    if (encoded == cachedState) return;
+    cachedState = encoded;
+    _save();
+  }
+
+  OwnServer? get currentOwnServer {
+    for (final s in ownServers) {
+      if (s.id == ownServerId) return s;
+    }
+    return ownServers.isEmpty ? null : ownServers.first;
+  }
+
+  /// Добавить или обновить свой сервер (по адресу и порту) и выбрать его.
+  void saveOwnServer(OwnServer server) => update(() {
+        ownServers = [server, ...ownServers.where((e) => e.id != server.id)];
+        ownServerId = server.id;
+      });
+
+  void removeOwnServer(OwnServer server) => update(() {
+        ownServers = ownServers.where((e) => e.id != server.id).toList();
+        if (ownServerId == server.id) ownServerId = null;
+      });
+
+  void selectOwnServer(OwnServer server) => update(() => ownServerId = server.id);
+
+  void setStandaloneProfile({String? quality, int? fps}) => update(() {
+        standaloneQuality = quality ?? standaloneQuality;
+        standaloneFps = fps ?? standaloneFps;
+      });
+
+  /// Серверы, полученные с ПК: объединяем со своими, ключ и название обновляются. Возвращает, сколько новых.
+  int mergeServers(List<OwnServer> incoming) {
+    var added = 0;
+    update(() {
+      for (final server in incoming) {
+        if (!ownServers.any((e) => e.id == server.id)) added++;
+        ownServers = [...ownServers.where((e) => e.id != server.id), server];
+      }
+      ownServerId ??= ownServers.isEmpty ? null : ownServers.first.id;
+    });
+    return added;
+  }
+
+  /// Пока ПК рядом, качество для работы без ПК берём с него — переход между режимами без сюрпризов.
+  void mirrorProfile(String quality, int fps) {
+    if (quality == standaloneQuality && fps == standaloneFps) return;
+    update(() { standaloneQuality = quality; standaloneFps = fps; });
+  }
 
   void setToken(String pcUrl, String? token) => update(() => token == null ? tokens.remove(pcUrl) : tokens[pcUrl] = token);
 }

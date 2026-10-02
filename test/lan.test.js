@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { request } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { networkInterfaces, tmpdir } from 'node:os';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir, networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRouteAllowed } from '../src/lan.js';
 
@@ -49,6 +49,16 @@ const local = (path, options) => call(`127.0.0.1:${port}`, path, options);
 
 test.before(async () => {
   dataDirectory = await mkdtemp(join(tmpdir(), 'vrcast-lan-'));
+  // Свой сервер, как после «Настроить с нуля»: для проверки выдачи серверов привязанному телефону.
+  mkdirSync(join(dataDirectory, 'VRCastBridge'), { recursive: true });
+  writeFileSync(join(dataDirectory, 'VRCastBridge', 'config.json'), JSON.stringify({ servers: [
+    { id: 's1', name: 'Тестовый сервер', host: '203.0.113.9', rtspPort: 8554, publishKey: 'secret-key', channel: 'live' }] }));
+  // Установленный MediaMTX берём готовым: скачивание в чистую папку зависит от сети и роняло тест на экран телефона.
+  const installed = join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'VRCastBridge', 'tools', 'mediamtx');
+  if (process.platform === 'linux' && existsSync(installed)) {
+    mkdirSync(join(dataDirectory, 'VRCastBridge', 'tools'), { recursive: true });
+    copyFileSync(installed, join(dataDirectory, 'VRCastBridge', 'tools', 'mediamtx'));
+  }
   server = spawn(process.execPath, ['src/server.js'], { cwd: new URL('..', import.meta.url), stdio: 'ignore',
     env: { ...process.env, VRCAST_PORT: String(port), LOCALAPPDATA: dataDirectory, XDG_DATA_HOME: dataDirectory } });
   for (let i = 0; i < 80; i++) { try { if ((await local('/api/status?logs=0')).status === 200) return; } catch {} await new Promise(r => setTimeout(r, 150)); }
@@ -69,7 +79,7 @@ test('включённый пульт: статус и управление до
 
   const host = `${lanIp}:${port}`;
   const state = JSON.parse((await call(host, '/api/status?logs=0')).text);
-  assert.deepEqual(state.config.servers, [], 'данные серверов не уходят в сеть');
+  assert.ok(!JSON.stringify(state.config.servers).includes('203.0.113.9'), 'адреса серверов не уходят в сеть');
   const info = JSON.parse((await call(host, '/api/lan-info')).text);
   assert.ok(info.addresses.includes(`http://${lanIp}:${port}`));
   assert.equal((await call(host, '/api/playback', { method: 'POST', body: { action: 'toggle' } })).status === 403, false, 'управление разрешено');
@@ -142,14 +152,15 @@ test('экран телефона: поток с телефона станови
   let publisher = publish();
   try {
     // MediaMTX докачивается и перезапускается при включении пульта — пробуем, пока не поднимется.
-    let started = null;
+    let started = null, lastReply = '';
     for (let i = 0; i < 40 && !started; i++) {
       await sleep(2500);
       if (publisher.exitCode !== null) publisher = publish();
       const r = await call(host, '/api/start/phone', { method: 'POST', body: {} }).catch(() => null);
+      lastReply = r ? `${r.status} ${r.text}` : 'нет ответа';
       if (r?.status === 200) started = r;
     }
-    assert.ok(started, 'эфир с экрана телефона должен запуститься');
+    assert.ok(started, `эфир с экрана телефона должен запуститься; последний ответ: ${lastReply}`);
     const state = JSON.parse((await local('/api/status?logs=0')).text);
     assert.equal(state.running, true);
     assert.equal(state.activeKind, 'screen');
@@ -198,6 +209,29 @@ test('привязка телефона: настройки эфира толь�
   assert.equal(config.lanAccess, true, 'отключить доступ с телефона нельзя');
   assert.equal(config.pairedPhones, undefined, 'список привязок в сеть не уходит');
   assert.equal((await post('/api/shutdown', {}, auth)).status, 403, 'выход из программы и с токеном недоступен');
+
+  // Свои серверы для работы без ПК: ключ получает только привязанный телефон, в общем статусе его нет.
+  assert.equal((await call(host, '/api/servers/export')).status, 401, 'без привязки серверы не выдаются');
+  const exported = JSON.parse((await call(host, '/api/servers/export', { headers: auth })).text).servers;
+  assert.deepEqual(exported, [{ id: 's1', name: 'Тестовый сервер', host: '203.0.113.9', rtspPort: 8554, publishKey: 'secret-key' }]);
+  const shared = (await call(host, '/api/status?logs=0')).text;
+  assert.ok(!shared.includes('secret-key') && !shared.includes('203.0.113.9'), 'ни ключа, ни адреса сервера в общем статусе');
+  assert.deepEqual(JSON.parse(shared).config.servers.map(item => item.name), ['Тестовый сервер'], 'названия серверов видны всем в сети');
+
+  // Обратная сторона: серверы телефона попадают на ПК (без привязки нельзя), ключ обновляется, активный сервер не меняется.
+  const phoneList = { servers: [{ name: 'Сервер с телефона', host: '198.51.100.20', rtspPort: 9554, publishKey: 'phone-key' },
+    { name: 'Тестовый сервер', host: '203.0.113.9', rtspPort: 8554, publishKey: 'rotated-key' }, { host: 'плохой адрес!', publishKey: 'x' }, { host: '198.51.100.21' }] };
+  const activeBefore = JSON.parse((await local('/api/status?logs=0')).text).config.activeServerId;
+  assert.equal((await post('/api/servers/import', phoneList)).status, 401, 'без привязки серверы на ПК не добавляются');
+  const imported = await post('/api/servers/import', phoneList, auth);
+  assert.deepEqual(JSON.parse(imported.text), { added: 1, updated: 1 }, 'новый добавлен, у известного обновлён ключ, мусор отброшен');
+  const again = JSON.parse((await post('/api/servers/import', phoneList, auth)).text);
+  assert.deepEqual(again, { added: 0, updated: 0 }, 'повторный импорт ничего не дублирует');
+  const after = JSON.parse((await call(host, '/api/servers/export', { headers: auth })).text).servers;
+  assert.equal(after.length, 2);
+  assert.equal(after.find(item => item.id === 's1').publishKey, 'rotated-key');
+  assert.equal(after.find(item => item.host === '198.51.100.20').rtspPort, 9554);
+  assert.equal(JSON.parse((await local('/api/status?logs=0')).text).config.activeServerId, activeBefore, 'активный сервер и режим эфира не меняются');
   assert.equal((await call(host, '/api/servers', { headers: auth })).status, 403);
 
   await local('/api/config', { method: 'POST', body: { fps: 30, quality: '720p', whiteIp: '' } });
@@ -206,14 +240,85 @@ test('привязка телефона: настройки эфира толь�
   assert.equal((await call(host, '/api/pair/check', { headers: auth })).status, 401, 'отвязанный телефон теряет доступ');
 });
 
+test('имя ПК и PIN: имя видно в сети, при PIN без ключа доступно только имя и ввод PIN, поток остаётся открытым', { skip: !lanIp && 'нет сетевого интерфейса' }, async () => {
+  const host = `${lanIp}:${port}`;
+  const setLocal = body => local('/api/config', { method: 'POST', body });
+  const post = (path, body, headers = {}) => call(host, path, { method: 'POST', body, headers });
+  try {
+    // имя
+    assert.equal((await setLocal({ deviceName: '  Игровой ПК\u0007  ' })).status, 200);
+    const named = JSON.parse((await call(host, '/api/lan-info')).text);
+    assert.equal(named.name, 'Игровой ПК', 'имя очищено от управляющих символов');
+    assert.equal(named.pinRequired, false);
+
+    // неверный PIN не принимается, прежнее состояние остаётся
+    for (const bad of ['12', '123456789', 'abcd', '12 34']) await setLocal({ accessPin: bad });
+    assert.equal(JSON.parse((await call(host, '/api/lan-info')).text).pinRequired, false, 'PIN неверного формата не включается');
+
+    // включаем PIN
+    await setLocal({ accessPin: '4821' });
+    const info = JSON.parse((await call(host, '/api/lan-info')).text);
+    assert.deepEqual(Object.keys(info).sort(), ['name', 'pinRequired', 'port', 'version'], 'чужому — только имя, порт и признак PIN');
+    assert.equal(info.pinRequired, true);
+    const locked = await call(host, '/api/status?logs=0');
+    assert.equal(locked.status, 401);
+    assert.equal(JSON.parse(locked.text).code, 'pin');
+    assert.equal((await call(host, '/api/events')).status, 401, 'события тоже закрыты');
+    assert.equal((await post('/api/playback', { action: 'toggle' })).status, 401);
+    assert.notEqual((await call(host, '/stream/live.m3u8')).status, 401, 'поток открыт, как и RTSP-ссылка в сети');
+    assert.equal(JSON.parse((await local('/api/status?logs=0')).text).config.accessPin, '4821', 'на самом ПК PIN виден');
+
+    // вход по PIN
+    const wrong = await post('/api/pair', { code: '0000', name: 'Телефон' });
+    assert.equal(wrong.status, 403);
+    assert.match(JSON.parse(wrong.text).error, /PIN/);
+    const entered = await post('/api/pair', { code: '4821', name: 'Телефон Ани' });
+    assert.equal(entered.status, 200);
+    const token = JSON.parse(entered.text).token;
+    const auth = { 'X-VRCast-Token': token };
+    const allowed = await call(host, '/api/status?logs=0', { headers: auth });
+    assert.equal(allowed.status, 200);
+    assert.equal(JSON.parse(allowed.text).config.accessPin, undefined, 'PIN в сеть не уходит даже с ключом');
+    assert.equal(JSON.parse((await call(host, '/api/lan-info', { headers: auth })).text).name, 'Игровой ПК');
+
+    // с телефона нельзя менять ни имя, ни PIN
+    await post('/api/config', { deviceName: 'взломан', accessPin: '' }, auth);
+    assert.equal(JSON.parse((await local('/api/status?logs=0')).text).config.deviceName, 'Игровой ПК');
+    assert.equal(JSON.parse((await local('/api/status?logs=0')).text).config.accessPin, '4821');
+
+    // управление устройствами — только на самом ПК
+    const phones = JSON.parse((await local('/api/status?logs=0')).text).config.pairedPhones;
+    const mine = phones.find(item => item.name === 'Телефон Ани');
+    assert.ok(mine, 'устройство видно в списке на ПК');
+    assert.equal((await post('/api/pair/rename', { id: mine.id, name: 'x' }, auth)).status, 403);
+    assert.equal((await post('/api/pair/remove', { id: mine.id }, auth)).status, 403);
+    assert.equal((await local('/api/pair/rename', { method: 'POST', body: { id: mine.id, name: 'Телефон Ани (комната)' } })).status, 200);
+    assert.equal((await local('/api/pair/rename', { method: 'POST', body: { id: mine.id, name: '   ' } })).status, 400, 'пустое имя не принимается');
+    assert.equal(JSON.parse((await local('/api/status?logs=0')).text).config.pairedPhones.find(item => item.id === mine.id).name, 'Телефон Ани (комната)');
+    // открытый поток событий отвязанного устройства закрывается сам
+    const stream = await call(host, '/api/events', { collect: false, headers: auth });
+    assert.equal(stream.status, 200);
+    let ended = false;
+    stream.res.on('end', () => { ended = true; }); stream.res.on('close', () => { ended = true; }); stream.res.on('data', () => {});
+    await local('/api/pair/remove', { method: 'POST', body: { id: mine.id } });
+    for (let i = 0; i < 40 && !ended; i++) await new Promise(r => setTimeout(r, 100));
+    assert.ok(ended, 'поток событий отвязанного устройства должен закрыться');
+    assert.equal((await call(host, '/api/status?logs=0', { headers: auth })).status, 401, 'отвязанное устройство снова просит PIN');
+
+    // выключаем PIN — доступ как раньше
+    await setLocal({ accessPin: '' });
+    assert.equal((await call(host, '/api/status?logs=0')).status, 200);
+  } finally { await setLocal({ accessPin: '', deviceName: '' }); }
+});
+
 test('привязка: после пяти неверных кодов подряд вход блокируется', { skip: !lanIp && 'нет сетевого интерфейса' }, async () => {
   const host = `${lanIp}:${port}`;
   const post = body => call(host, '/api/pair', { method: 'POST', body });
   const { pin } = JSON.parse((await local('/api/pair/pin')).text);
   const wrong = pin === '111111' ? '222222' : '111111';
   let attempts = 0, blocked = false;
-  while (!blocked && attempts < 6) { attempts++; const r = await post({ code: wrong }); blocked = r.status === 429; assert.ok(blocked || r.status === 403); }
-  assert.ok(blocked && attempts <= 5, `блокировка после пяти неверных кодов (попыток: ${attempts})`);
+  while (!blocked && attempts < 7) { attempts++; const r = await post({ code: wrong }); blocked = r.status === 429; assert.ok(blocked || r.status === 403); }
+  assert.ok(blocked && attempts <= 6, `после пяти неверных кодов вход блокируется (попыток: ${attempts})`);
   assert.equal((await post({ code: pin })).status, 429, 'даже верный код не принимается во время блокировки');
 });
 

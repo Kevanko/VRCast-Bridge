@@ -6,30 +6,156 @@ import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:video_player/video_player.dart';
 
+import 'api.dart';
 import 'discovery.dart';
+import 'own_server.dart';
 import 'models.dart';
 import 'remote.dart';
 
 const accent = Color(0xFF8B6BFF);
 
-/// Подключение: найденные в сети ПК и ручной ввод адреса.
+/// Что телефон узнаёт о ПК до подключения: его имя в сети и просит ли он PIN.
+typedef DeviceProbe = Future<({String name, bool pinRequired})?> Function(Uri base);
+
+Future<({String name, bool pinRequired})?> probeDevice(Uri base) async {
+  try {
+    final info = await Api(base).lanInfo().timeout(const Duration(seconds: 3));
+    return (name: '${info['name'] ?? base.host}', pinRequired: info['pinRequired'] == true);
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Диалог ввода PIN ПК. Возвращает ключ привязки или null, если отменили.
+Future<String?> pinDialog(BuildContext context, Api api, {required String title}) => showDialog<String>(
+      context: context,
+      builder: (_) => _PinDialog(api: api, title: title),
+    );
+
+class _PinDialog extends StatefulWidget {
+  const _PinDialog({required this.api, required this.title});
+  final Api api;
+  final String title;
+  @override
+  State<_PinDialog> createState() => _PinDialogState();
+}
+
+class _PinDialogState extends State<_PinDialog> {
+  final _pin = TextEditingController();
+  String? _error;
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _pin.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    setState(() { _busy = true; _error = null; });
+    try {
+      final token = await widget.api.pair(_pin.text, Prefs.instance.deviceName);
+      if (mounted) Navigator.pop(context, token);
+    } catch (e) {
+      if (mounted) setState(() { _busy = false; _error = '$e'; });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: Text(widget.title),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('Этот ПК защищён PIN-кодом. Введите его один раз — телефон запомнит.'),
+          const SizedBox(height: 12),
+          TextField(controller: _pin, autofocus: true, keyboardType: TextInputType.number, obscureText: true, maxLength: 8, onSubmitted: (_) => _submit(),
+              decoration: const InputDecoration(labelText: 'PIN', border: OutlineInputBorder())),
+          if (_error != null) Text(_error!, style: const TextStyle(color: Colors.redAccent)),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Отмена')),
+          FilledButton(onPressed: _busy ? null : _submit, child: const Text('Войти')),
+        ],
+      );
+}
+
+/// Своё имя для устройства (ПК или телефона). Пустое — вернуть то, что назвало само устройство.
+Future<String?> renameDialog(BuildContext context, String current, {String title = 'Имя устройства'}) =>
+    showDialog<String>(context: context, builder: (_) => _RenameDialog(current: current, title: title));
+
+class _RenameDialog extends StatefulWidget {
+  const _RenameDialog({required this.current, required this.title});
+  final String current;
+  final String title;
+  @override
+  State<_RenameDialog> createState() => _RenameDialogState();
+}
+
+class _RenameDialogState extends State<_RenameDialog> {
+  late final _controller = TextEditingController(text: widget.current);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: Text(widget.title),
+        content: TextField(controller: _controller, autofocus: true, maxLength: 40, onSubmitted: (v) => Navigator.pop(context, v), decoration: const InputDecoration(border: OutlineInputBorder())),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.pop(context, _controller.text), child: const Text('Сохранить')),
+        ],
+      );
+}
+
+/// Подключение к ПК: устройства в сети (с именами и замком, если нужен PIN), запомненные и ручной ввод.
 class ConnectScreen extends StatefulWidget {
-  const ConnectScreen({super.key, required this.onPick});
+  const ConnectScreen({super.key, required this.onPick, this.onDisconnect, this.probe = probeDevice, this.discoveryFactory});
   final void Function(String name, Uri base) onPick;
+  final VoidCallback? onDisconnect; // есть, пока подключены к ПК
+  final DeviceProbe probe;
+  final Discovery Function(void Function(List<FoundPc>) onChange)? discoveryFactory; // для тестов
+
   @override
   State<ConnectScreen> createState() => _ConnectScreenState();
 }
 
 class _ConnectScreenState extends State<ConnectScreen> {
   List<FoundPc> _found = const [];
-  late final Discovery _discovery = Discovery((list) => mounted ? setState(() => _found = list) : null);
+  final Map<String, ({String name, bool pinRequired})?> _info = {};
+  late Discovery _discovery;
   final _manual = TextEditingController();
   String? _error;
 
   @override
   void initState() {
     super.initState();
+    _startSearch();
+    for (final pc in Prefs.instance.pcs) { _probe(pc.base); }
+  }
+
+  void _startSearch() {
+    _discovery = (widget.discoveryFactory ?? Discovery.new)((list) {
+      if (!mounted) return;
+      setState(() => _found = list);
+      for (final pc in list) { _probe(pc.base); }
+    });
     _discovery.start().catchError((Object e) => mounted ? setState(() => _error = 'Поиск в сети недоступен: $e') : null);
+  }
+
+  Future<void> _rescan() async {
+    await _discovery.stop();
+    if (mounted) setState(() { _found = const []; _info.clear(); });
+    _startSearch();
+  }
+
+  Future<void> _probe(Uri base) async {
+    if (_info.containsKey(base.authority)) return;
+    _info[base.authority] = null;
+    final info = await widget.probe(base);
+    if (mounted) setState(() => _info[base.authority] = info);
   }
 
   @override
@@ -39,6 +165,44 @@ class _ConnectScreenState extends State<ConnectScreen> {
     super.dispose();
   }
 
+  String _label(String authority, String fallback) => Prefs.instance.nameFor(authority, _info[authority]?.name ?? fallback);
+
+  Future<void> _open(String name, Uri base) async {
+    final authority = base.authority;
+    final info = _info[authority] ?? await widget.probe(base);
+    if (info?.pinRequired == true && Prefs.instance.tokens[base.toString()] == null) {
+      if (!mounted) return;
+      final token = await pinDialog(context, Api(base), title: Prefs.instance.nameFor(authority, info?.name ?? name));
+      if (token == null) return;
+      Prefs.instance.setToken(base.toString(), token);
+    }
+    widget.onPick(Prefs.instance.nameFor(authority, info?.name ?? name), base);
+  }
+
+  Future<void> _rename(String authority, String current) async {
+    final name = await renameDialog(context, current);
+    if (name != null) Prefs.instance.setAlias(authority, name);
+    if (mounted) setState(() {});
+  }
+
+  Widget _device(IconData icon, String name, Uri base) {
+    final authority = base.authority;
+    final label = _label(authority, name);
+    final locked = _info[authority]?.pinRequired == true;
+    return Card(
+      child: ListTile(
+        leading: Icon(icon),
+        title: Text(label),
+        subtitle: Text(authority + (locked ? ' · нужен PIN' : '')),
+        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (locked) Icon(Prefs.instance.tokens[base.toString()] == null ? Icons.lock_outline : Icons.lock_open, size: 20),
+          IconButton(tooltip: 'Переименовать', icon: const Icon(Icons.edit_outlined), onPressed: () => _rename(authority, label)),
+        ]),
+        onTap: () => _open(name, base),
+      ),
+    );
+  }
+
   void _connectManual() {
     var text = _manual.text.trim();
     if (text.isEmpty) return;
@@ -46,40 +210,51 @@ class _ConnectScreenState extends State<ConnectScreen> {
     var uri = Uri.tryParse(text);
     if (uri == null || uri.host.isEmpty) return setState(() => _error = 'Неверный адрес');
     if (!uri.hasPort) uri = uri.replace(port: Prefs.instance.defaultPort);
-    widget.onPick(uri.host, uri);
+    _open(uri.host, uri);
   }
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('VRCast Bridge'), actions: [settingsButton(context)]),
-        body: ListView(padding: const EdgeInsets.all(16), children: [
-          if (Prefs.instance.pcs.isNotEmpty) ...[
-            Text('Запомненные', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            for (final pc in Prefs.instance.pcs)
-              Card(child: ListTile(leading: const Icon(Icons.history), title: Text(pc.name), subtitle: Text(pc.base.authority),
-                  trailing: const Icon(Icons.chevron_right), onTap: () => widget.onPick(pc.name, pc.base))),
+        appBar: AppBar(title: const Text('Подключение к ПК'), actions: [
+          IconButton(tooltip: 'Искать заново', icon: const Icon(Icons.refresh), onPressed: _rescan),
+          settingsButton(context),
+        ]),
+        body: ListenableBuilder(listenable: Prefs.instance, builder: (context, _) => ListView(padding: const EdgeInsets.all(16), children: [
+          if (widget.onDisconnect != null) ...[
+            Card(child: ListTile(
+              leading: const Icon(Icons.link_off),
+              title: const Text('Отключиться от ПК'),
+              subtitle: const Text('Приложение продолжит работать само: очередь и серверы останутся на телефоне'),
+              onTap: widget.onDisconnect,
+            )),
             const SizedBox(height: 16),
           ],
-          Text('Компьютеры в сети', style: Theme.of(context).textTheme.titleMedium),
+          Text('Устройства в сети', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          const Text('Имя можно поменять карандашом — оно останется на этом телефоне', style: TextStyle(color: Colors.white54, fontSize: 12)),
           const SizedBox(height: 8),
           if (_found.isEmpty)
             const ListTile(leading: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)), title: Text('Ищу…'),
                 subtitle: Text('На ПК включите «Пульт для телефона» в настройках')),
-          for (final pc in _found)
-            Card(child: ListTile(leading: const Icon(Icons.desktop_windows_outlined), title: Text(pc.name), subtitle: Text('${pc.host}:${pc.port}'),
-                trailing: const Icon(Icons.chevron_right), onTap: () => widget.onPick(pc.name, pc.base))),
+          for (final pc in _found) _device(Icons.desktop_windows_outlined, pc.name, pc.base),
+          if (Prefs.instance.pcs.any((pc) => !_found.any((f) => f.base.authority == pc.base.authority))) ...[
+            const SizedBox(height: 16),
+            Text('Запомненные', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            for (final pc in Prefs.instance.pcs.where((pc) => !_found.any((f) => f.base.authority == pc.base.authority)))
+              _device(Icons.history, pc.name, pc.base),
+          ],
           const SizedBox(height: 24),
           Text('Или адрес вручную', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           Row(children: [
             Expanded(child: TextField(controller: _manual, keyboardType: TextInputType.url, onSubmitted: (_) => _connectManual(),
-                decoration: InputDecoration(hintText: '192.168.1.5:${Prefs.instance.defaultPort}', border: OutlineInputBorder()))),
+                decoration: InputDecoration(hintText: '192.168.1.5:${Prefs.instance.defaultPort}', border: const OutlineInputBorder()))),
             const SizedBox(width: 8),
             FilledButton(onPressed: _connectManual, child: const Text('Подключить')),
           ]),
           if (_error != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(_error!, style: const TextStyle(color: Colors.redAccent))),
-        ]),
+        ])),
       );
 }
 
@@ -115,7 +290,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           return Scaffold(
             appBar: AppBar(title: const Text('Настройки')),
             body: ListView(children: [
-              if (widget.remote != null)
+              ListTile(
+                leading: const Icon(Icons.smartphone),
+                title: const Text('Имя этого телефона'),
+                subtitle: Text('${prefs.deviceName} — так он виден ПК в списке привязанных устройств'),
+                trailing: const Icon(Icons.edit_outlined),
+                onTap: () async {
+                  final name = await renameDialog(context, prefs.deviceName, title: 'Имя этого телефона');
+                  if (name != null) prefs.setDeviceName(name);
+                },
+              ),
+              if (widget.remote != null && !widget.remote!.isLocal)
                 ListTile(
                   leading: const Icon(Icons.podcasts),
                   title: const Text('Эфир на ПК'),
@@ -138,11 +323,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     })),
               ),
               const Divider(),
+              const Padding(padding: EdgeInsets.fromLTRB(16, 8, 16, 0), child: Text('Свои серверы', style: TextStyle(fontWeight: FontWeight.bold))),
+              const Padding(padding: EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text('Нужны, чтобы вещать экран телефона без ПК. Когда ПК на связи, серверы синхронизируются в обе стороны.', style: TextStyle(color: Colors.white54, fontSize: 12))),
+              for (final server in prefs.ownServers)
+                ListTile(
+                  leading: Icon(server.id == prefs.currentOwnServer?.id ? Icons.radio_button_checked : Icons.radio_button_off),
+                  title: Text(server.name),
+                  subtitle: Text('${server.host}:${server.rtspPort}'),
+                  onTap: () => prefs.selectOwnServer(server),
+                  trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                    IconButton(tooltip: 'Изменить', icon: const Icon(Icons.edit_outlined), onPressed: () async {
+                      final saved = await showDialog<OwnServer>(context: context, builder: (_) => _ServerDialog(server: server));
+                      if (saved != null) { if (saved.id != server.id) prefs.removeOwnServer(server); prefs.saveOwnServer(saved); }
+                    }),
+                    IconButton(tooltip: 'Удалить', icon: const Icon(Icons.delete_outline), onPressed: () => prefs.removeOwnServer(server)),
+                  ]),
+                ),
+              ListTile(
+                leading: const Icon(Icons.add),
+                title: const Text('Добавить сервер'),
+                onTap: () async {
+                  final saved = await showDialog<OwnServer>(context: context, builder: (_) => const _ServerDialog());
+                  if (saved != null) prefs.saveOwnServer(saved);
+                },
+              ),
+              if (widget.remote != null && widget.remote!.online && widget.remote!.api.token != null)
+                ListTile(
+                  leading: const Icon(Icons.sync),
+                  title: const Text('Синхронизировать с ПК'),
+                  subtitle: const Text('Серверы и ссылки, накопленные без связи, уйдут на ПК; серверы ПК появятся здесь'),
+                  onTap: () async {
+                    final added = await widget.remote!.syncServers();
+                    await widget.remote!.pushPendingLinks();
+                    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(added > 0 ? 'С ПК получено серверов: $added' : 'Всё уже синхронизировано')));
+                  },
+                ),
+              const Divider(),
               const Padding(padding: EdgeInsets.fromLTRB(16, 8, 16, 0), child: Text('Запомненные компьютеры', style: TextStyle(fontWeight: FontWeight.bold))),
               if (prefs.pcs.isEmpty) const ListTile(title: Text('Пока пусто', style: TextStyle(color: Colors.white54))),
               for (final pc in prefs.pcs)
-                ListTile(leading: const Icon(Icons.desktop_windows_outlined), title: Text(pc.name), subtitle: Text(pc.base.authority),
-                    trailing: IconButton(tooltip: 'Забыть', icon: const Icon(Icons.delete_outline), onPressed: () => prefs.forget(pc))),
+                ListTile(leading: const Icon(Icons.desktop_windows_outlined), title: Text(prefs.nameFor(pc.base.authority, pc.name)), subtitle: Text(pc.base.authority),
+                    trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                      IconButton(tooltip: 'Переименовать', icon: const Icon(Icons.edit_outlined), onPressed: () async {
+                        final name = await renameDialog(context, prefs.nameFor(pc.base.authority, pc.name));
+                        if (name != null) prefs.setAlias(pc.base.authority, name);
+                      }),
+                      IconButton(tooltip: 'Забыть', icon: const Icon(Icons.delete_outline), onPressed: () => prefs.forget(pc)),
+                    ])),
               const Divider(),
               const ListTile(title: Text('Включить доступ на ПК'), subtitle: Text('Настройки → Программа → Пульт для телефона. Порт на ПК тоже меняется там')),
             ]),
@@ -156,10 +383,12 @@ void toastError(BuildContext context, String? message) {
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message), backgroundColor: Colors.red.shade900));
 }
 
-/// Оболочка с тремя вкладками и строкой состояния связи.
+/// Оболочка с тремя вкладками. Работает и с ПК, и без него: отдельного режима нет, данные хранятся
+/// на телефоне и синхронизируются при подключении.
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.remote, required this.onDisconnect});
+  const HomeScreen({super.key, required this.remote, required this.onConnect, required this.onDisconnect});
   final Remote remote;
+  final void Function(String name, Uri base) onConnect;
   final VoidCallback onDisconnect;
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -168,6 +397,16 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _tab = 0;
 
+  void _openConnect() {
+    final remote = widget.remote;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (routeContext) => ConnectScreen(
+        onPick: (name, base) { Navigator.of(routeContext).pop(); widget.onConnect(name, base); },
+        onDisconnect: remote.isLocal ? null : () { Navigator.of(routeContext).pop(); widget.onDisconnect(); },
+      ),
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
     final remote = widget.remote;
@@ -175,17 +414,35 @@ class _HomeScreenState extends State<HomeScreen> {
       listenable: remote,
       builder: (context, _) {
         final pages = [NowPlayingPage(remote: remote), QueuePage(remote: remote), LinksPage(remote: remote)];
+        final offline = remote.isLocal || remote.link == Link.offline;
         return Scaffold(
           appBar: AppBar(
-            title: Text(remote.pcName.isEmpty ? 'VRCast Bridge' : remote.pcName),
-            actions: [settingsButton(context, remote), IconButton(tooltip: 'Другой компьютер', icon: const Icon(Icons.swap_horiz), onPressed: widget.onDisconnect)],
-            bottom: remote.link == Link.online ? null : PreferredSize(
+            title: Text(remote.isLocal ? 'VRCast Bridge' : Prefs.instance.nameFor(remote.api.base.authority, remote.pcName.isEmpty ? 'VRCast Bridge' : remote.pcName)),
+            actions: [settingsButton(context, remote), IconButton(tooltip: remote.isLocal ? 'Подключиться к ПК' : 'Другой компьютер', icon: Icon(remote.isLocal ? Icons.computer : Icons.swap_horiz), onPressed: _openConnect)],
+            bottom: remote.link == Link.online || remote.isLocal ? null : PreferredSize(
               preferredSize: const Size.fromHeight(3), child: LinearProgressIndicator(color: remote.link == Link.offline ? Colors.orange : accent)),
           ),
           body: Column(children: [
-            if (remote.link == Link.offline)
-              Container(width: double.infinity, color: Colors.orange.shade900, padding: const EdgeInsets.all(8),
-                  child: const Text('Нет связи с ПК. Подключаюсь снова…', textAlign: TextAlign.center)),
+            if (remote.needsPin)
+              Container(width: double.infinity, color: Colors.deepPurple.shade900, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  child: Row(children: [
+                    const Expanded(child: Text('Этот ПК защищён PIN-кодом.')),
+                    TextButton(
+                      onPressed: () async {
+                        final token = await pinDialog(context, remote.api, title: Prefs.instance.nameFor(remote.api.base.authority, remote.pcName));
+                        if (token != null) remote.acceptToken(token);
+                      },
+                      child: const Text('Ввести PIN'),
+                    ),
+                  ])),
+            if (offline && !remote.needsPin)
+              Container(width: double.infinity, color: remote.isLocal ? Colors.blueGrey.shade800 : Colors.orange.shade900, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  child: Row(children: [
+                    Expanded(child: Text(remote.isLocal
+                        ? 'ПК не подключён. Показана последняя копия; что добавите, уйдёт на ПК при подключении.'
+                        : 'Нет связи с ПК. Подключаюсь снова…')),
+                    TextButton(onPressed: _openConnect, child: Text(remote.isLocal ? 'Подключиться' : 'Другой ПК')),
+                  ])),
             Expanded(child: remote.state == null ? const Center(child: CircularProgressIndicator()) : pages[_tab]),
           ]),
           bottomNavigationBar: NavigationBar(selectedIndex: _tab, onDestinationSelected: (i) { FocusManager.instance.primaryFocus?.unfocus(); setState(() => _tab = i); }, destinations: const [
@@ -306,7 +563,8 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     final remote = widget.remote;
     final s = remote.state!;
     final position = _drag ?? s.positionAt(DateTime.now());
-    final title = s.phoneSource ? 'Экран телефона' : s.isScreen ? 'Захват экрана' : (s.current?.title ?? (s.queue.isEmpty ? 'Очередь пуста' : 'Ничего не играет'));
+    final direct = remote.phone.live && !s.phoneSource; // экран телефона идёт прямо на свой сервер
+    final title = s.phoneSource || direct ? 'Экран телефона' : s.isScreen ? 'Захват экрана' : (s.current?.title ?? (s.queue.isEmpty ? 'Очередь пуста' : 'Ничего не играет'));
     final seekable = s.canSeek && s.duration > 0;
     return ListView(padding: const EdgeInsets.all(16), children: [
       Preview(remote: remote),
@@ -314,9 +572,9 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
       Text(title, style: Theme.of(context).textTheme.titleLarge, maxLines: 2, overflow: TextOverflow.ellipsis),
       const SizedBox(height: 4),
       Row(children: [
-        Icon(Icons.circle, size: 10, color: s.running ? (s.paused || s.buffering ? Colors.amber : Colors.greenAccent) : Colors.grey),
+        Icon(Icons.circle, size: 10, color: direct ? Colors.greenAccent : s.running ? (s.paused || s.buffering ? Colors.amber : Colors.greenAccent) : Colors.grey),
         const SizedBox(width: 6),
-        Text(s.statusLabel, style: const TextStyle(color: Colors.white70)),
+        Text(direct ? 'Идёт экран телефона ${remote.streamTarget}' : s.statusLabel, style: const TextStyle(color: Colors.white70)),
       ]),
       const SizedBox(height: 8),
       Slider(
@@ -358,11 +616,13 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
         ),
       ]),
       const SizedBox(height: 12),
-      _StreamSummary(state: s, onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => StreamSettingsScreen(remote: remote)))),
+      if (remote.online)
+        _StreamSummary(state: s, onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => StreamSettingsScreen(remote: remote)))),
+      if (!remote.online) _DirectSummary(remote: remote),
       const SizedBox(height: 12),
       remote.phone.live || s.phoneSource
           ? FilledButton.tonalIcon(onPressed: () => _do(remote.stopPhoneBroadcast()), icon: const Icon(Icons.stop_screen_share), label: const Text('Остановить трансляцию экрана'))
-          : OutlinedButton.icon(onPressed: () => _do(remote.startPhoneBroadcast()), icon: const Icon(Icons.screen_share), label: const Text('Транслировать экран телефона')),
+          : OutlinedButton.icon(onPressed: () => _do(remote.startPhoneBroadcast()), icon: const Icon(Icons.screen_share), label: Text(remote.streamTarget.isEmpty ? 'Транслировать экран телефона' : 'Транслировать экран телефона ${remote.streamTarget}')),
       const SizedBox(height: 8),
       s.running && !s.phoneSource
           ? OutlinedButton.icon(onPressed: () => _do(remote.run(remote.api.stop)), icon: const Icon(Icons.stop_circle_outlined), label: const Text('Остановить эфир'))
@@ -390,6 +650,10 @@ class _QueuePageState extends State<QueuePage> {
   /// Файлы с телефона уходят на ПК по одному и встают в очередь.
   Future<void> _pickAndUpload() async {
     if (_uploadName != null) return;
+    if (!widget.remote.online) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Файлы отправляются на ПК: сначала подключитесь к ПК')));
+      return;
+    }
     final picked = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: _extensions);
     final files = picked.where((f) => f.path != null).toList();
     if (files.isEmpty) return;
@@ -418,6 +682,13 @@ class _QueuePageState extends State<QueuePage> {
   Future<void> _add() async {
     final url = _link.text.trim();
     if (url.isEmpty || _adding) return;
+    if (!widget.remote.online) {
+      // Без связи ссылка ждёт у телефона и уйдёт в очередь ПК при подключении.
+      Prefs.instance.addPendingLink(url);
+      _link.clear();
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ссылка сохранена: уйдёт на ПК при подключении')));
+      return;
+    }
     setState(() => _adding = true);
     try {
       var result = await widget.remote.api.addLink(url);
@@ -454,6 +725,19 @@ class _QueuePageState extends State<QueuePage> {
         ])),
       Padding(padding: const EdgeInsets.fromLTRB(12, 0, 12, 4), child: Align(alignment: Alignment.centerLeft, child: TextButton.icon(
           onPressed: _uploadName == null ? _pickAndUpload : null, icon: const Icon(Icons.upload_file), label: const Text('Добавить файлы с телефона')))),
+      ListenableBuilder(
+        listenable: Prefs.instance,
+        builder: (context, _) => Column(children: [
+          for (final pending in Prefs.instance.pendingLinks)
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.schedule_send_outlined),
+              title: Text(pending, maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle: const Text('Ждёт подключения к ПК'),
+              trailing: IconButton(tooltip: 'Убрать', icon: const Icon(Icons.close), onPressed: () => Prefs.instance.removePendingLink(pending)),
+            ),
+        ]),
+      ),
       Expanded(child: s.queue.isEmpty
           ? const Center(child: Text('Очередь пуста', style: TextStyle(color: Colors.white54)))
           : ReorderableListView.builder(
@@ -493,6 +777,12 @@ class LinksPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = remote.state!;
     final host = remote.api.base.host;
+    final server = Prefs.instance.currentOwnServer;
+    if (!remote.online) {
+      // Без ПК остаётся ссылка на свой сервер: она не меняется, пока сервер на месте.
+      if (server == null) return const Center(child: Padding(padding: EdgeInsets.all(24), child: Text('Ссылки появятся, когда подключитесь к ПК или добавите свой сервер в настройках', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54))));
+      return ListView(padding: const EdgeInsets.all(12), children: [_LinkCard(title: 'Ссылка для плеера (свой сервер)', hint: 'Экран телефона на «${server.name}». Не меняется, пока сервер на месте', url: server.viewLink)]);
+    }
     // Сервер называет себя 127.0.0.1 — для телефона подставляем адрес ПК.
     final stream = s.playbackUrl.replaceFirst('127.0.0.1', host);
     final rows = <(String, String, String)>[
@@ -559,7 +849,11 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
       final token = await api.pair(_code.text, 'Телефон');
       api.token = token;
       Prefs.instance.setToken(api.base.toString(), token);
-      if (mounted) setState(() => _paired = true);
+      final copied = await widget.remote.syncServers();
+      if (mounted) {
+        setState(() => _paired = true);
+        if (copied > 0) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Серверы с ПК скопированы на телефон: $copied')));
+      }
     } catch (e) {
       if (mounted) toastError(context, '$e');
     } finally {
@@ -712,4 +1006,102 @@ class _StreamSummary extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Без ПК: куда пойдёт экран телефона и по какой ссылке его смотреть.
+class _DirectSummary extends StatelessWidget {
+  const _DirectSummary({required this.remote});
+  final Remote remote;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: Prefs.instance,
+        builder: (context, _) {
+          final server = Prefs.instance.currentOwnServer;
+          final prefs = Prefs.instance;
+          return Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(children: [
+                Icon(Icons.cloud_upload_outlined, color: server == null ? Colors.amber : Colors.greenAccent),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(server == null ? 'Нет ПК и нет своего сервера' : 'Свой сервер: ${server.name}', style: const TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 2),
+                  Text(server == null ? 'Подключитесь к ПК или добавьте сервер в настройках' : '${prefs.standaloneQuality} · ${prefs.standaloneFps} к/с · ${server.viewLink}',
+                      style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                  if (remote.phone.live && remote.phone.lacksH264)
+                    const Text('У телефона нет H.264: VRChat такой поток не воспроизведёт. Вещайте через ПК.', style: TextStyle(color: Colors.amber, fontSize: 12)),
+                ])),
+              ]),
+            ),
+          );
+        },
+      );
+}
+
+class _LinkCard extends StatelessWidget {
+  const _LinkCard({required this.title, required this.hint, required this.url});
+  final String title;
+  final String hint;
+  final String url;
+
+  @override
+  Widget build(BuildContext context) => Card(child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(title, style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 2),
+        Text(hint, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+        const SizedBox(height: 8),
+        SelectableText(url, style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+        Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+          TextButton.icon(onPressed: () { Clipboard.setData(ClipboardData(text: url)); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Скопировано'))); },
+              icon: const Icon(Icons.copy, size: 18), label: const Text('Копировать')),
+          TextButton.icon(onPressed: () => SharePlus.instance.share(ShareParams(text: url)), icon: const Icon(Icons.share, size: 18), label: const Text('Поделиться')),
+        ]),
+      ])));
+}
+
+class _ServerDialog extends StatefulWidget {
+  const _ServerDialog({this.server});
+  final OwnServer? server;
+  @override
+  State<_ServerDialog> createState() => _ServerDialogState();
+}
+
+class _ServerDialogState extends State<_ServerDialog> {
+  late final _name = TextEditingController(text: widget.server?.name ?? '');
+  late final _host = TextEditingController(text: widget.server?.host ?? '');
+  late final _port = TextEditingController(text: '${widget.server?.rtspPort ?? 8554}');
+  late final _key = TextEditingController(text: widget.server?.key ?? '');
+  String? _error;
+
+  @override
+  void dispose() {
+    for (final c in [_name, _host, _port, _key]) { c.dispose(); }
+    super.dispose();
+  }
+
+  void _save() {
+    final error = OwnServer.validate(host: _host.text, port: _port.text, key: _key.text);
+    if (error != null) return setState(() => _error = error);
+    Navigator.pop(context, OwnServer(
+      name: _name.text.trim().isEmpty ? _host.text.trim() : _name.text.trim(),
+      host: _host.text.trim(), rtspPort: int.parse(_port.text.trim()), key: _key.text.trim()));
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: Text(widget.server == null ? 'Новый сервер' : 'Сервер'),
+        content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: _name, decoration: const InputDecoration(labelText: 'Название (необязательно)')),
+          TextField(controller: _host, keyboardType: TextInputType.url, decoration: const InputDecoration(labelText: 'Адрес сервера', hintText: '203.0.113.7')),
+          TextField(controller: _port, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Порт RTSP')),
+          TextField(controller: _key, decoration: const InputDecoration(labelText: 'Ключ')),
+          if (_error != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_error!, style: const TextStyle(color: Colors.redAccent))),
+        ])),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Отмена')),
+          FilledButton(onPressed: _save, child: const Text('Сохранить')),
+        ],
+      );
 }

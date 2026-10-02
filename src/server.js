@@ -10,7 +10,7 @@ import { Readable } from 'node:stream';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
-import { hashToken, isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRoutePaired, lanRouteAllowed, pickNetworkConfig, publishService, sameSecret, unpublishService } from './lan.js';
+import { hashToken, isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRouteOpenWithPin, lanRoutePaired, lanRouteAllowed, pickNetworkConfig, publishService, sameSecret, unpublishService } from './lan.js';
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
 // VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
@@ -123,6 +123,9 @@ const defaults = {
   closeToTray: true,
   // Пульт для телефона: пускать в программу с устройств своей сети.
   lanAccess: false,
+  // Как ПК называется в сети (по умолчанию имя компьютера) и необязательный PIN для подключения устройств.
+  deviceName: '',
+  accessPin: '',
   // Привязанные телефоны: хранится только хеш ключа.
   pairedPhones: [],
   // Порт программы; новое значение вступает в силу после перезапуска.
@@ -1412,6 +1415,29 @@ function editServer(id, body) {
 // уместен: при установке сервер выдал ключ публикации, он лежит у него в
 // /opt/vrcast-relay/publish.key — этим ключом хозяин делится с друзьями, и
 // каждый из них вещает через ту же машину, ничего на ней не трогая.
+// Серверы с привязанного телефона: добавляем недостающие и обновляем ключ у известных.
+// Активный сервер и режим эфира не трогаем — это решает человек на ПК.
+function importServers(list) {
+  let added = 0, updated = 0;
+  const known = [...savedServers()];
+  for (const raw of (Array.isArray(list) ? list : []).slice(0, 20)) {
+    const host = String(raw?.host || '').trim();
+    const key = String(raw?.publishKey || raw?.key || '').trim();
+    if (!host || !АДРЕС_СЕРВЕРА.test(host) || !key) continue;
+    const port = портСервера(raw.rtspPort, SERVER_RTSP_PORT);
+    const existing = known.find(item => item.host === host && (Number(item.rtspPort) || SERVER_RTSP_PORT) === port);
+    if (existing) {
+      if (existing.publishKey !== key) { existing.publishKey = key; updated++; }
+      continue;
+    }
+    known.push({ id: crypto.randomUUID(), name: String(raw.name || '').trim().slice(0, 60) || randomServerName(), host, sshPort: 22, user: 'root', hostKey: '',
+      channel: 'live', publicIp: host, rtspPort: port, hlsPort: 0, publishKey: key, permanentLink: true, addedAt: new Date().toISOString() });
+    added++;
+  }
+  if (added || updated) { saveConfig({ servers: known.slice(0, 20) }); log(`Серверы с телефона: добавлено ${added}, обновлено ${updated}`); }
+  return { added, updated };
+}
+
 async function attachServer(body) {
   const адрес = String(body.host || '').trim().replace(/^\w+:\/\//, '').split(/[/:]/)[0];
   const ключ = String(body.key || '').trim();
@@ -3437,6 +3463,17 @@ async function watchChannel() {
     const цель = config.outputMode === 'remote' && relayProcess ? remoteRtspTarget() : null;
     remoteChannelLive = цель ? await probeRtsp(цель.host, цель.port, цель.channel || 'live') : false;
   } finally { channelProbeBusy = false; }
+}
+
+// Перезапуск с ожиданием: новый процесс берёт те же порты, и пока старый не вышел, он упирается в «адрес занят».
+function restartMediaMtx() {
+  const old = mediaMtxProcess;
+  if (!old) return startMediaMtx();
+  let started = false;
+  const start = () => { if (!started) { started = true; startMediaMtx(); } };
+  old.once('close', () => setTimeout(start, 100));
+  setTimeout(start, 4000).unref?.();
+  stopMediaMtx();
 }
 
 function stopMediaMtx() {
@@ -6394,12 +6431,14 @@ let тактыСобытий = 0;
 // Телефону незачем знать адреса и пользователей своих серверов: оставляем названия.
 function дляСети(state, paired = false) {
   const servers = (state.config.servers || []).map(({ id, name, reachable, permanentLink }) => ({ id, name, reachable, permanentLink }));
-  return { ...state, config: { ...state.config, servers, pairedPhones: undefined, whiteIp: paired ? state.config.whiteIp : '', remoteBindAddress: '' } };
+  return { ...state, config: { ...state.config, servers, pairedPhones: undefined, accessPin: undefined, whiteIp: paired ? state.config.whiteIp : '', remoteBindAddress: '' } };
 }
 
 // Привязка телефона к ПК: шестизначный код показан в настройках программы, действует
 // десять минут и меняется после каждой привязки. Телефон получает ключ и дальше
 // предъявляет его для настроек эфира.
+const deviceName = () => String(config.deviceName || '').trim() || hostname();
+const accessPinSet = () => /^\d{4,8}$/.test(String(config.accessPin || ''));
 let pairingPin = '', pinIssuedAt = 0;
 function rotatePin() { pairingPin = String(crypto.randomInt(0, 1000000)).padStart(6, '0'); pinIssuedAt = Date.now(); }
 function currentPin() { if (!pairingPin || Date.now() - pinIssuedAt > 600000) rotatePin(); return pairingPin; }
@@ -6417,16 +6456,17 @@ function pairPhone(req, body) {
   const ip = req.socket.remoteAddress;
   const recent = (pairFailures.get(ip) || []).filter(time => Date.now() - time < 300000);
   if (recent.length >= 5) throw Object.assign(new Error('Слишком много попыток. Подождите пять минут.'), { status: 429 });
-  if (!sameSecret(String(body.code || '').replace(/\D/g, ''), currentPin())) {
+  const given = String(body.code || '').replace(/\D/g, '');
+  if (!sameSecret(given, currentPin()) && !(accessPinSet() && sameSecret(given, String(config.accessPin)))) {
     pairFailures.set(ip, [...recent, Date.now()]);
-    throw Object.assign(new Error('Неверный код. Он показан в настройках программы на ПК.'), { status: 403 });
+    throw Object.assign(new Error(accessPinSet() ? 'Неверный PIN.' : 'Неверный код. Он показан в настройках программы на ПК.'), { status: 403 });
   }
   const token = crypto.randomBytes(24).toString('base64url');
   const phone = { id: crypto.randomUUID().slice(0, 8), name: String(body.name || 'Телефон').slice(0, 40), hash: hashToken(token), at: new Date().toISOString() };
   saveConfig({ pairedPhones: [phone, ...(config.pairedPhones || [])].slice(0, 10) });
   rotatePin();
   pairFailures.delete(ip);
-  log(`Телефон привязан: ${phone.name}`);
+  log(`Устройство привязано: ${phone.name}`);
   return token;
 }
 
@@ -6435,7 +6475,14 @@ function рассылкаСобытий(только = null) {
   if (только) { только.write(`data: ${текст}\n\n`); return; }
   if (текст === последнееСобытие) return;
   последнееСобытие = текст;
-  for (const res of слушателиСобытий) res.write(`data: ${текст}\n\n`);
+  for (const res of слушателиСобытий) {
+    if (res.networkToken !== null && accessPinSet() && !(config.pairedPhones || []).some(phone => sameSecret(phone.hash, hashToken(res.networkToken)))) {
+      слушателиСобытий.delete(res);
+      try { res.end(); } catch {}
+      continue;
+    }
+    res.write(`data: ${текст}\n\n`);
+  }
 }
 
 function запуститьСобытия() {
@@ -6465,10 +6512,10 @@ function applyLanAccess() {
     server.closeAllConnections?.();
     server.listen(PORT, wanted);
   }
-  if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log });
+  if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log, name: deviceName() });
   else unpublishService();
   // MediaMTX читает правила публикации из своего файла: перезапускаем с новыми.
-  if (mediaMtxProcess) { stopMediaMtx(); setTimeout(startMediaMtx, 700); }
+  if (mediaMtxProcess) restartMediaMtx();
   log(config.lanAccess === true ? 'Пульт для телефона включён' : 'Пульт для телефона выключен');
 }
 
@@ -6506,6 +6553,10 @@ const server = http.createServer(async (req, res) => {
       }
       res.forNetwork = true;
       res.paired = isPairedRequest(req);
+      // PIN включён: без ключа привязки доступно только узнать имя ПК и ввести PIN.
+      if (accessPinSet() && !res.paired && !lanRouteOpenWithPin(req.method, url.pathname)) {
+        return json(res, 401, { error: 'Нужен PIN этого ПК.', code: 'pin' });
+      }
       if (!lanRouteAllowed(req.method, url.pathname)) {
         if (!lanRoutePaired(req.method, url.pathname)) return json(res, 403, { error: 'Это действие доступно только на самом компьютере.' });
         if (!res.paired) return json(res, 401, { error: 'Нужна привязка к ПК: введите код из настроек программы.', code: 'pairing' });
@@ -6602,6 +6653,9 @@ const server = http.createServer(async (req, res) => {
       const server = await deployServer(body);
       return json(res, 201, { server: { id: server.id, name: server.name, host: server.host, rtspPort: server.rtspPort }, status: status() });
     }
+    if (req.method === 'POST' && url.pathname === '/api/servers/import') {
+      return json(res, 200, importServers((await readBody(req)).servers));
+    }
     if (req.method === 'POST' && url.pathname === '/api/servers/attach') {
       const body = await readBody(req);
       const server = await attachServer(body);
@@ -6673,17 +6727,38 @@ const server = http.createServer(async (req, res) => {
       catch (error) { return json(res, error.status || 400, { error: error.message }); }
     }
     if (req.method === 'GET' && url.pathname === '/api/pair/check') return json(res, 200, { paired: true });
+    // Свои серверы для работы телефона без ПК: только привязанному телефону, вместе с ключом публикации.
+    if (req.method === 'GET' && url.pathname === '/api/servers/export') {
+      return json(res, 200, { servers: savedServers().filter(item => item.host).map(item => ({ id: item.id, name: item.name, host: item.host,
+        rtspPort: Number(item.rtspPort) || SERVER_RTSP_PORT, publishKey: item.publishKey || '' })) });
+    }
     if (req.method === 'GET' && url.pathname === '/api/pair/pin') return json(res, 200, { pin: currentPin(), phones: (config.pairedPhones || []).length });
     if (req.method === 'POST' && url.pathname === '/api/pair/pin/rotate') { rotatePin(); return json(res, 200, { pin: pairingPin, phones: (config.pairedPhones || []).length }); }
+    if (req.method === 'POST' && url.pathname === '/api/pair/remove') {
+      const body = await readBody(req);
+      saveConfig({ pairedPhones: (config.pairedPhones || []).filter(phone => phone.id !== String(body.id)) });
+      return json(res, 200, { phones: (config.pairedPhones || []).length });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/pair/rename') {
+      const body = await readBody(req);
+      const name = String(body.name || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 40);
+      if (!name) return json(res, 400, { error: 'Имя не может быть пустым.' });
+      saveConfig({ pairedPhones: (config.pairedPhones || []).map(phone => phone.id === String(body.id) ? { ...phone, name } : phone) });
+      return json(res, 200, { phones: (config.pairedPhones || []).length });
+    }
     if (req.method === 'POST' && url.pathname === '/api/pair/clear') { saveConfig({ pairedPhones: [] }); rotatePin(); log('Все телефоны отвязаны'); return json(res, 200, { pin: pairingPin, phones: 0 }); }
     if (req.method === 'GET' && url.pathname === '/api/lan-info') {
+      const pinRequired = accessPinSet();
+      if (pinRequired && !isPairedRequest(req)) return json(res, 200, { name: deviceName(), version: APP_VERSION, port: PORT, pinRequired });
       const { rtsp, playbackUrl } = status(false);
-      return json(res, 200, { name: hostname(), version: APP_VERSION, port: PORT, webrtcPort: WEBRTC_PORT, rtspPort: RTSP_PORT, lanAccess: config.lanAccess === true,
+      return json(res, 200, { name: deviceName(), version: APP_VERSION, port: PORT, webrtcPort: WEBRTC_PORT, rtspPort: RTSP_PORT, lanAccess: config.lanAccess === true, pinRequired,
         addresses: getLanAddresses().map(address => `http://${address}:${PORT}`), playbackUrl, rtspLanUrls: rtsp?.lanUrls || [] });
     }
     if (req.method === 'GET' && url.pathname === '/api/events') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       res.write('retry: 2000\n\n');
+      // Помним, чей это поток: отвязали устройство или сменили PIN — поток закроем, а не оставим жить до обрыва.
+      res.networkToken = fromNetwork ? String(req.headers['x-vrcast-token'] || '') : null;
       слушателиСобытий.add(res);
       рассылкаСобытий(res);
       запуститьСобытия();
@@ -6829,6 +6904,9 @@ const server = http.createServer(async (req, res) => {
         // превращаться в true и молча прятать окно вместо выхода.
         closeToTray: typeof body.closeToTray === 'boolean' ? body.closeToTray : config.closeToTray !== false,
         lanAccess: typeof body.lanAccess === 'boolean' ? body.lanAccess : config.lanAccess === true,
+        deviceName: typeof body.deviceName === 'string' ? body.deviceName.replace(/[\u0000-\u001f]/g, '').trim().slice(0, 40) : (config.deviceName || ''),
+        // PIN — только цифры, 4–8; пустая строка выключает. Неверный формат не меняет прежний PIN.
+        accessPin: typeof body.accessPin === 'string' && (body.accessPin === '' || /^\d{4,8}$/.test(body.accessPin)) ? body.accessPin : (config.accessPin || ''),
         port: body.port === undefined ? (validPort(config.port) ? Number(config.port) : 4717) : (validPort(body.port) ? Number(body.port) : (validPort(config.port) ? Number(config.port) : 4717)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),
@@ -6874,7 +6952,7 @@ const server = http.createServer(async (req, res) => {
         } catch { return json(res, 400, { error: `Не удаётся писать в ${target}. Выберите другой диск.` }); }
       }
       saveConfig(next);
-      if (Boolean(previousConfig.lanAccess) !== config.lanAccess) res.once('finish', () => setTimeout(applyLanAccess, 50));
+      if (Boolean(previousConfig.lanAccess) !== config.lanAccess || (config.lanAccess && (previousConfig.deviceName || '') !== config.deviceName)) res.once('finish', () => setTimeout(applyLanAccess, 50));
       // Сниженный под затор битрейт относится к конкретному каналу до сервера.
       if (previousOutput !== config.outputMode || previousConfig.activeServerId !== config.activeServerId
         || previousConfig.videoBitrate !== config.videoBitrate) remoteBudgetKbps = 0;
@@ -7087,7 +7165,7 @@ const server = http.createServer(async (req, res) => {
 
 слушаемАдрес = config.lanAccess === true ? '0.0.0.0' : HOST;
 server.listen(PORT, слушаемАдрес, () => {
-  if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log });
+  if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log, name: deviceName() });
   restoreRoutedApps();
   дозаполнитьДлительности();
   startRemoteBridge();

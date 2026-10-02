@@ -36,10 +36,18 @@ const ALLOWED = [
   ['DELETE', /^\/api\/queue(\/[^/]+)?$/],
 ];
 
+// ПК с PIN: без ключа привязки пускаем только узнать имя, ввести PIN и посмотреть поток (он и так открыт по RTSP в сети).
+const OPEN_WITH_PIN = [
+  ['GET', /^\/api\/lan-info$/],
+  ['POST', /^\/api\/pair$/],
+  ['GET', /^\/(thumbs|stream)\//],
+];
+export const lanRouteOpenWithPin = (method, pathname) => OPEN_WITH_PIN.some(([m, pattern]) => m === (method === 'HEAD' ? 'GET' : method) && pattern.test(pathname));
+
 // Настройки эфира: только привязанному телефону (знает код с ПК). Серверы и ключи сюда не входят.
 const PAIRED = [
-  ['GET', /^\/api\/pair\/check$/],
-  ['POST', /^\/api\/(config|tunnels\/test|servers\/speedtest)$/],
+  ['GET', /^\/api\/(pair\/check|servers\/export)$/],
+  ['POST', /^\/api\/(config|tunnels\/test|servers\/speedtest|servers\/import)$/],
 ];
 export const lanRoutePaired = (method, pathname) => PAIRED.some(([m, pattern]) => m === method && pattern.test(pathname));
 
@@ -62,15 +70,17 @@ export function lanRouteAllowed(method, pathname) {
 let published = null;
 
 // Объявляем _vrcast._tcp, чтобы приложение на телефоне нашло ПК само.
-export async function publishService({ port, version, log }) {
+export async function publishService({ port, version, log, name = hostname() }) {
   await unpublishService();
   try {
     const { Bonjour } = await import('bonjour-service');
     const bonjour = new Bonjour();
-    const service = bonjour.publish({ name: `VRCast Bridge (${hostname()})`, type: 'vrcast', protocol: 'tcp', port,
-      txt: { name: hostname(), ver: String(version) } });
+    const service = bonjour.publish({ name: `VRCast Bridge (${name})`, type: 'vrcast', protocol: 'tcp', port,
+      txt: { name, ver: String(version) } });
+    // Имя в сети уже занято (два ПК с одним названием) — не падаем, просто сообщаем.
+    service.on('error', error => log?.(`mDNS: ${error.message}. Дайте ПК другое имя в настройках.`));
     published = { bonjour, service };
-    log?.(`Пульт для телефона: ПК виден в сети как «${hostname()}»`);
+    log?.(`Пульт для телефона: ПК виден в сети как «${name}»`);
   } catch (error) { log?.(`Не удалось объявить ПК в сети (mDNS): ${error.message}`); }
 }
 
