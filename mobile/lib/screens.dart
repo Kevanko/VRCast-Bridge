@@ -357,7 +357,9 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
           child: Chip(avatar: const Icon(Icons.repeat, size: 18), label: Text(_loops[s.loopMode] ?? s.loopMode)),
         ),
       ]),
-      const SizedBox(height: 16),
+      const SizedBox(height: 12),
+      _StreamSummary(state: s, onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => StreamSettingsScreen(remote: remote)))),
+      const SizedBox(height: 12),
       remote.phone.live || s.phoneSource
           ? FilledButton.tonalIcon(onPressed: () => _do(remote.stopPhoneBroadcast()), icon: const Icon(Icons.stop_screen_share), label: const Text('Остановить трансляцию экрана'))
           : OutlinedButton.icon(onPressed: () => _do(remote.startPhoneBroadcast()), icon: const Icon(Icons.screen_share), label: const Text('Транслировать экран телефона')),
@@ -531,6 +533,7 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
   bool _busy = false;
   final _code = TextEditingController();
   late final TextEditingController _ip = TextEditingController(text: widget.remote.state?.whiteIp ?? '');
+  final _ipFocus = FocusNode();
 
   static const _tunnelStates = {'idle': 'ожидание', 'starting': 'запускается', 'ready': 'готова', 'error': 'ошибка', 'verifying': 'проверяется'};
   static const _providers = {'auto': 'Авто — самый быстрый', 'cloudflare': 'Cloudflare', 'localhostrun': 'localhost.run', 'serveo': 'Serveo'};
@@ -545,6 +548,7 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
   void dispose() {
     _code.dispose();
     _ip.dispose();
+    _ipFocus.dispose();
     super.dispose();
   }
 
@@ -564,7 +568,9 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
   }
 
   Future<void> _set(Map<String, Object?> values) async {
-    final error = await widget.remote.run(() => widget.remote.api.setStream(values));
+    // Качество, кадры и кодировщик в идущем эфире применяем сразу, как кнопки на ПК.
+    final live = (widget.remote.state?.running ?? false) && values.keys.any(const {'quality', 'fps', 'encoderMode'}.contains);
+    final error = await widget.remote.run(() => widget.remote.api.setStream({...values, if (live) 'applyLive': true}));
     if (mounted) toastError(context, error);
   }
 
@@ -573,28 +579,28 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
         appBar: AppBar(title: const Text('Эфир на ПК')),
         body: _paired == null
             ? const Center(child: CircularProgressIndicator())
-            : _paired == false
-                ? _pairing()
-                : ListenableBuilder(listenable: widget.remote, builder: (context, _) => _settings(widget.remote.state)),
+            : ListenableBuilder(listenable: widget.remote, builder: (context, _) => _settings(widget.remote.state)),
       );
 
-  Widget _pairing() => ListView(padding: const EdgeInsets.all(16), children: [
-        const Icon(Icons.phonelink_lock, size: 48),
-        const SizedBox(height: 12),
-        Text('Привяжите телефон к ПК', style: Theme.of(context).textTheme.titleLarge),
+  Widget _pairingBanner() => Card(margin: const EdgeInsets.all(16), child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [const Icon(Icons.phonelink_lock), const SizedBox(width: 8), Expanded(child: Text('Настройки с ПК видны, менять их нельзя', style: Theme.of(context).textTheme.titleMedium))]),
         const SizedBox(height: 8),
-        const Text('Настройки эфира открывают доступ к серверам, поэтому нужен код. На ПК: Настройки → Программа → «Код привязки телефона». Вводить нужно один раз.'),
-        const SizedBox(height: 16),
+        const Text('Чтобы менять эфир с телефона, введите код с ПК: Настройки → Программа → «Код привязки телефона». Один раз.'),
+        const SizedBox(height: 12),
         TextField(controller: _code, keyboardType: TextInputType.number, maxLength: 7, onSubmitted: (_) => _pair(),
             decoration: const InputDecoration(labelText: 'Код с ПК', hintText: '123 456', border: OutlineInputBorder())),
         const SizedBox(height: 8),
         FilledButton(onPressed: _busy ? null : _pair, child: _busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Привязать')),
-      ]);
+      ])));
 
   Widget _settings(BridgeState? s) {
     if (s == null) return const Center(child: CircularProgressIndicator());
+    final editable = _paired == true;
+    // Пока поле не в фокусе, показываем то, что стоит на ПК.
+    if (!_ipFocus.hasFocus && _ip.text != s.whiteIp) _ip.text = s.whiteIp;
     Widget title(String text) => Padding(padding: const EdgeInsets.fromLTRB(16, 20, 16, 8), child: Text(text, style: const TextStyle(fontWeight: FontWeight.bold)));
     return ListView(children: [
+      if (!editable) _pairingBanner(),
       title('Куда идёт эфир'),
       Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: SegmentedButton<String>(
         segments: const [
@@ -603,7 +609,7 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
           ButtonSegment(value: 'remote', label: Text('Сервер'), icon: Icon(Icons.dns_outlined)),
         ],
         selected: {s.outputMode},
-        onSelectionChanged: (v) => _set({'outputMode': v.first}),
+        onSelectionChanged: editable ? (v) => _set({'outputMode': v.first}) : null,
       )),
       if (s.outputMode == 'tunnel') ...[
         title('Публичная ссылка'),
@@ -612,7 +618,7 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
           trailing: DropdownButton<String>(
             value: _providers.containsKey(s.tunnelProvider) ? s.tunnelProvider : 'auto',
             items: [for (final e in _providers.entries) DropdownMenuItem(value: e.key, child: Text(e.value))],
-            onChanged: (v) => v == null ? null : _set({'tunnelProvider': v}),
+            onChanged: editable ? (v) => v == null ? null : _set({'tunnelProvider': v}) : null,
           ),
         ),
         ListTile(
@@ -632,19 +638,21 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
               groupValue: s.activeServerId,
               title: Text(server.name),
               subtitle: Text(server.reachable == null ? 'Проверка…' : server.reachable! ? 'Отвечает' : 'Не отвечает'),
-              onChanged: (v) => v == null ? null : _set({'activeServerId': v}),
+              onChanged: editable ? (v) => v == null ? null : _set({'activeServerId': v}) : null,
             ),
       ],
       title('Прямой адрес (белый IP или домен ПК)'),
       Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: TextField(
         controller: _ip,
+        focusNode: _ipFocus,
+        enabled: editable,
         decoration: const InputDecoration(hintText: '203.0.113.7', border: OutlineInputBorder(), isDense: true),
         onSubmitted: (v) => _set({'whiteIp': v.trim()}),
       )),
       title('Качество'),
       Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Wrap(spacing: 8, runSpacing: 8, children: [
-        for (final q in const ['480p', '720p', '1080p']) ChoiceChip(label: Text(q), selected: s.quality == q, onSelected: (_) => _set({'quality': q})),
-        for (final f in const [30, 60]) ChoiceChip(label: Text('$f к/с'), selected: s.fps == f, onSelected: (_) => _set({'fps': f})),
+        for (final q in const ['480p', '720p', '1080p']) ChoiceChip(label: Text(q), selected: s.quality == q, onSelected: editable ? (_) => _set({'quality': q}) : null),
+        for (final f in const [30, 60]) ChoiceChip(label: Text('$f к/с'), selected: s.fps == f, onSelected: editable ? (_) => _set({'fps': f}) : null),
       ])),
       title('Кодировщик'),
       Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: SegmentedButton<String>(
@@ -654,11 +662,54 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
           ButtonSegment(value: 'cpu', label: Text('Процессор')),
         ],
         selected: {s.encoderMode},
-        onSelectionChanged: (v) => _set({'encoderMode': v.first}),
+        onSelectionChanged: editable ? (v) => _set({'encoderMode': v.first}) : null,
       )),
       const SizedBox(height: 24),
       const Padding(padding: EdgeInsets.symmetric(horizontal: 16), child: Text('Порт, папка кеша, доступ из сети и добавление серверов меняются только на самом ПК.', style: TextStyle(color: Colors.white54))),
       const SizedBox(height: 24),
     ]);
+  }
+}
+
+/// Сводка эфира на ПК: куда идёт, в каком качестве и как себя чувствует. Всё берётся с ПК.
+class _StreamSummary extends StatelessWidget {
+  const _StreamSummary({required this.state, required this.onTap});
+  final BridgeState state;
+  final VoidCallback onTap;
+
+  static const _modes = {'local': 'Локально', 'tunnel': 'Публичная ссылка', 'remote': 'Свой сервер'};
+
+  @override
+  Widget build(BuildContext context) {
+    final s = state;
+    final problem = s.deliveryError.isNotEmpty;
+    final status = problem ? s.deliveryError : s.deliveryReady ? 'Ссылка готова' : s.running ? 'Готовится…' : 'Эфир не идёт';
+    final color = problem ? Colors.redAccent : s.deliveryReady ? Colors.greenAccent : Colors.amber;
+    final details = [
+      _modes[s.outputMode] ?? s.outputMode,
+      '${s.profileQuality} · ${s.profileFps} к/с',
+      if (s.profileBitrateKbps > 0) '${(s.profileBitrateKbps / 1000).toStringAsFixed(1)} Мбит/с',
+      if (s.encoderLabel.isNotEmpty) s.encoderLabel,
+    ].join('  ·  ');
+    return Card(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(children: [
+            Icon(Icons.podcasts, color: color),
+            const SizedBox(width: 12),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(status, style: TextStyle(color: color, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 2),
+              Text(details, style: const TextStyle(color: Colors.white70, fontSize: 13)),
+              if (s.pendingProfile.isNotEmpty) Text('Со следующего запуска: ${s.pendingProfile}', style: const TextStyle(color: Colors.amber, fontSize: 12)),
+            ])),
+            const Icon(Icons.chevron_right, color: Colors.white38),
+          ]),
+        ),
+      ),
+    );
   }
 }

@@ -44,7 +44,7 @@ const PAIRED = [
 export const lanRoutePaired = (method, pathname) => PAIRED.some(([m, pattern]) => m === method && pattern.test(pathname));
 
 // Из настроек телефон может менять только это.
-const NETWORK_CONFIG = ['outputMode', 'activeServerId', 'tunnelProvider', 'whiteIp', 'quality', 'fps', 'mediaQuality', 'mediaFps', 'videoBitrate', 'encoderMode'];
+const NETWORK_CONFIG = ['outputMode', 'activeServerId', 'tunnelProvider', 'whiteIp', 'quality', 'fps', 'mediaQuality', 'mediaFps', 'videoBitrate', 'encoderMode', 'applyLive'];
 export const pickNetworkConfig = body => Object.fromEntries(NETWORK_CONFIG.filter(key => body && key in body).map(key => [key, body[key]]));
 
 export const hashToken = token => crypto.createHash('sha256').update(String(token)).digest('hex');

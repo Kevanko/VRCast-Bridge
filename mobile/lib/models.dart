@@ -54,6 +54,14 @@ class BridgeState {
     required this.activeServerId,
     required this.whiteIp,
     required this.servers,
+    required this.profileQuality,
+    required this.profileFps,
+    required this.profileBitrateKbps,
+    required this.encoderLabel,
+    required this.pendingProfile,
+    required this.deliveryPhase,
+    required this.deliveryReady,
+    required this.deliveryError,
     DateTime? receivedAt,
   }) : receivedAt = receivedAt ?? DateTime.now();
 
@@ -85,6 +93,15 @@ class BridgeState {
   final String activeServerId;
   final String whiteIp;
   final List<ServerChoice> servers;
+  // Профиль, в котором ПК реально ведёт эфир (с учётом авто-снижения), а не только выбранный в настройках.
+  final String profileQuality;
+  final int profileFps;
+  final int profileBitrateKbps;
+  final String encoderLabel;
+  final String pendingProfile; // что применится при следующем запуске, если оно отличается от текущего, иначе пусто
+  final String deliveryPhase;
+  final bool deliveryReady;
+  final String deliveryError;
   final DateTime receivedAt;
 
   QueueItem? get current {
@@ -111,6 +128,10 @@ class BridgeState {
     final config = (json['config'] as Map?)?.cast<String, dynamic>() ?? const {};
     final rtsp = (json['rtsp'] as Map?)?.cast<String, dynamic>() ?? const {};
     final tunnel = (json['tunnel'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final performance = (json['performance'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final profile = (performance['outputProfile'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final delivery = (json['delivery'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final desired = (performance['desiredProfile'] as Map?)?.cast<String, dynamic>() ?? const {};
     final running = json['running'] == true;
     final paused = playback['paused'] == true;
     final buffering = playback['buffering'] == true;
@@ -141,6 +162,16 @@ class BridgeState {
       encoderMode: '${config['encoderMode'] ?? 'auto'}',
       activeServerId: '${config['activeServerId'] ?? ''}',
       whiteIp: '${config['whiteIp'] ?? ''}',
+      profileQuality: '${profile['quality'] ?? config['quality'] ?? '720p'}',
+      profileFps: (profile['fps'] as num?)?.toInt() ?? (config['fps'] as num?)?.toInt() ?? 30,
+      profileBitrateKbps: (profile['bitrateKbps'] as num?)?.toInt() ?? 0,
+      encoderLabel: '${performance['encoder'] ?? ''}',
+      pendingProfile: performance['pendingProfile'] == true && desired.isNotEmpty
+          ? '${desired['quality']} · ${desired['fps']} к/с'
+          : '',
+      deliveryPhase: '${delivery['phase'] ?? ''}',
+      deliveryReady: delivery['ready'] == true,
+      deliveryError: '${delivery['error'] ?? ''}',
       servers: [
         for (final item in (config['servers'] as List? ?? const []))
           ServerChoice('${(item as Map)['id']}', '${item['name'] ?? item['id']}', item['reachable'] as bool?),

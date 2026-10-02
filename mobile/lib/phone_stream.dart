@@ -1,8 +1,22 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
+
+/// Параметры отправки экрана под профиль эфира ПК: во сколько раз уменьшить картинку,
+/// какой битрейт и сколько кадров в секунду. ПК всё равно кодирует эфир в свой профиль
+/// (высота 480/720/1080), поэтому отправлять с телефона больше нет смысла.
+({double scale, int bitrate, int fps}) phoneEncoding({required String quality, required int fps, required int bitrateKbps, required int width, required int height}) {
+  final target = {'480p': 480, '720p': 720, '1080p': 1080}[quality] ?? 720;
+  final longSide = (width > height ? width : height).clamp(1, 1 << 14);
+  final scale = longSide <= target ? 1.0 : longSide / target;
+  final fallback = {'480p': 1500000, '720p': 3000000, '1080p': 5000000}[quality] ?? 3000000;
+  // Канал до ПК — домашняя сеть: битрейт эфира берём с запасом, но в разумных пределах.
+  final bitrate = bitrateKbps > 0 ? (bitrateKbps * 1000).clamp(1500000, 8000000) : fallback;
+  return (scale: scale, bitrate: bitrate, fps: fps >= 60 ? 60 : 30);
+}
 
 /// Передаёт экран телефона на ПК: запись экрана → WebRTC → WHIP в MediaMTX на ПК.
 class PhoneStream {
@@ -15,11 +29,13 @@ class PhoneStream {
   Uri? _resource; // адрес сессии WHIP, по нему её закрывают
   bool live = false;
   DateTime? startedAt;
+  String _profileKey = '';
+  String lastApplied = ''; // для диагностики и тестов
   final _changes = StreamController<void>.broadcast();
   Stream<void> get changes => _changes.stream;
 
   /// [pc] — адрес ПК (http://хост:порт), [webrtcPort] — порт WebRTC на нём.
-  Future<void> start(Uri pc, int webrtcPort) async {
+  Future<void> start(Uri pc, int webrtcPort, {String quality = '720p', int fps = 30, int bitrateKbps = 0}) async {
     if (live) return;
     // Согласие на запись экрана берём заранее: службу переднего плана Android 14+
     // разрешает запускать только после него.
@@ -32,9 +48,7 @@ class PhoneStream {
       _pc = connection;
       final sender = await connection.addTrack(stream.getVideoTracks().first, stream);
       _sender = sender;
-      final parameters = sender.parameters;
-      parameters.encodings = [RTCRtpEncoding(rid: null, active: true, maxBitrate: 3000000, maxFramerate: 30, scaleResolutionDownBy: 1.5)];
-      await sender.setParameters(parameters);
+      await applyProfile(quality: quality, fps: fps, bitrateKbps: bitrateKbps);
 
       final gathered = Completer<void>();
       connection.onIceGatheringState = (state) {
@@ -68,6 +82,30 @@ class PhoneStream {
     }
   }
 
+  /// Подстраивает отправку под профиль эфира ПК; вызывается при старте и при смене настроек на ПК.
+  Future<void> applyProfile({required String quality, required int fps, required int bitrateKbps}) async {
+    final key = '$quality/$fps/$bitrateKbps';
+    final sender = _sender;
+    if (sender == null || key == _profileKey) return;
+    _profileKey = key;
+    var width = 1080, height = 2400;
+    try {
+      final settings = _stream?.getVideoTracks().first.getSettings();
+      width = (settings?['width'] as num?)?.toInt() ?? width;
+      height = (settings?['height'] as num?)?.toInt() ?? height;
+    } catch (_) {}
+    final plan = phoneEncoding(quality: quality, fps: fps, bitrateKbps: bitrateKbps, width: width, height: height);
+    try {
+      final parameters = sender.parameters;
+      parameters.encodings = [RTCRtpEncoding(rid: null, active: true, maxBitrate: plan.bitrate, maxFramerate: plan.fps, scaleResolutionDownBy: plan.scale)];
+      await sender.setParameters(parameters);
+      lastApplied = 'scale=${plan.scale.toStringAsFixed(2)} bitrate=${plan.bitrate} fps=${plan.fps}';
+      debugPrint('PhoneStream: профиль $key → $lastApplied');
+    } catch (e) {
+      _profileKey = '';
+    }
+  }
+
   /// Кратко выключаем и включаем отправку: после возобновления кодек выдаёт ключевой кадр.
   Future<void> _forceKeyframe() async {
     final sender = _sender;
@@ -88,6 +126,7 @@ class PhoneStream {
     _keyframes?.cancel();
     _keyframes = null;
     _sender = null;
+    _profileKey = '';
     final resource = _resource;
     final wasLive = live || _pc != null;
     live = false;

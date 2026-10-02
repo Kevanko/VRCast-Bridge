@@ -45,6 +45,8 @@ class Remote extends ChangeNotifier {
           // ПК остановил эфир с телефона (или он оборвался) — выключаем и запись экрана.
           final since = phone.startedAt;
           if (phone.live && !next.phoneSource && since != null && DateTime.now().difference(since).inSeconds > 8) phone.stop();
+          // Качество, частоту кадров и битрейт отправки берём из профиля ПК: поменяли там — телефон подстроился.
+          if (phone.live) phone.applyProfile(quality: next.profileQuality, fps: next.profileFps, bitrateKbps: next.profileBitrateKbps);
           notifyListeners();
         }
       } catch (e) {
@@ -74,7 +76,9 @@ class Remote extends ChangeNotifier {
   Future<String?> startPhoneBroadcast() async {
     try {
       final info = await api.lanInfo();
-      await phone.start(api.base, (info['webrtcPort'] as num).toInt());
+      final s = state;
+      await phone.start(api.base, (info['webrtcPort'] as num).toInt(),
+          quality: s?.profileQuality ?? '720p', fps: s?.profileFps ?? 30, bitrateKbps: s?.profileBitrateKbps ?? 0);
       await api.startPhone();
       notifyListeners();
       return null;

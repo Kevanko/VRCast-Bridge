@@ -187,7 +187,7 @@ test('привязка телефона: настройки эфира толь�
   const auth = { 'X-VRCast-Token': token };
   assert.equal((await call(host, '/api/pair/check', { headers: auth })).status, 200);
   assert.equal((await call(host, '/api/pair/check', { headers: { 'X-VRCast-Token': 'wrong-token' } })).status, 401);
-  const changed = await post('/api/config', { fps: 60, quality: '1080p', port: 5999, cacheRoot: '/tmp/evil', lanAccess: false, whiteIp: '203.0.113.7' }, auth);
+  const changed = await post('/api/config', { fps: 60, quality: '1080p', port: 5999, cacheRoot: '/tmp/evil', lanAccess: false, whiteIp: '203.0.113.7', applyLive: true }, auth);
   assert.equal(changed.status, 200, changed.text);
   const config = JSON.parse(changed.text).config;
   assert.equal(config.fps, 60);

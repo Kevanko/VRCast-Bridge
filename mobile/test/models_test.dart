@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:vrcast_remote/api.dart';
 import 'package:vrcast_remote/models.dart';
+import 'package:vrcast_remote/phone_stream.dart';
 
 Map<String, dynamic> fixture() => (jsonDecode(File('test/fixtures/status.json').readAsStringSync()) as Map).cast<String, dynamic>();
 
@@ -124,5 +125,38 @@ void main() {
       'POST /api/pair token=null {"code":"123456","name":"Телефон"}',
       'POST /api/config token=abc123 {"outputMode":"tunnel","quality":"1080p"}',
     ]);
+  });
+
+  test('профиль эфира ПК и состояние доставки разбираются', () {
+    final s = BridgeState.fromJson(fixture());
+    expect(s.profileQuality, '720p');
+    expect(s.profileFps, 60);
+    expect(s.profileBitrateKbps, 4800);
+    expect(s.encoderLabel, 'Процессор');
+    expect(s.deliveryReady, isFalse);
+    expect(s.deliveryError, isEmpty);
+    expect(s.pendingProfile, isEmpty);
+    final json = fixture();
+    (json['performance'] as Map)['pendingProfile'] = true;
+    (json['performance'] as Map)['desiredProfile'] = {'quality': '1080p', 'fps': 30};
+    expect(BridgeState.fromJson(json).pendingProfile, '1080p · 30 к/с');
+    final bare = BridgeState.fromJson({'config': {'quality': '1080p', 'fps': 30}});
+    expect(bare.profileQuality, '1080p', reason: 'без профиля берём выбранное в настройках');
+    expect(bare.profileBitrateKbps, 0);
+  });
+
+  test('отправка экрана подстраивается под профиль ПК', () {
+    // Экран 1080x2400: для 720p длинную сторону уменьшаем до 720, для 480p — до 480.
+    final p720 = phoneEncoding(quality: '720p', fps: 60, bitrateKbps: 4800, width: 1080, height: 2400);
+    expect(p720.scale, closeTo(2400 / 720, 0.001));
+    expect(p720.bitrate, 4800000);
+    expect(p720.fps, 60);
+    final p480 = phoneEncoding(quality: '480p', fps: 30, bitrateKbps: 0, width: 1080, height: 2400);
+    expect(p480.scale, closeTo(5, 0.001));
+    expect(p480.bitrate, 1500000, reason: 'авто-битрейт зависит от качества');
+    expect(p480.fps, 30);
+    final small = phoneEncoding(quality: '1080p', fps: 30, bitrateKbps: 20000, width: 540, height: 960);
+    expect(small.scale, 1.0, reason: 'маленький экран не увеличиваем');
+    expect(small.bitrate, 8000000, reason: 'потолок битрейта');
   });
 }
