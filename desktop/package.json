@@ -1,0 +1,9 @@
+{
+  "name": "vrcast-bridge-desktop",
+  "version": "0.60.5",
+  "private": true,
+  "description": "Оболочка VRCast Bridge для Linux (окно, трей, диалоги)",
+  "main": "main.js",
+  "scripts": { "start": "electron --no-sandbox ." },
+  "devDependencies": { "electron": "^38.0.0" }
+}

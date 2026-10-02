@@ -1,0 +1,25 @@
+<!doctype html><meta charset="utf-8">
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;cursor:crosshair;background:rgba(0,0,0,.35);user-select:none}
+  #box{position:fixed;display:none;border:4px solid #8f6bff;background:rgba(143,107,255,.35);box-sizing:border-box}
+  #hint{position:fixed;left:50%;top:24px;transform:translateX(-50%);padding:8px 14px;border-radius:8px;
+    background:rgba(14,12,24,.85);color:#e6e0ff;font:14px system-ui,sans-serif}
+</style>
+<div id="hint">Выделите область мышью · Esc — отмена</div><div id="box"></div>
+<script>
+  const box = document.getElementById('box');
+  let start = null, rect = null;
+  const norm = (a, b) => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), width: Math.abs(a.x - b.x), height: Math.abs(a.y - b.y) });
+  addEventListener('mousedown', e => { if (e.button === 0) { start = { x: e.clientX, y: e.clientY }; rect = null; } });
+  addEventListener('mousemove', e => {
+    if (!start) return;
+    rect = norm(start, { x: e.clientX, y: e.clientY });
+    Object.assign(box.style, { display: 'block', left: rect.x + 'px', top: rect.y + 'px', width: rect.width + 'px', height: rect.height + 'px' });
+  });
+  addEventListener('mouseup', e => {
+    if (!start || e.button !== 0) return;
+    rect = norm(start, { x: e.clientX, y: e.clientY });
+    vrcastShell.regionDone(rect);
+  });
+  addEventListener('keydown', e => { if (e.key === 'Escape') vrcastShell.regionDone(null); });
+</script>

@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check public/app.js",
+    "check": "node --check src/server.js && node --check public/app.js && node --check desktop/main.js && node --check desktop/preload.js",
     "test": "node --test --test-concurrency=1"
   },
   "engines": {

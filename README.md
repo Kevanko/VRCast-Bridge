@@ -58,10 +58,12 @@
 
 ```bash
 git clone https://github.com/Kevanko/VRCast-Bridge.git && cd VRCast-Bridge
-npm ci && ./start.sh
+npm ci && ./bin/vrcast install      # зависимости и оболочка (Electron)
+ln -s "$PWD/bin/vrcast" ~/.local/bin/vrcast
+vrcast                              # окно приложения; vrcast stop|status|log
 ```
 
-Команда `vrcast` (симлинк на `bin/vrcast` в `~/.local/bin`) запускает сервер и открывает интерфейс: `vrcast [start|stop|status|log]`. Адрес — `http://127.0.0.1:4717`. Данные лежат в `$XDG_DATA_HOME/VRCastBridge` (по умолчанию `~/.local/share/VRCastBridge`).
+Оболочка (`desktop/`, Electron) повторяет Windows-версию: окно со страницей сервера, значок в трее (в GNOME нужно расширение AppIndicator), крестик прячет в трей, вопросы при выходе про идущий эфир и несохранённый список, перетаскивание файлов, выбор области экрана и подсветка источника, запоминание размера окна. Без неё `vrcast` откроет окно Chrome. Данные лежат в `$XDG_DATA_HOME/VRCastBridge` (по умолчанию `~/.local/share/VRCastBridge`), адрес — `http://127.0.0.1:4717`.
 
 | Что | Как работает в Linux |
 |---|---|
