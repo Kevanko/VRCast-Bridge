@@ -281,7 +281,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     final remote = widget.remote;
     final s = remote.state!;
     final position = _drag ?? s.positionAt(DateTime.now());
-    final title = s.isScreen ? 'Захват экрана' : (s.current?.title ?? (s.queue.isEmpty ? 'Очередь пуста' : 'Ничего не играет'));
+    final title = s.phoneSource ? 'Экран телефона' : s.isScreen ? 'Захват экрана' : (s.current?.title ?? (s.queue.isEmpty ? 'Очередь пуста' : 'Ничего не играет'));
     final seekable = s.canSeek && s.duration > 0;
     return ListView(padding: const EdgeInsets.all(16), children: [
       Preview(remote: remote),
@@ -333,7 +333,11 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
         ),
       ]),
       const SizedBox(height: 16),
-      s.running
+      remote.phone.live || s.phoneSource
+          ? FilledButton.tonalIcon(onPressed: () => _do(remote.stopPhoneBroadcast()), icon: const Icon(Icons.stop_screen_share), label: const Text('Остановить трансляцию экрана'))
+          : OutlinedButton.icon(onPressed: () => _do(remote.startPhoneBroadcast()), icon: const Icon(Icons.screen_share), label: const Text('Транслировать экран телефона')),
+      const SizedBox(height: 8),
+      s.running && !s.phoneSource
           ? OutlinedButton.icon(onPressed: () => _do(remote.run(remote.api.stop)), icon: const Icon(Icons.stop_circle_outlined), label: const Text('Остановить эфир'))
           : FilledButton.icon(onPressed: () => _do(remote.run(() => remote.api.startQueue())), icon: const Icon(Icons.podcasts), label: const Text('Начать эфир')),
     ]);

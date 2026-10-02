@@ -38,6 +38,7 @@ class BridgeState {
     required this.tunnelUrl,
     required this.tunnelState,
     required this.statusLabel,
+    required this.phoneSource,
     DateTime? receivedAt,
   }) : receivedAt = receivedAt ?? DateTime.now();
 
@@ -60,6 +61,7 @@ class BridgeState {
   final String tunnelUrl;
   final String tunnelState;
   final String statusLabel;
+  final bool phoneSource;
   final DateTime receivedAt;
 
   QueueItem? get current {
@@ -108,14 +110,17 @@ class BridgeState {
       rtspLanUrls: [for (final url in (rtsp['lanUrls'] as List? ?? const [])) '$url'],
       tunnelUrl: '${tunnel['url'] ?? ''}',
       tunnelState: '${tunnel['state'] ?? ''}',
+      phoneSource: json['phoneSource'] == true,
       statusLabel: !running
           ? 'Эфир остановлен'
           : buffering
               ? 'Буферизация…'
               : paused
                   ? 'Пауза'
-                  : json['activeKind'] == 'screen'
-                      ? 'Идёт захват экрана'
+                  : json['phoneSource'] == true
+                      ? 'Идёт экран телефона'
+                      : json['activeKind'] == 'screen'
+                          ? 'Идёт захват экрана'
                       : 'Идёт эфир',
     );
   }

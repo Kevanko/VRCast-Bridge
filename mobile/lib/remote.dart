@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
 import 'models.dart';
+import 'phone_stream.dart';
 
 enum Link { idle, connecting, online, offline }
 
@@ -19,10 +20,13 @@ class Remote extends ChangeNotifier {
   String? error;
   bool _closed = false;
   Timer? _tick;
+  final PhoneStream phone = PhoneStream();
+  StreamSubscription<void>? _phoneSub;
 
   /// Подключаемся и держим соединение: при обрыве пробуем снова.
   void start() {
     if (link != Link.idle) return;
+    _phoneSub = phone.changes.listen((_) => notifyListeners());
     _loop();
     _tick = Timer.periodic(const Duration(milliseconds: 500), (_) {
       if (state?.isPlaying == true) notifyListeners();
@@ -38,6 +42,9 @@ class Remote extends ChangeNotifier {
         await for (final next in api.events()) {
           if (_closed) return;
           state = next; link = Link.online; error = null; delay = 1;
+          // ПК остановил эфир с телефона (или он оборвался) — выключаем и запись экрана.
+          final since = phone.startedAt;
+          if (phone.live && !next.phoneSource && since != null && DateTime.now().difference(since).inSeconds > 8) phone.stop();
           notifyListeners();
         }
       } catch (e) {
@@ -63,8 +70,29 @@ class Remote extends ChangeNotifier {
 
   Future<String?> playback(String action, [Map<String, Object?> extra = const {}]) => run(() => api.playback(action, extra));
 
+  /// Экран телефона → ПК → эфир.
+  Future<String?> startPhoneBroadcast() async {
+    try {
+      final info = await api.lanInfo();
+      await phone.start(api.base, (info['webrtcPort'] as num).toInt());
+      await api.startPhone();
+      notifyListeners();
+      return null;
+    } catch (e) {
+      await phone.stop();
+      return '$e';
+    }
+  }
+
+  Future<String?> stopPhoneBroadcast() async {
+    await phone.stop();
+    return run(api.stop);
+  }
+
   @override
   void dispose() {
+    phone.stop();
+    _phoneSub?.cancel();
     _closed = true;
     _tick?.cancel();
     api.close();

@@ -68,6 +68,19 @@ class Api {
   Future<void> playback(String action, [Map<String, Object?> extra = const {}]) => _send('POST', '/api/playback', {'action': action, ...extra});
   Future<void> startQueue([String? id]) => _send('POST', '/api/start/queue', id == null ? {} : {'id': id});
   Future<void> stop() => _send('POST', '/api/stop', {});
+
+  /// Эфир с экрана телефона: поток доходит до ПК не сразу, поэтому пробуем несколько раз.
+  Future<void> startPhone() async {
+    for (var attempt = 0;; attempt++) {
+      try {
+        await _send('POST', '/api/start/phone', {});
+        return;
+      } on ApiException {
+        if (attempt >= 7) rethrow;
+        await Future<void>.delayed(const Duration(seconds: 1));
+      }
+    }
+  }
   Future<void> removeFromQueue(String id) => _send('DELETE', '/api/queue/${Uri.encodeComponent(id)}');
   Future<void> moveInQueue(String id, int to) => _send('POST', '/api/queue/move', {'id': id, 'to': to});
 

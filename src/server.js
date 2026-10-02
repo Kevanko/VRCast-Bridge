@@ -2099,7 +2099,8 @@ function status(withLogs = true) {
     : config.outputMode === 'remote' ? (remoteReachable === false ? 'failed' : 'preparing') : 'preparing';
   return {
     appVersion: APP_VERSION,
-    port: PORT, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(), currentTemplate: currentTemplateState(), queueSaved: queueSaved(),
+    port: PORT,
+    phoneSource, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(), currentTemplate: currentTemplateState(), queueSaved: queueSaved(),
     progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
@@ -3003,6 +3004,12 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
     if (!keepWindowHelper && windowCapture && activeWindowProcess === windowCapture && helperOwner.get(windowCapture) === child) { stopWindowHelper(windowCapture); activeWindowProcess = null; windowHelperKey = ''; }
     const wasCurrent = activeProcess === child;
     if (wasCurrent) activeProcess = null;
+    if (wasCurrent && phoneSource && !stopping && !shuttingDown) {
+      phoneSource = false;
+      log('Телефон перестал передавать экран — эфир остановлен');
+      stopActive();
+      return;
+    }
     if (!stopping && code) log(`Захват остановился с кодом ${code}`);
     if (wasCurrent && relayProcess) startStandby(sessionProfile('screen'));
     if (wasCurrent && !relayProcess) activeKind = null;
@@ -3148,6 +3155,34 @@ async function startScreen() {
   finally { screenStarting = false; keepAudioHelper = false; keepWindowHelper = false; }
 }
 
+// Экран телефона: приложение публикует его в MediaMTX на путь phone (WebRTC),
+// отсюда ffmpeg берёт картинку вместо захвата экрана ПК.
+let phoneSource = false;
+let phoneHasAudio = false;
+const phoneUrl = () => `rtsp://127.0.0.1:${RTSP_PORT}/phone`;
+
+// Есть ли поток телефона: обычный RTSP DESCRIBE (ответ мгновенный). ffprobe для этого не
+// годится: статичный экран шлёт ключевой кадр лишь по запросу, и он ждёт его до тайм-аута.
+function probePhoneStream() {
+  const none = { video: false, audio: false };
+  return new Promise(resolvePromise => {
+    const socket = netConnect(RTSP_PORT, '127.0.0.1');
+    let data = '';
+    const done = value => { socket.destroy(); resolvePromise(value); };
+    socket.setTimeout(3000, () => done(none));
+    socket.on('error', () => done(none));
+    socket.on('connect', () => socket.write(`DESCRIBE ${phoneUrl()} RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n`));
+    socket.on('data', chunk => {
+      data += chunk;
+      const split = data.indexOf('\r\n\r\n');
+      if (split < 0) return;
+      const length = Number(data.match(/Content-Length:\s*(\d+)/i)?.[1] || 0);
+      if (data.length - split - 4 < length) return;
+      done(/^RTSP\/1\.0 200/.test(data) ? { video: /m=video/.test(data), audio: /m=audio/.test(data) } : none);
+    });
+  });
+}
+
 async function startScreenInner() {
   const wasLive = Boolean(activeKind);
   if (!wasLive) encoder = pickEncoder(config.encoderMode);
@@ -3161,11 +3196,11 @@ async function startScreenInner() {
   // Проверки настроек — ДО остановки текущего эфира. Раньше они шли после
   // stopActive, и неудачная попытка переключиться с плейлиста на захват
   // (окно не выбрано) просто гасила работающий эфир у всех зрителей.
-  if (config.captureMode === 'window' && !/^\d+$/.test(String(config.captureWindowHandle))) throw new Error('Выберите окно для захвата.');
+  if (!phoneSource && config.captureMode === 'window' && !/^\d+$/.test(String(config.captureWindowHandle))) throw new Error('Выберите окно для захвата.');
   // Звук окна без процесса: раньше эта проверка стояла после добавления
   // --local-volume и не срабатывала никогда — помощник уходил без --pid, то есть
   // в режим ВСЕГО системного звука, и в эфир попадало всё (Discord, уведомления).
-  if (config.audioMode === 'process' && !/^\d+$/.test(String(config.audioProcessId))) throw new Error('Для звука приложения выберите окно с работающим процессом.');
+  if (!phoneSource && config.audioMode === 'process' && !/^\d+$/.test(String(config.audioProcessId))) throw new Error('Для звука приложения выберите окно с работающим процессом.');
   stopActive(false, true, true);
   // Список мониторов и окон спрашивается у PowerShell — это секунда и больше.
   // Нажатый за это время «Стоп» или запуск очереди раньше ничего не отменял:
@@ -3187,7 +3222,9 @@ async function startScreenInner() {
   let captureRect = null;
   let selectedWindow = null;
   let ddagrabOutput = null;
-  if (config.captureMode === 'window') {
+  if (phoneSource) {
+    // Источник — экран телефона: ни монитор, ни окно искать не нужно.
+  } else if (config.captureMode === 'window') {
     selectedWindow = (await listWindows()).find(item => item.handle === String(config.captureWindowHandle)) || null;
     проверитьОтмену();
       windowCaptureState = !selectedWindow ? 'missing' : selectedWindow.minimized ? 'minimized' : 'visible';
@@ -3203,7 +3240,9 @@ async function startScreenInner() {
     captureRect = { x: Number(config.regionX) || 0, y: Number(config.regionY) || 0,
       width: Math.max(64, Number(config.regionWidth) || 1280), height: Math.max(64, Number(config.regionHeight) || 720) };
   }
-  if (IS_LINUX && (config.captureMode !== 'window' || windowCaptureState === 'visible')) {
+  if (phoneSource) {
+    args.push('-fflags', 'nobuffer', ...очередьВхода(16), '-rtsp_transport', 'tcp', '-i', phoneUrl());
+  } else if (IS_LINUX && (config.captureMode !== 'window' || windowCaptureState === 'visible')) {
     if (process.env.XDG_SESSION_TYPE === 'wayland') log('Wayland: захват экрана идёт через XWayland и может показывать только X11-окна');
     if (config.captureMode === 'window') startWindowWatcher(config.captureWindowHandle);
     args.push('-fflags', 'nobuffer', ...очередьВхода(16), ...screenInput({ rect: captureRect, windowId: config.captureMode === 'window' ? config.captureWindowHandle : null, fps: profile.fps }));
@@ -3225,9 +3264,13 @@ async function startScreenInner() {
     args.push('-fflags', 'nobuffer', ...очередьВхода(16), ...screenInput({ rect: captureRect, fps: profile.fps }));
   }
 
-  let audioHelperArgs = audioHelperArguments();
-  const pulse = IS_LINUX ? pulseSource(config) : null;
-  if (audioHelperArgs) {
+  let audioHelperArgs = phoneSource ? null : audioHelperArguments();
+  const pulse = IS_LINUX && !phoneSource ? pulseSource(config) : null;
+  if (phoneSource) {
+    // Звук берём из потока телефона, а если его нет — тишина, чтобы плеер не ждал аудио.
+    if (phoneHasAudio) args.push('-map', '0:v:0', '-map', '0:a:0');
+    else args.push('-re', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0');
+  } else if (audioHelperArgs) {
     // Захват процесса идёт ПОСЛЕ регулятора громкости Windows: «тише у себя»
     // помощник компенсирует усилением (см. SessionMuter в audio-helper).
     // Без use_wallclock_as_timestamps: штамп времени чтения из пайпа + aresample
@@ -3270,18 +3313,20 @@ function startMediaMtx() {
   // этих портах — и сервер не поднимался бы вовсе, а два экземпляра VRCast
   // конфликтовали бы между собой.
   writeFileSync(configFile, [
-    'logLevel: error', `rtspAddress: :${RTSP_PORT}`,
+    `logLevel: ${/^(error|warn|info|debug)$/.test(process.env.VRCAST_MEDIAMTX_LOG || '') ? process.env.VRCAST_MEDIAMTX_LOG : 'error'}`, `rtspAddress: :${RTSP_PORT}`,
     `rtpAddress: :${rtpPort}`, `rtcpAddress: :${rtpPort + 1}`,
     `multicastRTPPort: ${rtpPort + 2}`, `multicastRTCPPort: ${rtpPort + 3}`,
     'rtmp: no', 'hls: no', 'srt: no', 'moq: no', 'api: no', 'metrics: no', 'pprof: no', 'playback: no',
     // Предпросмотр берётся отсюда: WebRTC отдаёт кадр за доли секунды,
     // тогда как HLS собирает секундные куски и всегда отстаёт.
     'webrtc: yes', `webrtcAddress: :${WEBRTC_PORT}`, `webrtcLocalUDPAddress: :${WEBRTC_PORT + 1}`,
-    'webrtcIPsFromInterfaces: no', "webrtcAdditionalHosts: ['127.0.0.1']",
+    'webrtcIPsFromInterfaces: no', `webrtcAdditionalHosts: [${['127.0.0.1', ...(config.lanAccess === true ? getLanAddresses() : [])].map(host => `'${host}'`).join(', ')}]`,
     'authInternalUsers:',
     '- user: any', '  permissions:', '  - action: read',
+    // Экран телефона: публиковать на путь phone можно только из своей сети и только при включённом пульте.
+    ...(config.lanAccess === true ? ['- user: any', "  ips: ['127.0.0.1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16']", '  permissions:', '  - action: publish', '    path: phone'] : []),
     `- user: vrcast`, `  pass: ${rtspPublishPass}`, `  ips: ['127.0.0.1']`, '  permissions:', '  - action: publish',
-    'paths:', '  live: {}', '',
+    'paths:', '  live: {}', '  phone: {}', '',
   ].join('\n'), 'utf8');
   // MediaMTX пишет свои ошибки в stdout, а не в stderr. Раньше stdout
   // выбрасывался, и при падении в журнале стояло «Причина: не сообщил» — хотя
@@ -4362,6 +4407,7 @@ function ensureRelay(profile = streamProfile()) {
 }
 
 function startQueue(initialIndex = 0) {
+  phoneSource = false;
   if (!queue.length) throw new Error('Очередь пуста. Добавьте ссылку или файл.');
   const wasLive = Boolean(activeKind);
   if (!wasLive) encoder = pickEncoder(config.encoderMode);
@@ -6384,6 +6430,8 @@ function applyLanAccess() {
   }
   if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log });
   else unpublishService();
+  // MediaMTX читает правила публикации из своего файла: перезапускаем с новыми.
+  if (mediaMtxProcess) { stopMediaMtx(); setTimeout(startMediaMtx, 700); }
   log(config.lanAccess === true ? 'Пульт для телефона включён' : 'Пульт для телефона выключен');
 }
 
@@ -6581,7 +6629,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/lan-info') {
       const { rtsp, playbackUrl } = status(false);
-      return json(res, 200, { name: hostname(), version: APP_VERSION, port: PORT, lanAccess: config.lanAccess === true,
+      return json(res, 200, { name: hostname(), version: APP_VERSION, port: PORT, webrtcPort: WEBRTC_PORT, rtspPort: RTSP_PORT, lanAccess: config.lanAccess === true,
         addresses: getLanAddresses().map(address => `http://${address}:${PORT}`), playbackUrl, rtspLanUrls: rtsp?.lanUrls || [] });
     }
     if (req.method === 'GET' && url.pathname === '/api/events') {
@@ -6873,7 +6921,16 @@ const server = http.createServer(async (req, res) => {
       }
       return json(res, 200, status());
     }
-    if (req.method === 'POST' && url.pathname === '/api/start/screen') { requireReadyOutput(); await startScreen(); return json(res, 200, status()); }
+    if (req.method === 'POST' && url.pathname === '/api/start/screen') { phoneSource = false; requireReadyOutput(); await startScreen(); return json(res, 200, status()); }
+    if (req.method === 'POST' && url.pathname === '/api/start/phone') {
+      requireReadyOutput();
+      const info = await probePhoneStream();
+      if (!info.video) throw new Error('Телефон ещё не передаёт экран. Нажмите «Транслировать экран» в приложении.');
+      phoneSource = true; phoneHasAudio = info.audio;
+      log(`Эфир с экрана телефона${info.audio ? ' со звуком' : ' без звука'}`);
+      try { await startScreen(); } catch (error) { phoneSource = false; throw error; }
+      return json(res, 200, status());
+    }
     if (req.method === 'POST' && url.pathname === '/api/start/queue') {
       const body = await readBody(req).catch(() => ({}));
       requireReadyOutput();
@@ -6894,7 +6951,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/skip') { transitionQueue('next'); return json(res, 200, status()); }
     if (req.method === 'POST' && url.pathname === '/api/playback') { const body = await readBody(req); return json(res, 200, await playbackCommand(body)); }
-    if (req.method === 'POST' && url.pathname === '/api/stop') { if (activeKind) log(activeKind === 'screen' ? 'Эфир остановлен: захват экрана выключен' : 'Эфир остановлен по кнопке'); stopActive(); return json(res, 200, status()); }
+    if (req.method === 'POST' && url.pathname === '/api/stop') { phoneSource = false; if (activeKind) log(activeKind === 'screen' ? 'Эфир остановлен: захват экрана выключен' : 'Эфир остановлен по кнопке'); stopActive(); return json(res, 200, status()); }
     if (req.method === 'POST' && url.pathname === '/api/shutdown') {
       shuttingDown = true;
       // Без этой строки штатный выход в журнале не отличить от падения.

@@ -132,6 +132,38 @@ test('загрузка с телефона: файл попадает в оче�
   assert.equal(readdirSync(folder).length, 0, 'удалённые из очереди файлы стираются');
 });
 
+test('экран телефона: поток с телефона становится эфиром, обрыв потока останавливает эфир', { skip: !lanIp && 'нет сетевого интерфейса', timeout: 150000 }, async () => {
+  const host = `${lanIp}:${port}`;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const publish = () => spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-re', '-f', 'lavfi', '-i', 'testsrc2=size=360x640:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=500',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-t', '120', '-f', 'rtsp', '-rtsp_transport', 'tcp',
+    `rtsp://127.0.0.1:${port + 1}/phone`], { stdio: 'ignore' });
+  let publisher = publish();
+  try {
+    // MediaMTX докачивается и перезапускается при включении пульта — пробуем, пока не поднимется.
+    let started = null;
+    for (let i = 0; i < 40 && !started; i++) {
+      await sleep(2500);
+      if (publisher.exitCode !== null) publisher = publish();
+      const r = await call(host, '/api/start/phone', { method: 'POST', body: {} }).catch(() => null);
+      if (r?.status === 200) started = r;
+    }
+    assert.ok(started, 'эфир с экрана телефона должен запуститься');
+    const state = JSON.parse((await local('/api/status?logs=0')).text);
+    assert.equal(state.running, true);
+    assert.equal(state.activeKind, 'screen');
+    assert.equal(state.phoneSource, true);
+    let playlist = '';
+    for (let i = 0; i < 30 && !/#EXTINF/.test(playlist); i++) { await sleep(500); playlist = (await call(host, '/stream/live.m3u8')).text; }
+    assert.match(playlist, /#EXTINF/, 'HLS-эфир строится из потока телефона');
+    publisher.kill('SIGKILL');
+    let stopped = false;
+    for (let i = 0; i < 40 && !stopped; i++) { await sleep(500); stopped = JSON.parse((await local('/api/status?logs=0')).text).running === false; }
+    assert.ok(stopped, 'обрыв потока телефона останавливает эфир');
+    assert.equal(JSON.parse((await local('/api/status?logs=0')).text).phoneSource, false);
+  } finally { publisher.kill('SIGKILL'); await local('/api/stop', { method: 'POST', body: {} }).catch(() => {}); }
+});
+
 test('выключили пульт: сеть снова закрыта', { skip: !lanIp && 'нет сетевого интерфейса' }, async () => {
   await local('/api/config', { method: 'POST', body: { lanAccess: false } });
   let closed = false;
