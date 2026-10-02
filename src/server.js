@@ -6,11 +6,12 @@ import { basename, dirname, extname, join, normalize, resolve, sep } from 'node:
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { connect as netConnect, createServer as netCreateServer } from 'node:net';
+import { Readable } from 'node:stream';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
 
 // VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
-const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.60.4';
+const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.60.5';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -579,6 +580,10 @@ function normalizeQueueItem(raw, freshId = false) {
     unavailable: пропал || (Boolean(raw.unavailable) && !raw.missing), probed: Boolean(raw.probed),
     missing: пропал,
     direct: Boolean(raw.direct), live: Boolean(raw.live),
+    // Пометку «аниме» раньше теряли при сохранении в список: серии из списка
+    // шли через yt-dlp («Unsupported URL») и прогревались все подряд. Берём её
+    // и по самой ссылке — так чинятся и уже сохранённые списки.
+    anime: Boolean(raw.anime) || (!local && isAnimeUrl(sourceUrl)),
   };
 }
 
@@ -667,6 +672,7 @@ function templateSummaries() {
 }
 
 function очиститьОчередь() {
+  if (queue.length) log(`Очередь очищена: убрано видео — ${queue.length}`);
   if (activeKind === 'queue') stopActive();
   queue = []; resolvedMedia.clear(); mediaFailures.clear(); cacheDeclined.clear(); saveQueue();
 }
@@ -787,8 +793,14 @@ function logDetail(message) {
   try { appendFileSync(DETAIL_LOG_FILE, `${new Date().toISOString()}  ${message}\n`, 'utf8'); } catch {}
 }
 
+// Одна и та же строка подряд (двойной клик, повтор ошибки) — пишем один раз
+// и потом «повторилось N раз», а не стену одинаковых строк.
+let прошлаяСтрока = '', повторов = 0, прошлаяВремя = 0;
 function log(message) {
   message = скрытьПароли(message);
+  if (message === прошлаяСтрока && Date.now() - прошлаяВремя < 30000) { повторов++; прошлаяВремя = Date.now(); return; }
+  if (повторов) { const n = повторов; повторов = 0; log(`(предыдущее сообщение повторилось ещё ${n} раз)`); }
+  прошлаяСтрока = message; прошлаяВремя = Date.now();
   trimDetailLog();
   const line = `${new Date().toLocaleTimeString('ru-RU')}  ${message}`;
   logLines = [...logLines.slice(-99), line];
@@ -1203,102 +1215,10 @@ const SERVER_MEDIAMTX_VERSION = 'v1.20.1';
 // Скрипт трогает ровно три вещи: каталог /opt/vrcast-relay, юнит
 // vrcast-relay.service и правила ufw/firewalld для двух портов. Удаление
 // снимает ровно их же.
-const DEPLOY_SCRIPT = `
-set -eu
-PORT="\${VRCAST_PORT_ARG:-8554}"
-DIR=/opt/vrcast-relay
-KEY_FILE="$DIR/publish.key"
-MTX_VERSION=${SERVER_MEDIAMTX_VERSION}
-[ "$(id -u)" -eq 0 ] || { echo "VRCAST_ERR нужны права root"; exit 1; }
-command -v curl >/dev/null 2>&1 || { echo "VRCAST_ERR на сервере нет curl"; exit 1; }
-command -v systemctl >/dev/null 2>&1 || { echo "VRCAST_ERR на сервере нет systemd (systemctl) — нужен обычный Linux-сервер с systemd"; exit 1; }
-case "$(uname -m)" in
-  x86_64|amd64) ARCH=linux_amd64 ;;
-  aarch64|arm64) ARCH=linux_arm64 ;;
-  armv7*) ARCH=linux_armv7 ;;
-  *) echo "VRCAST_ERR процессор сервера не поддерживается: $(uname -m)"; exit 1 ;;
-esac
-mkdir -p "$DIR"
-if [ ! -x "$DIR/mediamtx" ] || [ "$("$DIR/mediamtx" --version 2>/dev/null)" != "$MTX_VERSION" ]; then
-  URL="https://github.com/bluenviron/mediamtx/releases/download/$MTX_VERSION/mediamtx_\${MTX_VERSION}_$ARCH.tar.gz"
-  curl -fsSL "$URL" -o /tmp/vrcast-mtx.tar.gz || { echo "VRCAST_ERR не скачался MediaMTX ($URL)"; exit 1; }
-  systemctl stop vrcast-relay >/dev/null 2>&1 || true
-  tar xzf /tmp/vrcast-mtx.tar.gz -C "$DIR" mediamtx
-  rm -f /tmp/vrcast-mtx.tar.gz
-fi
-[ -f "$KEY_FILE" ] || { head -c 18 /dev/urandom | base64 | tr -d '/+=' > "$KEY_FILE"; chmod 600 "$KEY_FILE"; }
-KEY=$(cat "$KEY_FILE")
-RTP=$(( PORT + 1 + (PORT + 1) % 2 ))
-HLSPORT=$(( PORT + 10 ))
-{
-  echo "logLevel: error"
-  echo "rtspAddress: :$PORT"
-  echo "rtpAddress: :$RTP"
-  echo "rtcpAddress: :$((RTP + 1))"
-  echo "multicastRTPPort: $((RTP + 2))"
-  echo "multicastRTCPPort: $((RTP + 3))"
-  echo "rtmp: no"
-  echo "hls: yes"
-  echo "hlsAddress: :$HLSPORT"
-  echo "hlsVariant: mpegts"
-  echo "hlsSegmentCount: 4"
-  echo "hlsSegmentDuration: 1s"
-  echo "hlsAlwaysRemux: no"
-  echo "webrtc: no"
-  echo "srt: no"
-  echo "moq: no"
-  echo "api: no"
-  echo "metrics: no"
-  echo "pprof: no"
-  echo "playback: no"
-  echo "authInternalUsers:"
-  echo "- user: any"
-  echo "  permissions:"
-  echo "  - action: read"
-  echo "- user: vrcast"
-  echo "  pass: $KEY"
-  echo "  permissions:"
-  echo "  - action: publish"
-  echo "paths:"
-  echo "  all_others: {}"
-} > "$DIR/mediamtx.yml"
-chmod 600 "$DIR/mediamtx.yml"
-{
-  echo "[Unit]"
-  echo "Description=VRCast Bridge media relay"
-  echo "After=network.target"
-  echo ""
-  echo "[Service]"
-  echo "ExecStart=$DIR/mediamtx $DIR/mediamtx.yml"
-  echo "Restart=always"
-  echo "RestartSec=3"
-  echo ""
-  echo "[Install]"
-  echo "WantedBy=multi-user.target"
-} > /etc/systemd/system/vrcast-relay.service
-systemctl daemon-reload
-systemctl enable vrcast-relay >/dev/null 2>&1 || true
-systemctl restart vrcast-relay
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  ufw allow "$PORT/tcp" >/dev/null 2>&1 || true
-  ufw allow "$HLSPORT/tcp" >/dev/null 2>&1 || true
-fi
-if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-  firewall-cmd --permanent --add-port="$PORT/tcp" >/dev/null 2>&1 || true
-  firewall-cmd --permanent --add-port="$HLSPORT/tcp" >/dev/null 2>&1 || true
-  firewall-cmd --reload >/dev/null 2>&1 || true
-fi
-sleep 2
-if ! systemctl is-active --quiet vrcast-relay; then
-  BUSY=""
-  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$PORT$"; then BUSY="порт $PORT занят другой программой; "; fi
-  WHY=$(journalctl -u vrcast-relay -n 5 --no-pager 2>/dev/null | tr '\\n' ' ' | tail -c 700)
-  echo "VRCAST_ERR служба не запустилась: $BUSY$WHY"
-  exit 1
-fi
-IP=$(curl -fsS --max-time 6 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
-echo "VRCAST_OK ip=$IP port=$PORT hls=$HLSPORT key=$KEY"
-`;
+// Сервер ставится тем же server/install.sh, что и командой из README, —
+// одна настройка на оба пути (раньше шаблон в программе отставал и при
+// переустановке откатывал усиление сервера). VRCAST_MACHINE=1 — итог строкой VRCAST_OK.
+const DEPLOY_SCRIPT = (() => { try { return readFileSync(join(ROOT, 'server', 'install.sh'), 'utf8').replace(/\r\n/g, '\n'); } catch { return 'echo "VRCAST_ERR в программе нет server/install.sh — переустановите VRCast Bridge"'; } })();
 
 const REMOVE_SCRIPT = `
 set -u
@@ -1307,7 +1227,7 @@ systemctl stop vrcast-relay 2>/dev/null || true
 systemctl disable vrcast-relay 2>/dev/null || true
 rm -f /etc/systemd/system/vrcast-relay.service
 systemctl daemon-reload 2>/dev/null || true
-rm -rf /opt/vrcast-relay
+rm -rf /opt/vrcast-relay /usr/local/bin/vrcast
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   ufw delete allow "$PORT/tcp" >/dev/null 2>&1 || true
   ufw delete allow "$(( PORT + 10 ))/tcp" >/dev/null 2>&1 || true
@@ -1489,7 +1409,9 @@ async function attachServer(body) {
   if (!адрес) throw new Error('Укажите адрес сервера.');
   if (!АДРЕС_СЕРВЕРА.test(адрес)) throw new Error('Адрес сервера: только буквы, цифры, точки и дефис.');
   if (!ключ) throw new Error('Укажите ключ публикации — его выдаёт сервер при установке.');
-  const порт = портСервера(body.rtspPort, SERVER_RTSP_PORT);
+  // «1.2.3.4:8554» из вывода установщика — порт берём прямо из адреса.
+  const портИзАдреса = String(body.host || '').trim().replace(/^\w+:\/\//, '').match(/^[^/:]+:(\d+)/)?.[1];
+  const порт = портСервера(body.rtspPort || портИзАдреса, SERVER_RTSP_PORT);
   const канал = String(body.channel || 'live').replace(/[^a-z0-9_-]/gi, '') || 'live';
   // Проверяем, что там вообще кто-то отвечает: адрес с опечаткой не должен
   // молча ложиться в список и всплывать только при запуске эфира.
@@ -1526,7 +1448,7 @@ async function deployServer(body) {
   const rtspPort = портСервера(body.rtspPort, Number(existing?.rtspPort) || SERVER_RTSP_PORT);
   if (!server.hostKey) server.hostKey = await sshDiscoverHostKey(server);
   log(`Свой сервер: разворачиваю на ${hostName}…`);
-  const output = await sshRun(server, password, `VRCAST_PORT_ARG=${rtspPort}\n${DEPLOY_SCRIPT}`);
+  const output = await sshRun(server, password, `VRCAST_MACHINE=1\nVRCAST_PORT=${rtspPort}\n${DEPLOY_SCRIPT}`);
   const result = /VRCAST_OK ip=(\S+) port=(\d+) hls=(\d+) key=(\S+)/.exec(output);
   if (!result) throw new Error('Сервер не вернул данные подключения.');
   const entry = {
@@ -2185,7 +2107,8 @@ function status(withLogs = true) {
     performance: { encoder: encoder.label, hardware: encoder.hardware, continuousQueue: true, outputProfile: relayProfile,
       desiredProfile, pendingProfile: Boolean(activeKind && relayProfile && !sameProfile(relayProfile, desiredProfile)),
       remoteBacklogSec: config.outputMode === 'remote' && activeKind ? Number(remoteBacklogSec.toFixed(1)) : 0,
-      remoteCapacityKbps: config.outputMode === 'remote' ? remoteCapacityKbps : 0,
+      remoteCapacityKbps: config.outputMode === 'remote' ? remoteCapacityKbps || сохранённыйКанал() : 0,
+      remoteSpeedTest: config.outputMode === 'remote' ? замерСервера : null,
       remoteBudgetKbps: config.outputMode === 'remote' ? remoteBudgetKbps || стартовыйБюджет() : 0,
       encoderMode: config.encoderMode || 'auto', gpuLabel: hardwareEncoder ? hardwareEncoder.label : '',
       streamClock: Number(streamTimestamp().toFixed(3)),
@@ -2512,7 +2435,11 @@ function validWebUrl(value) {
 
 function attachProcessLogs(child, label) {
   child.stderr?.setEncoding('utf8');
-  let pending = '';
+  // Один сбой ffmpeg — это пачка строк-эхо. В журнал идут первые три разные,
+  // остальное — одной строкой в конце. «[h264 @ 0000…]» срезаем: адрес у каждой
+  // строки свой и мешал склеивать повторы.
+  let pending = '', показано = 0, скрыто = 0;
+  const были = new Set(), запущен = Date.now();
   child.stderr?.on('data', chunk => {
     pending += chunk;
     const lines = pending.split(/\r?\n/);
@@ -2521,9 +2448,17 @@ function attachProcessLogs(child, label) {
       // «cannot be applied», «not found», «Unrecognized option» — ffmpeg так
       // говорит о несовместимых параметрах. Раньше эти строки отсекались, и в
       // журнале у друга была только «Error parsing options» без причины.
-      if (/error|failed|invalid|exception|denied|403|429|non-monoton|cannot be applied|not found|unrecognized/i.test(line)) log(`${label}: ${line.trim().slice(0, 260)}`);
+      if (!/error|failed|invalid|exception|denied|403|429|non-monoton|cannot be applied|not found|unrecognized/i.test(line)) continue;
+      const text = line.trim().replace(/\[[^\]]*@ [0-9a-fx]+\]\s*/gi, '').replace(/\(\d+ > \d+\)/, '').slice(0, 260);
+      if (были.has(text)) continue;
+      // Серии Kodik начинаются с битого куска до первого ключевого кадра —
+      // эти три строки на старте каждой серии ничего не значат.
+      if (Date.now() - запущен < 3000 && /Invalid NAL unit size|Error splitting the input into NAL units|Decoding error: Invalid data|missing picture in access unit/i.test(text)) continue;
+      были.add(text);
+      if (показано < 3) { показано++; log(`${label}: ${text}`); } else скрыто++;
     }
   });
+  child.on('close', () => { if (скрыто) log(`${label}: и ещё ${скрыто} похожих строк — полностью в vrcast-errors.log`); });
   child.on('error', error => log(`${label}: ${error.message}`));
 }
 
@@ -3445,6 +3380,77 @@ function rtspTargets() {
   return targets;
 }
 
+// ── Замер канала до своего сервера ──────────────────────────────────────────
+// Без замера скорость была видна только при заторе. Теперь несколько секунд
+// шлём на сервер тяжёлый тестовый поток в отдельный канал vrcast-speedtest —
+// тем же путём, что и эфир, включая выбранную сетевую карту.
+// Считать «сколько ушло из программы» нельзя: VPN (mihomo) принимает данные
+// у себя и буферизует, и выходило 187 Мбит/с при реальных 20. Поэтому поток
+// идёт через свой мост: после отправки мы закрываем соединение со своей
+// стороны, и сервер закрывает его в ответ только прочитав всё до байта —
+// время до этого ответа и есть честная доставка.
+// Во время эфира не меряем: замер отнял бы канал у зрителей.
+const ЗАМЕР_СЕКУНД = 5, ЗАМЕР_ПОТОЛОК = 40 * 1024 * 1024; // 40 МБ — хватает до ~64 Мбит/с
+let замерСервера = { running: false, kbps: 0, at: 0, error: '' };
+async function замеритьКаналСервера(причина = '') {
+  const remote = remoteRtspTarget();
+  if (!remote || замерСервера.running || activeKind) return;
+  замерСервера = { ...замерСервера, running: true, error: '' };
+  const карта = выбраннаяКарта();
+  log(`Меряю канал до своего сервера «${remote.name}»${причина ? ` (${причина})` : ''}${карта ? ` через карту ${карта}` : ''}: ${ЗАМЕР_СЕКУНД} с тестового потока…`);
+  let байт = 0, первый = 0, доставлено = 0, текст = '', ошибкаСети = '', мыЗакрыли = false;
+  const мост = netCreateServer(async local => {
+    local.pause(); local.on('error', () => {});
+    const upstream = netConnect({ host: await реальныйАдрес(remote.host), port: remote.port, ...(карта ? { localAddress: карта } : {}) });
+    upstream.on('error', error => { ошибкаСети = error.message; local.destroy(); });
+    upstream.on('end', () => { if (!мыЗакрыли) ошибкаСети = 'сервер сам оборвал соединение'; else if (первый && !доставлено) доставлено = Date.now(); });
+    local.on('data', chunk => {
+      if (байт >= ЗАМЕР_ПОТОЛОК) return;
+      if (!первый) первый = Date.now();
+      байт += chunk.length;
+      if (!upstream.write(chunk)) { local.pause(); upstream.once('drain', () => local.resume()); }
+    });
+    // Закрываем свою сторону, как только ffmpeg ушёл или набрали потолок.
+    const закрыть = () => { мыЗакрыли = true; upstream.end(); };
+    local.on('close', закрыть);
+    upstream.on('data', chunk => { if (!local.destroyed) local.write(chunk); });
+    local.resume();
+  });
+  try {
+    await new Promise((resolve, reject) => { мост.once('error', reject); мост.listen(0, '127.0.0.1', resolve); });
+    const адрес = `rtsp://vrcast:${encodeURIComponent(activeServer()?.publishKey || '')}@127.0.0.1:${мост.address().port}/vrcast-speedtest`;
+    await new Promise(resolve => {
+      // Шум, сжатый без потерь: кадры огромные, кодировщику легко — упираемся в сеть, а не в процессор.
+      const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=1280x720:r=30,noise=alls=100:allf=t',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-qp', '0', '-an', '-f', 'rtsp', '-rtsp_transport', 'tcp', адрес], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { текст = (текст + chunk).slice(-600); });
+      const стоп = setTimeout(() => child.kill('SIGTERM'), ЗАМЕР_СЕКУНД * 1000 + 3000);
+      const потолок = setInterval(() => { if (байт >= ЗАМЕР_ПОТОЛОК || (первый && Date.now() - первый > ЗАМЕР_СЕКУНД * 1000)) child.kill('SIGTERM'); }, 100);
+      child.on('close', () => { clearTimeout(стоп); clearInterval(потолок); resolve(); });
+      child.on('error', () => { clearTimeout(стоп); clearInterval(потолок); resolve(); });
+    });
+    // Ждём, пока сервер дочитает всё, что застряло в пути (у VPN бывает много).
+    const предел = Date.now() + 45000;
+    while (!доставлено && !ошибкаСети && байт > 0 && Date.now() < предел) await new Promise(resolve => setTimeout(resolve, 100));
+    if (ошибкаСети) throw new Error(`${карта ? `карта ${карта} ` : ''}не достаёт до сервера: ${ошибкаСети}`);
+    if (!доставлено) throw new Error(байт ? 'сервер не подтвердил приём за 45 с — канал очень узкий или соединение рвётся' : 'поток не ушёл');
+    const kbps = Math.round(байт * 8 / Math.max(0.5, (доставлено - первый) / 1000) / 1000);
+    if (байт < 256 * 1024) {
+      throw new Error(/400|404|Bad Request/i.test(текст) ? 'сервер не принял проверочный канал (старая настройка сервера — скорость будет видна во время эфира)'
+        : /401|Unauthorized/i.test(текст) ? 'сервер не принял ключ публикации'
+        : текст.trim().split(/\r?\n/).pop() || 'сервер оборвал проверочный поток');
+    }
+    remoteCapacityKbps = kbps; запомнитьКанал();
+    замерСервера = { running: false, kbps, at: Date.now(), error: '' };
+    log(`Канал до своего сервера: ~${(kbps / 1000).toFixed(1)} Мбит/с (${(байт / 1048576).toFixed(1)} МБ за ${((доставлено - первый) / 1000).toFixed(1)} с${карта ? `, карта ${карта}` : ''})`);
+  } catch (error) {
+    замерСервера = { running: false, kbps: 0, at: Date.now(), error: error.message };
+    log(`Замер канала до своего сервера не удался: ${error.message}`);
+  } finally {
+    мост.close();
+  }
+}
+
 const rtspPushFailures = new Map();
 const rtspPushUrls = new Map();
 const rtspPushStartedAt = new Map();
@@ -3507,14 +3513,20 @@ function startRtspPush() {
       // Ошибки публикации на свой сервер пишем целиком: без этого причина
       // («неверный пароль», «порт закрыт») не видна ни в журнале, ни пользователю.
       child.stderr.setEncoding('utf8');
-      let tail = '';
+      let tail = '', сообщил = false;
       child.stderr.on('data', chunk => {
         tail += chunk;
         const lines = tail.split(/\r?\n/);
         tail = lines.pop() || '';
         for (const line of lines) {
-          const text = line.trim();
+          // «[out#0/rtsp @ 0000…]» у каждого запуска свой — без него одинаковые
+          // ошибки склеиваются. Одна причина = одна строка: «Error muxing»,
+          // «Terminating thread», «Error writing trailer» — лишь её эхо.
+          let text = line.trim().replace(/^\[[^\]]*@ [0-9a-fx]+\]\s*/i, '');
           if (/non-existing PPS|no frame!|Last message repeated/i.test(text)) continue;
+          if (сообщил && /Error muxing|Task finished|Terminating thread|Error writing trailer|Conversion failed/i.test(text)) continue;
+          if (/Broken pipe|Connection reset|forcibly closed/i.test(text)) text = 'сервер оборвал соединение — переподключаюсь';
+          сообщил = true;
           if (text && text !== lastRemotePushError) {
             lastRemotePushError = text;
             // 400 на публикацию означает, что сервер принимает только тот путь,
@@ -4408,8 +4420,78 @@ async function resolveRemoteMedia(entryUrl) {
 async function resolveAnimeMedia(item) {
   const { url, duration } = await resolveAnime(item.sourceUrl);
   if (duration && !item.duration) { item.duration = duration; saveQueueSoon(); }
-  return { title: item.title, duration: item.duration || duration, combinedUrl: url, videoUrl: null, audioUrl: null,
-    headers: null, hasVideo: true, hasAudio: true };
+  return { title: item.title, duration: item.duration || duration, combinedUrl: /\.m3u8(\?|$)/i.test(url) ? черезПрокси(item.id, url) : url,
+    videoUrl: null, audioUrl: null, headers: null, hasVideo: true, hasAudio: true };
+}
+
+// ── Свой прокси HLS для серий ───────────────────────────────────────────────
+// ffmpeg не отдаёт ни кадра, пока не скачает первый кусок серии целиком:
+// 2,5 МБ с CDN — около 2 с (замерено, никакие probesize не помогают). Поэтому
+// серия играет через наш адрес, а первые два куска соседних серий лежат в
+// памяти заранее — переход на нескачанную серию начинается сразу.
+const hlsПрокси = new Map(); // id трека → { url, плейлист, кэш: Map(номер → Promise<Buffer>) }
+const ПРОКСИ_КУСКОВ = 2;
+function черезПрокси(id, upstream) {
+  if (hlsПрокси.get(id)?.url !== upstream) hlsПрокси.set(id, { url: upstream, плейлист: null, кэш: new Map() });
+  return `http://127.0.0.1:${PORT}/hls-proxy/${encodeURIComponent(id)}/index.m3u8`;
+}
+function плейлистПрокси(entry) {
+  entry.плейлист ||= fetch(entry.url, { signal: AbortSignal.timeout(15000) })
+    .then(ответ => { if (!ответ.ok) throw new Error(`плейлист серии: ответ ${ответ.status}`); return ответ.text(); })
+    .then(текст => {
+      const сегменты = [];
+      // Вложенный плейлист (выбор качества) не проксируем — отдаём как есть, с полными адресами.
+      const вложенный = текст.split(/\r?\n/).some(line => line && !line.startsWith('#') && /\.m3u8(\?|$)/i.test(line));
+      const строки = текст.split(/\r?\n/).map(line => {
+        if (line.startsWith('#')) return line.replace(/URI="([^"]+)"/g, (m, uri) => `URI="${new URL(uri, entry.url).href}"`);
+        if (!line.trim()) return line;
+        const адрес = new URL(line.trim(), entry.url).href;
+        if (вложенный) return адрес;
+        сегменты.push(адрес);
+        return `seg/${сегменты.length - 1}.ts`;
+      });
+      return { текст: строки.join('\n'), сегменты };
+    })
+    .catch(error => { entry.плейлист = null; throw error; });
+  return entry.плейлист;
+}
+async function прогретьНачало(id) {
+  const entry = hlsПрокси.get(id);
+  if (!entry) return;
+  const { сегменты } = await плейлистПрокси(entry);
+  for (let n = 0; n < Math.min(ПРОКСИ_КУСКОВ, сегменты.length); n++) {
+    if (entry.кэш.has(n)) continue;
+    const кусок = fetch(сегменты[n], { signal: AbortSignal.timeout(30000) })
+      .then(ответ => { if (!ответ.ok) throw new Error(String(ответ.status)); return ответ.arrayBuffer(); })
+      .then(data => Buffer.from(data));
+    entry.кэш.set(n, кусок);
+    await кусок.catch(() => entry.кэш.delete(n));
+  }
+}
+async function отдатьПрокси(res, id, номер) {
+  const entry = hlsПрокси.get(id);
+  if (!entry) return json(res, 404, { error: 'Серия не найдена.' });
+  const { текст, сегменты } = await плейлистПрокси(entry);
+  if (номер === null) {
+    // Без keep-alive: куски идут раз в 6 с, а сервер рвёт простаивающее соединение
+    // через 5 с — ffmpeg ругался «keepalive request failed» на каждом куске.
+    res.shouldKeepAlive = false;
+    res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store' });
+    return res.end(текст);
+  }
+  res.shouldKeepAlive = false;
+  const готовый = await entry.кэш.get(номер)?.catch(() => null);
+  if (готовый) {
+    res.writeHead(200, { 'Content-Type': 'video/mp2t', 'Content-Length': готовый.length });
+    return res.end(готовый);
+  }
+  if (!сегменты[номер]) return json(res, 404, { error: 'Нет такого куска.' });
+  const стоп = new AbortController();
+  res.on('close', () => стоп.abort());
+  const ответ = await fetch(сегменты[номер], { signal: стоп.signal });
+  if (!ответ.ok || !ответ.body) return json(res, 502, { error: `CDN ответил ${ответ.status}` });
+  res.writeHead(200, { 'Content-Type': 'video/mp2t', ...(ответ.headers.get('content-length') ? { 'Content-Length': ответ.headers.get('content-length') } : {}) });
+  Readable.fromWeb(ответ.body).on('error', () => res.destroy()).pipe(res);
 }
 
 function resolveItem(item) {
@@ -4542,9 +4624,25 @@ function cachedMediaPath(key) {
 }
 
 async function cachedMedia(item, filePath) {
-  const info = await mediaInfoAsync(filePath);
+  const [info, startAt] = await Promise.all([mediaInfoAsync(filePath), первыйКлючевой(filePath)]);
   return { title: item.title, duration: info.duration || item.duration, combinedUrl: filePath, videoUrl: null, audioUrl: null,
-    hasVideo: info.hasVideo, hasAudio: info.hasAudio, cached: true, unityCompatible: info.unityCompatible };
+    hasVideo: info.hasVideo, hasAudio: info.hasAudio, cached: true, unityCompatible: info.unityCompatible, startAt };
+}
+
+// Скачанные серии с Kodik начинаются не с ключевого кадра: первый — на 2-й
+// секунде, до него «Invalid NAL unit» и нечего показать. ffmpeg ждал его в
+// реальном времени, и каждая серия выходила в эфир через ~2,2 с. Стартуем
+// сразу с первого ключевого кадра. Ответ на файл запоминаем.
+const ключевыеКадры = new Map();
+async function первыйКлючевой(filePath) {
+  if (ключевыеКадры.has(filePath)) return ключевыеКадры.get(filePath);
+  const result = await spawnCollect('ffprobe', ['-v', 'quiet', '-select_streams', 'v:0', '-read_intervals', '%+8',
+    '-show_entries', 'packet=pts_time,flags', '-of', 'csv=p=0', filePath], 8000).catch(() => null);
+  const строка = String(result?.stdout || '').split(/\r?\n/).find(line => /,K/.test(line));
+  const время = строка ? Number(строка.split(',')[0]) : 0;
+  const startAt = Number.isFinite(время) && время > 0.3 && время < 8 ? время : 0;
+  ключевыеКадры.set(filePath, startAt);
+  return startAt;
 }
 
 // На тесном диске кеш ужимается: иначе он доедает остаток места, а без места
@@ -4898,6 +4996,34 @@ function preloadNext(index) {
   // prefetchQueue уже берёт следующие треки — отдельный вызов на соседний
   // ролик только дублировал работу.
   if (queue.length) prefetchQueue(index);
+  заранееРазобрать(index);
+}
+
+// Пока соседний ролик не скачан, переход на него ждал разбора ссылки (у серий
+// аниме ~2 с, у YouTube 2–4 с) — и лишь потом ffmpeg начинал открывать сеть.
+// Разбираем соседей сразу при старте трека, а следующий — ещё раз за 90 с до
+// конца: разбор живёт 12 минут, серия дольше. Скачанные не трогаем.
+let таймерРазбора = null;
+function заранееРазобрать(index) {
+  clearTimeout(таймерРазбора);
+  const сосед = i => {
+    const item = queue[(i + queue.length) % queue.length];
+    if (!item || item.local || item.direct || item.live || item.unavailable || item.id === currentId) return null;
+    if (cachedMediaPath(cacheKey(item)) || mediaFailure(item.id)?.permanent) return null;
+    return item;
+  };
+  const разобрать = item => { if (item) resolveItem(item).then(() => item.anime && прогретьНачало(item.id)).catch(() => {}); };
+  const следующий = сосед(index + 1), прошлый = index > 0 || config.loopMode === 'all' ? сосед(index - 1) : null;
+  // Куски в памяти держим только у соседей: остальное — лишние мегабайты.
+  const оставить = new Set([currentId, следующий?.id, прошлый?.id]);
+  for (const [id, entry] of hlsПрокси) if (!оставить.has(id)) entry.кэш.clear();
+  разобрать(следующий);
+  разобрать(прошлый);
+  const осталось = (Number(currentDuration) || 0) - sourcePosition;
+  if (осталось > 12 * 60) {
+    таймерРазбора = setTimeout(() => { if (activeKind === 'queue' && queueIndex === index) разобрать(сосед(index + 1)); }, (осталось - 90) * 1000);
+    таймерРазбора.unref?.();
+  }
 }
 
 // Переключение на трек, который ещё не скачан, стоит секунд: yt-dlp сначала
@@ -4926,6 +5052,7 @@ const ПАУЗА_ПОВТОРА = 120;
 
 let prefetching = false;
 let prefetchPending = null;
+let одинаковыхОшибок = 0, прошлаяОшибка = '';
 async function prefetchQueue(fromIndex = queueIndex) {
   if (!queue.length) return;
   // Просьбу прогреть, пришедшую посреди прогрева, не теряем: её шлёт старт
@@ -4960,10 +5087,21 @@ async function prefetchQueue(fromIndex = queueIndex) {
         // источника: откладывать ролик на 5 минут нельзя, прогрев вернётся сам.
         if (error.cancelled) continue;
         declineCache(item.id, error.message);
-        log(`Прогрев «${item.title}»: ${error.message}`);
+        // Одна и та же ошибка у нескольких роликов подряд — это не ролики, а
+        // общая причина (сайт, сеть, загрузчик). Говорим один раз и понятно,
+        // а не строчкой на каждую из двадцати серий.
+        const суть = String(error.message).replace(/https?:\/\/\S+/g, '').trim();
+        одинаковыхОшибок = суть === прошлаяОшибка ? одинаковыхОшибок + 1 : 1;
+        прошлаяОшибка = суть;
+        if (одинаковыхОшибок <= 2) log(`Не удалось заранее скачать «${item.title}»: ${error.message.slice(0, 200)} — ролик сыграет прямо из сети`);
+        if (одинаковыхОшибок === 3) {
+          log(`Прогрев остановлен: у нескольких роликов подряд одна ошибка («${суть.slice(0, 120)}»). Ролики будут играть из сети; проверьте ссылку или интернет`);
+          break;
+        }
       }
     }
   } finally {
+    одинаковыхОшибок = 0; прошлаяОшибка = '';
     prefetching = false;
     if (prefetchPending !== null && !shuttingDown) {
       const следующий = prefetchPending;
@@ -5201,6 +5339,7 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
   pausedPosition = sourcePosition;
   queuePaused = false;
   log(`Подготовка: ${item.title}`);
+  const началоПодготовки = Date.now();
   // Перемотка и переход заставку не поднимают — рассчитано на то, что источник
   // откроется за доли секунды. Но разбор ссылки или докачка идут секундами, и
   // всё это время релею нечего слать: край замирал, сторож принимал это за
@@ -5236,6 +5375,7 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
     // A seek/jump issued while yt-dlp was resolving supersedes this item.
     if (manualTransition) return;
     currentDuration = media.duration || item.duration || null;
+    if (!sourcePosition && media.startAt) sourcePosition = pausedPosition = media.startAt;
     stopStandby();
     const offset = markProducerTimestamp(nextProducerTimestamp());
     const child = onAirProducer(spawn('ffmpeg', queueProducerArgs(media, offset, sourcePosition, control), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
@@ -5259,7 +5399,8 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
     } else pipeToRelay(child);
     currentStartedAt = Date.now();
     playbackBusy = false;
-    log(`Сейчас играет: ${item.title}`);
+    // Время до первого куска — то, сколько зрители ждали переход.
+    child.stdout.once('data', () => log(`Сейчас играет: ${item.title} — в эфире через ${((Date.now() - началоПодготовки) / 1000).toFixed(1)} с`));
     attachProcessLogs(child, 'Track');
     preloadNext(queueIndex);
     child.on('close', code => {
@@ -5393,8 +5534,14 @@ function currentSourcePosition() {
   return sourcePosition + (currentStartedAt ? (Date.now() - currentStartedAt) / 1000 * (Number(config.playbackSpeed) || 1) : 0);
 }
 
+const часы = секунды => { const t = Math.max(0, Math.round(Number(секунды) || 0)), ч = Math.floor(t / 3600), м = Math.floor(t / 60) % 60, с = String(t % 60).padStart(2, '0'); return ч ? `${ч}:${String(м).padStart(2, '0')}:${с}` : `${м}:${с}`; };
 function transitionQueue(type, value = null) {
   if (activeKind !== 'queue') throw new Error('Очередь сейчас не играет.');
+  const название = queue.find(entry => entry.id === currentId)?.title || '';
+  if (type === 'pause' && !queuePaused) log(`Пауза: «${название}» на ${часы(Number.isFinite(Number(value)) ? value : currentSourcePosition())}`);
+  else if (type === 'resume' && queuePaused) log(`Продолжаю «${название}» с ${часы(pausedPosition)}`);
+  else if (type === 'seek') log(`Перемотка «${название}» на ${часы(value)}`);
+  else if (type === 'next' || type === 'previous') log(type === 'next' ? 'Следующее видео по кнопке' : 'Предыдущее видео по кнопке');
   if (type === 'pause') {
     if (queuePaused) return;
     abortHandoff();
@@ -6136,6 +6283,8 @@ const server = http.createServer(async (req, res) => {
     if (origin && origin !== OWN_ORIGIN && !publicTunnelHost) {
       return json(res, 403, { error: 'Запрос со стороннего сайта.' });
     }
+    const прокси = req.method === 'GET' && url.pathname.match(/^\/hls-proxy\/([^/]+)\/(?:index\.m3u8|seg\/(\d+)\.ts)$/);
+    if (прокси) return await отдатьПрокси(res, decodeURIComponent(прокси[1]), прокси[2] === undefined ? null : Number(прокси[2]));
     if (req.method === 'GET' && url.pathname === '/api/status') return json(res, 200, status(url.searchParams.get('logs') !== '0'));
     if (req.method === 'GET' && url.pathname === '/api/capture-preview') {
       if (existsSync(CAPTURE_PREVIEW)) { res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store' }); createReadStream(CAPTURE_PREVIEW).pipe(res); return; }
@@ -6177,12 +6326,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/cache/clear') {
       // Играющий и качающийся треки не трогаем: файл занят, и эфир оборвётся.
+      let удалено = 0, оставлено = 0;
       try {
         for (const name of readdirSync(mediaCacheDir())) {
-          if (занятыеКлючиКеша().has(name)) continue;
-          rmSync(join(mediaCacheDir(), name), { recursive: true, force: true });
+          if (занятыеКлючиКеша().has(name)) { оставлено++; continue; }
+          rmSync(join(mediaCacheDir(), name), { recursive: true, force: true }); удалено++;
         }
       } catch {}
+      log(`Скачанные видео удалены: ${удалено}${оставлено ? `, оставлено занятых эфиром — ${оставлено}` : ''}`);
       cleanupStorage();
       return json(res, 200, status());
     }
@@ -6286,6 +6437,12 @@ const server = http.createServer(async (req, res) => {
       req.on('close', () => { слушателиЭнергии.delete(res); if (!слушателиЭнергии.size) остановитьЭнергию(); });
       return;
     }
+    if (req.method === 'POST' && url.pathname === '/api/servers/speedtest') {
+      if (activeKind) throw new Error('Остановите эфир — замер забьёт канал и помешает зрителям.');
+      if (!remoteRtspTarget()) throw new Error('Сначала выберите свой сервер.');
+      замеритьКаналСервера('по кнопке').catch(() => {});
+      return json(res, 200, status());
+    }
     if (req.method === 'POST' && url.pathname === '/api/tunnels/test') {
       if (activeKind) throw new Error('Остановите эфир — проверка забьёт канал и помешает зрителям.');
       проверитьТуннели().catch(error => log(`Проверка туннелей: ${error.message}`));
@@ -6349,6 +6506,7 @@ const server = http.createServer(async (req, res) => {
       if (from !== to) {
         const [item] = queue.splice(from, 1);
         queue.splice(to, 0, item);
+        log(`Порядок: «${item.title}» перенесено с ${from + 1}-го на ${to + 1}-е место`);
         if (currentId) queueIndex = Math.max(0, queue.findIndex(entry => entry.id === currentId));
         saveQueue(); prefetchQueue(0);
       }
@@ -6357,6 +6515,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'DELETE' && url.pathname.startsWith('/api/queue/')) {
       const id = decodeURIComponent(url.pathname.split('/').pop());
       const removedIndex = queue.findIndex(item => item.id === id);
+      if (removedIndex >= 0) log(`Убрано из очереди: «${queue[removedIndex].title}»${id === currentId && activeKind === 'queue' ? ' — оно играло, перехожу к следующему' : ''}`);
       queue = queue.filter(item => item.id !== id); forgetItemState(id); saveQueue();
       // Удаление играющего трека раньше оставляло висячий currentId и сбитый
       // queueIndex: UI показывал «эфир не запущен», а очередь после трека вставала.
@@ -6445,6 +6604,10 @@ const server = http.createServer(async (req, res) => {
         log(config.remoteBindAddress ? `Поток на свой сервер — через сетевую карту ${config.remoteBindAddress}` : 'Поток на свой сервер — как решит система');
         if (relayProcess) syncRtspPush();
       }
+      // Свой сервер выбран, сменился или пошёл через другую карту — сразу меряем канал.
+      const каналСменился = previousOutput !== config.outputMode || previousConfig.activeServerId !== config.activeServerId
+        || (previousConfig.remoteBindAddress || '') !== config.remoteBindAddress;
+      if (config.outputMode === 'remote' && каналСменился) setTimeout(() => замеритьКаналСервера('сменился путь').catch(() => {}), 2000);
       const encoderChanged = previousEncoderMode !== config.encoderMode;
       if (encoderChanged && !activeKind) {
         encoder = pickEncoder(config.encoderMode);
@@ -6533,6 +6696,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req).catch(() => ({}));
       requireReadyOutput();
       const индекс = body.id ? queue.findIndex(item => item.id === String(body.id)) : 0;
+      log(`Старт эфира очереди с «${queue[индекс < 0 ? 0 : индекс]?.title || 'первого видео'}» (всего ${queue.length})`);
       startQueue(индекс < 0 ? 0 : индекс);
       return json(res, 200, status());
     }
@@ -6548,7 +6712,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/skip') { transitionQueue('next'); return json(res, 200, status()); }
     if (req.method === 'POST' && url.pathname === '/api/playback') { const body = await readBody(req); return json(res, 200, await playbackCommand(body)); }
-    if (req.method === 'POST' && url.pathname === '/api/stop') { stopActive(); return json(res, 200, status()); }
+    if (req.method === 'POST' && url.pathname === '/api/stop') { if (activeKind) log(activeKind === 'screen' ? 'Эфир остановлен: захват экрана выключен' : 'Эфир остановлен по кнопке'); stopActive(); return json(res, 200, status()); }
     if (req.method === 'POST' && url.pathname === '/api/shutdown') {
       shuttingDown = true;
       // Без этой строки штатный выход в журнале не отличить от падения.
@@ -6635,6 +6799,8 @@ server.listen(PORT, HOST, () => {
   restoreRoutedApps();
   дозаполнитьДлительности();
   startRemoteBridge();
+  // Запустились в режиме своего сервера — меряем канал, пока нет эфира.
+  if (config.outputMode === 'remote') setTimeout(() => замеритьКаналСервера('запуск программы').catch(() => {}), 6000);
   vpnInterface = detectVpn();
   if (vpnInterface) log(`Включён VPN (${vpnInterface}) — проверю, идёт ли поток через него или по правилу мимо`);
   setInterval(() => { vpnInterface = detectVpn(); }, 30000).unref?.();

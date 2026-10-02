@@ -7,9 +7,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>VRCast Bridge</AssemblyName>
     <RootNamespace>VRCastBridge.Launcher</RootNamespace>
-    <Version>0.60.4</Version>
-    <FileVersion>0.60.4.0</FileVersion>
-    <AssemblyVersion>0.60.4.0</AssemblyVersion>
+    <Version>0.60.5</Version>
+    <FileVersion>0.60.5.0</FileVersion>
+    <AssemblyVersion>0.60.5.0</AssemblyVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
@@ -28,6 +28,7 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" />
     <EmbeddedResource Include="..\src\server.js" LogicalName="VRCast.Payload.server.js" />
     <EmbeddedResource Include="..\src\anime.js" LogicalName="VRCast.Payload.anime.js" />
+    <EmbeddedResource Include="..\server\install.sh" LogicalName="VRCast.Payload.install.sh" />
     <EmbeddedResource Include="..\public\index.html" LogicalName="VRCast.Payload.index.html" />
     <EmbeddedResource Include="..\public\styles.css" LogicalName="VRCast.Payload.styles.css" />
     <EmbeddedResource Include="..\public\ui.css" LogicalName="VRCast.Payload.ui.css" />

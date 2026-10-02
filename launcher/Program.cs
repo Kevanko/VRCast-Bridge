@@ -134,6 +134,7 @@ internal static class Program
         {
             ["VRCast.Payload.server.js"] = Path.Combine("src", "server.js"),
             ["VRCast.Payload.anime.js"] = Path.Combine("src", "anime.js"),
+            ["VRCast.Payload.install.sh"] = Path.Combine("server", "install.sh"),
             ["VRCast.Payload.index.html"] = Path.Combine("public", "index.html"),
             ["VRCast.Payload.styles.css"] = Path.Combine("public", "styles.css"),
             ["VRCast.Payload.ui.css"] = Path.Combine("public", "ui.css"),
