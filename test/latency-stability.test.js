@@ -8,14 +8,14 @@ import { join } from 'node:path';
 
 // Отдельный порт и каталог: этот файл запускается своим процессом и не должен
 // драться за 4717х-порт с основным набором тестов.
-const port = Number(process.env.VRCAST_TEST_PORT || 48717) + 2;
+const port = Number(process.env.VRCAST_TEST_PORT || 48717) + 50;
 let server;
 let dataDirectory;
 
 function launchServer() {
   return spawn(process.execPath, ['src/server.js'], {
     cwd: new URL('..', import.meta.url),
-    env: { ...process.env, VRCAST_PORT: String(port), LOCALAPPDATA: dataDirectory },
+    env: { ...process.env, VRCAST_PORT: String(port), LOCALAPPDATA: dataDirectory, XDG_DATA_HOME: dataDirectory },
     windowsHide: true, stdio: 'ignore',
   });
 }

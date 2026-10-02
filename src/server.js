@@ -1,14 +1,15 @@
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { availableParallelism, constants as osConstants, networkInterfaces, setPriority } from 'node:os';
-import { basename, dirname, extname, join, normalize, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { connect as netConnect, createServer as netCreateServer } from 'node:net';
 import { Readable } from 'node:stream';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
+import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
 // VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
 const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.60.5';
@@ -31,7 +32,7 @@ function watchFreeSpace() {
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PUBLIC_DIR = join(ROOT, 'public');
 const STANDBY_IMAGE = join(PUBLIC_DIR, 'standby.png');
-const DATA_DIR = join(process.env.LOCALAPPDATA || process.cwd(), 'VRCastBridge');
+const DATA_DIR = join(dataBase(), 'VRCastBridge');
 const HLS_DIR = join(DATA_DIR, 'hls');
 const THUMB_DIR = join(DATA_DIR, 'thumbs');
 const DEFAULT_CACHE_DIR = join(DATA_DIR, 'media-cache');
@@ -253,7 +254,7 @@ function saveUnityBuildState() {
 
 function ytdlpPath() {
   if (existsSync(YTDLP_UPDATED)) return YTDLP_UPDATED;
-  const own = join(DATA_DIR, 'tools', 'yt-dlp.exe');
+  const own = join(DATA_DIR, 'tools', exe('yt-dlp'));
   if (existsSync(own)) return own;
   if (existsSync(YTDLP_BUNDLED)) return YTDLP_BUNDLED;
   return 'yt-dlp';
@@ -351,15 +352,7 @@ function encoderWorks(name) {
 // них 200 МБ. Теперь они докачиваются при первом запуске в папку данных, и
 // туда же кладётся ffmpeg, если его нет в системе.
 const TOOL_DIR = join(DATA_DIR, 'tools');
-const TOOL_SOURCES = {
-  'yt-dlp.exe': { label: 'загрузчик видео', url: 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' },
-  'cloudflared.exe': { label: 'публичные ссылки', url: 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' },
-  'mediamtx.exe': { label: 'мгновенный канал', github: 'bluenviron/mediamtx', asset: /windows_amd64\.zip$/i, unpack: ['mediamtx.exe'] },
-  // ffmpeg тянем с GitHub, а не с gyan.dev: за VPN gyan отдаёт свои 100+ МБ по
-  // 0.2 МБ/с (минуты и таймаут), а GitHub-зеркало — 8 МБ/с. Нужна сборка gpl:
-  // в ней есть libx264, на который откатывается кодирование на процессоре.
-  'ffmpeg.exe': { label: 'кодировщик', github: 'BtbN/FFmpeg-Builds', tag: 'latest', asset: /win64-gpl\.zip$/i, unpack: ['ffmpeg.exe', 'ffprobe.exe'] },
-};
+const TOOL_SOURCES = toolSources();
 let toolDownloads = {};
 
 // Своя папка с ffmpeg должна попасть в PATH до первых проверок ниже. Раньше
@@ -367,8 +360,8 @@ let toolDownloads = {};
 // находила ffmpeg, запоминала «видеокарты нет», и у всех, у кого ffmpeg не
 // стоит в системе, кодировал процессор. Заставка на старте тоже не поднималась.
 function addToolDirToPath() {
-  if (existsSync(join(TOOL_DIR, 'ffmpeg.exe')) && !String(process.env.PATH || '').includes(TOOL_DIR)) {
-    process.env.PATH = `${TOOL_DIR};${process.env.PATH || ''}`;
+  if (existsSync(join(TOOL_DIR, exe('ffmpeg'))) && !String(process.env.PATH || '').includes(TOOL_DIR)) {
+    process.env.PATH = `${TOOL_DIR}${delimiter}${process.env.PATH || ''}`;
   }
 }
 addToolDirToPath();
@@ -378,17 +371,17 @@ function toolPath(name) {
   if (existsSync(own)) return own;
   const bundled = join(ROOT, 'tools', name);
   if (existsSync(bundled)) return bundled;
-  return '';
+  return IS_LINUX ? which(name) : '';
 }
 
-const CLOUDFLARED = () => toolPath('cloudflared.exe');
-const PINGGY = () => toolPath('pinggy.exe');
-const MEDIAMTX = () => toolPath('mediamtx.exe');
-const PLINK = () => toolPath('plink.exe');
-const YTDLP_BUNDLED = join(ROOT, 'tools', 'yt-dlp.exe');
+const CLOUDFLARED = () => toolPath(exe('cloudflared'));
+const PINGGY = () => toolPath(exe('pinggy'));
+const MEDIAMTX = () => toolPath(exe('mediamtx'));
+const PLINK = () => toolPath(exe('plink'));
+const YTDLP_BUNDLED = join(ROOT, 'tools', exe('yt-dlp'));
 // Обновлённая копия живёт в данных приложения: она переживает обновление
 // программы и не затирается распаковкой встроенных компонентов.
-const YTDLP_UPDATED = join(DATA_DIR, 'tools', 'yt-dlp.exe');
+const YTDLP_UPDATED = join(DATA_DIR, 'tools', exe('yt-dlp'));
 const SERVER_RTSP_PORT = 8554;
 const PINGGY_DATA_DIR = join(DATA_DIR, 'pinggy-runtime');
 // Версии на старте не спрашиваем запуском самих утилит: yt-dlp (PyInstaller)
@@ -398,7 +391,7 @@ const PINGGY_DATA_DIR = join(DATA_DIR, 'pinggy-runtime');
 // проверка. ffmpeg оставляем — его запуск дёшев (~30 мс) и точность тут важна.
 let tools = {
   ffmpeg: toolAvailable('ffmpeg', ['-version']),
-  ytdlp: existsSync(YTDLP_UPDATED) || existsSync(join(DATA_DIR, 'tools', 'yt-dlp.exe')) || existsSync(YTDLP_BUNDLED),
+  ytdlp: existsSync(YTDLP_UPDATED) || Boolean(toolPath(exe('yt-dlp'))),
   cloudflared: Boolean(CLOUDFLARED()),
   pinggy: Boolean(PINGGY()),
   mediamtx: Boolean(MEDIAMTX()),
@@ -445,6 +438,7 @@ function stopPinggyDaemon() {
   pinggyStarted = false;
   const stopper = spawn(PINGGY(), ['daemon', 'stop'], { windowsHide: true, stdio: 'ignore', env: pinggyEnvironment() });
   stopper.on('error', () => {});
+  if (!IS_WIN) return;
   const escaped = PINGGY().replace(/'/g, "''");
   spawnCollect('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     `$target='${escaped}'; Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $target } | ForEach-Object { $_.ProcessId }`], 8000)
@@ -1768,19 +1762,21 @@ async function downloadTool(name) {
       const unpackDir = join(TOOL_DIR, `${name}-unpack`);
       rmSync(unpackDir, { recursive: true, force: true });
       mkdirSync(unpackDir, { recursive: true });
-      const systemTar = join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe');
-      const result = await spawnCollect(existsSync(systemTar) ? systemTar : 'tar', ['-xf', temporary, '-C', unpackDir], 180000);
+      const systemTar = IS_WIN ? join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe') : '';
+      const result = await spawnCollect(systemTar && existsSync(systemTar) ? systemTar : 'tar', ['-xf', temporary, '-C', unpackDir], 180000);
       if (result.status !== 0) logDetail(`Распаковка ${name}: ${String(result.stderr || '').slice(0, 200)}`);
       if (result.status !== 0) throw new Error('не удалось распаковать архив');
       for (const wanted of source.unpack) {
         const found = findFile(unpackDir, wanted);
         if (!found) throw new Error(`в архиве нет ${wanted}`);
         copyFileSync(found, join(TOOL_DIR, wanted));
+        if (!IS_WIN) chmodSync(join(TOOL_DIR, wanted), 0o755);
       }
       rmSync(unpackDir, { recursive: true, force: true });
       rmSync(temporary, { force: true });
     } else {
       renameSync(temporary, join(TOOL_DIR, name));
+      if (!IS_WIN) chmodSync(join(TOOL_DIR, name), 0o755);
     }
     toolDownloads = { ...toolDownloads, [name]: { state: 'done', percent: 100, label: source.label } };
     log(`Компонент готов: ${source.label}`);
@@ -1809,7 +1805,7 @@ async function refreshToolsAsync() {
   if (tools.ffmpeg) ffmpegHasZmq = /\bazmq\b/.test((await spawnCollect('ffmpeg', ['-hide_banner', '-filters'], 5000).catch(() => null))?.stdout || '');
   // ytdlpPath() в конце возвращает 'yt-dlp' — оно всегда истинно, поэтому
   // проверяем именно наличие файла, а не путь.
-  tools.ytdlp = existsSync(YTDLP_UPDATED) || existsSync(join(DATA_DIR, 'tools', 'yt-dlp.exe')) || existsSync(YTDLP_BUNDLED);
+  tools.ytdlp = existsSync(YTDLP_UPDATED) || Boolean(toolPath(exe('yt-dlp')));
   tools.cloudflared = Boolean(CLOUDFLARED());
   tools.pinggy = Boolean(PINGGY());
   tools.mediamtx = Boolean(MEDIAMTX());
@@ -1843,7 +1839,7 @@ function importLocalTools() {
   const рядом = join(dirname(exe), 'tools');
   if (!existsSync(рядом)) return;
   mkdirSync(TOOL_DIR, { recursive: true });
-  for (const name of ['pinggy.exe', 'yt-dlp.exe', 'mediamtx.exe', 'cloudflared.exe', 'ffmpeg.exe', 'ffprobe.exe']) {
+  for (const name of [exe('pinggy'), exe('yt-dlp'), exe('mediamtx'), exe('cloudflared'), exe('ffmpeg'), exe('ffprobe')]) {
     const источник = join(рядом, name);
     if (existsSync(источник) && !existsSync(join(TOOL_DIR, name))) {
       try { copyFileSync(источник, join(TOOL_DIR, name)); log(`Взял ${name} из папки рядом с программой`); } catch {}
@@ -1862,11 +1858,11 @@ async function ensureTools() {
   // сразу. Как только они есть, поднимаем локальный эфир и только потом
   // догружаем yt-dlp (нужен лишь для роликов из сети) и cloudflared (туннель).
   const важное = [];
-  if (!tools.ffmpeg) важное.push('ffmpeg.exe');
-  if (!tools.mediamtx) важное.push('mediamtx.exe');
+  if (!tools.ffmpeg) важное.push(exe('ffmpeg'));
+  if (!tools.mediamtx) важное.push(exe('mediamtx'));
   const остальное = [];
-  if (!existsSync(join(TOOL_DIR, 'yt-dlp.exe')) && !existsSync(YTDLP_UPDATED)) остальное.push('yt-dlp.exe');
-  if (!tools.cloudflared) остальное.push('cloudflared.exe');
+  if (!tools.ytdlp) остальное.push(exe('yt-dlp'));
+  if (!tools.cloudflared) остальное.push(exe('cloudflared'));
   const поднять = async () => {
     // Свежескачанный ffmpeg лежит в своей папке — без неё в PATH его не найти.
     addToolDirToPath();
@@ -2838,6 +2834,17 @@ function stopWindowWatcher() {
 
 function startWindowWatcher(handle) {
   stopWindowWatcher();
+  if (IS_LINUX) {
+    // Помощника нет: раз в две секунды сверяем окно со списком X11.
+    const poll = async () => {
+      const окно = (await listWindows().catch(() => [])).find(item => item.handle === String(handle));
+      applyWindowState(!окно ? 'gone' : окно.minimized ? 'minimized' : 'visible');
+    };
+    const timer = setInterval(poll, 2000);
+    timer.unref?.();
+    windowWatcher = { kill: () => clearInterval(timer) };
+    return;
+  }
   const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
   if (!existsSync(helper)) return;
   const child = onAir(spawn(helper, ['--watch', '--hwnd', String(handle)], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
@@ -3039,7 +3046,7 @@ function audioHelperSignature() {
 }
 
 function audioHelperArguments() {
-  if (config.audioMode === 'device') return null;
+  if (IS_LINUX || config.audioMode === 'device') return null;
   // Тишина через помощника нужна, чтобы потом на лету включить звук. Нет
   // помощника — обходимся тишиной из FFmpeg (anullsrc), эфир всё равно пойдёт.
   if (config.audioMode === 'none') return existsSync(join(ROOT, 'tools', 'VRCast.AudioCapture.exe')) ? ['--silence'] : null;
@@ -3177,12 +3184,16 @@ async function startScreenInner() {
     const monitors = await listMonitors();
     проверитьОтмену();
     captureRect = monitors.find(item => item.id === config.captureMonitorId) || monitors.find(item => item.primary) || monitors[0];
-    if (!captureRect) throw new Error('Windows не вернула список мониторов.');
+    if (!captureRect) throw new Error('Система не вернула список мониторов.');
   } else if (config.captureMode === 'region') {
     captureRect = { x: Number(config.regionX) || 0, y: Number(config.regionY) || 0,
       width: Math.max(64, Number(config.regionWidth) || 1280), height: Math.max(64, Number(config.regionHeight) || 720) };
   }
-  if (config.captureMode === 'window' && windowCaptureState === 'visible') {
+  if (IS_LINUX && (config.captureMode !== 'window' || windowCaptureState === 'visible')) {
+    if (process.env.XDG_SESSION_TYPE === 'wayland') log('Wayland: захват экрана идёт через XWayland и может показывать только X11-окна');
+    if (config.captureMode === 'window') startWindowWatcher(config.captureWindowHandle);
+    args.push('-fflags', 'nobuffer', ...очередьВхода(16), ...screenInput({ rect: captureRect, windowId: config.captureMode === 'window' ? config.captureWindowHandle : null, fps: profile.fps }));
+  } else if (config.captureMode === 'window' && windowCaptureState === 'visible') {
     const captureWidth = width;
     const captureHeight = height;
     stopWindowWatcher();
@@ -3197,12 +3208,11 @@ async function startScreenInner() {
     // темпом, поэтому «-re» здесь не нужен — так же, как и для gdigrab.
     args.push(...очередьВхода(16), '-f', 'lavfi', '-i', `ddagrab=output_idx=${ddagrabOutput}:framerate=${profile.fps}`);
   } else {
-    args.push('-fflags', 'nobuffer', ...очередьВхода(16), '-f', 'gdigrab', '-draw_mouse', '1', '-framerate', String(profile.fps));
-    if (captureRect) args.push('-offset_x', String(captureRect.x), '-offset_y', String(captureRect.y), '-video_size', `${captureRect.width}x${captureRect.height}`, '-i', 'desktop');
-    else args.push('-i', 'desktop');
+    args.push('-fflags', 'nobuffer', ...очередьВхода(16), ...screenInput({ rect: captureRect, fps: profile.fps }));
   }
 
   let audioHelperArgs = audioHelperArguments();
+  const pulse = IS_LINUX ? pulseSource(config) : null;
   if (audioHelperArgs) {
     // Захват процесса идёт ПОСЛЕ регулятора громкости Windows: «тише у себя»
     // помощник компенсирует усилением (см. SessionMuter в audio-helper).
@@ -3211,7 +3221,9 @@ async function startScreenInner() {
     // аудио-таймлайн на сотни секунд. Хелпер сам держит темп 1.0x по Stopwatch,
     // поэтому счётчик семплов ffmpeg — точные и монотонные таймстемпы.
     args.push('-fflags', 'nobuffer', ...очередьВхода(16), '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:3', '-map', '0:v:0', '-map', '1:a:0');
-  } else if (config.audioMode === 'device' && config.captureAudioDevice) {
+  } else if (pulse) {
+    args.push(...очередьВхода(32), '-f', 'pulse', '-i', pulse, '-map', '0:v:0', '-map', '1:a:0');
+  } else if (!IS_LINUX && config.audioMode === 'device' && config.captureAudioDevice) {
     args.push(...очередьВхода(32), '-f', 'dshow', '-i', `audio=${config.captureAudioDevice}`, '-map', '0:v:0', '-map', '1:a:0');
   } else args.push('-re', '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0');
   // Кадр от Desktop Duplication лежит в памяти видеокарты — забираем его перед фильтрами.
@@ -3219,7 +3231,7 @@ async function startScreenInner() {
   args.push('-vf', `${fromGpu}scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
     // Громкость системного звука и приложения крутит сам помощник (на лету).
     // Микрофон идёт через DirectShow мимо него — ему усиление ставим здесь.
-    '-af', `aresample=async=1:first_pts=0:min_hard_comp=0.100,${config.audioMode === 'device' ? `volume=${Math.max(0, Math.min(6, Number(config.captureVolume) || 0)).toFixed(2)},` : ''}alimiter=limit=0.97:level=disabled`,
+    '-af', `aresample=async=1:first_pts=0:min_hard_comp=0.100,${config.audioMode === 'device' || pulse ? `volume=${Math.max(0, Math.min(6, Number(config.captureVolume) || 0)).toFixed(2)},` : ''}alimiter=limit=0.97:level=disabled`,
     '-r', String(profile.fps), '-fps_mode', 'cfr', ...mpegTsOutputArgs(profile));
   проверитьОтмену();
   runScreenProcess(args, audioHelperArgs, windowHelperArgs);
@@ -3269,7 +3281,9 @@ function startMediaMtx() {
     const порт = строка.match(/listen (?:tcp|udp) [^:]*:(\d+): bind/i)?.[1];
     mediaMtxLastError = порт
       ? `порт ${порт} занят другой программой или зарезервирован Windows (Hyper-V/WSL) — задайте другой порт через VRCAST_PORT`
-      : строка.slice(0, 200);
+      : /inotify/i.test(строка)
+        ? 'в Linux исчерпан лимит inotify — выполните: sudo sysctl fs.inotify.max_user_instances=512'
+        : строка.slice(0, 200);
   };
   child.stdout?.setEncoding('utf8'); child.stdout?.on('data', разобратьВывод);
   child.stderr?.setEncoding('utf8'); child.stderr?.on('data', разобратьВывод);
@@ -3720,7 +3734,7 @@ async function проверитьМаршрут() {
   const черезКарту = config.outputMode === 'remote' || (config.outputMode === 'tunnel' && tunnelProvider !== 'Pinggy');
   if (черезКарту && выбраннаяКарта()) { vpnRoute = 'direct'; return; }
   // Наружу поток несут только эти процессы: ffmpeg (свой сервер) и клиенты туннелей.
-  const наши = /^(ffmpeg|cloudflared|pinggy|ssh|plink)\.exe$/i;
+  const наши = /^(ffmpeg|cloudflared|pinggy|ssh|plink)(\.exe)?$/i;
   for (const pipe of mihomoPipes()) {
     const list = await mihomoConnections(pipe);
     if (!list) continue;
@@ -5403,7 +5417,10 @@ async function startQueueItem(index, position = 0, generation = playGeneration, 
     child.stdout.once('data', () => log(`Сейчас играет: ${item.title} — в эфире через ${((Date.now() - началоПодготовки) / 1000).toFixed(1)} с`));
     attachProcessLogs(child, 'Track');
     preloadNext(queueIndex);
-    child.on('close', code => {
+    child.on('close', (exitCode, signal) => {
+      // В Linux убитый сигналом процесс закрывается с кодом null: это авария
+      // (например, OOM-killer), а не конец файла.
+      const code = exitCode ?? (signal ? 1 : 0);
       // A rapid seek/jump may already have replaced this producer.  In that
       // case its late close event must not advance or stop the new track.
       if (activeProcess !== child) return;
@@ -5923,6 +5940,7 @@ async function addLocalFiles(paths) {
 
 async function listAudioDevices() {
   if (!tools.ffmpeg) return [];
+  if (IS_LINUX) return (await listAudioLinux(spawnCollect)).sources;
   const result = await spawnCollect('ffmpeg', ['-hide_banner', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'], 10000);
   const devices = [];
   for (const line of String(result.stderr || '').split(/\r?\n/)) {
@@ -5933,6 +5951,7 @@ async function listAudioDevices() {
 }
 
 async function listAudioOutputs() {
+  if (IS_LINUX) return (await listAudioLinux(spawnCollect)).sinks;
   const helper = join(ROOT, 'tools', 'VRCast.AudioCapture.exe');
   if (!existsSync(helper)) return [];
   const result = await spawnCollect(helper, ['--list-devices'], 10000);
@@ -5980,7 +5999,7 @@ async function ddagrabIndexFor(monitor) {
 // просто не запускается), спрашиваем размер рабочего стола у самого ffmpeg —
 // иначе захват экрана становится недоступен вовсе.
 async function desktopAsMonitor() {
-  const проба = await spawnCollect('ffmpeg', ['-hide_banner', '-f', 'gdigrab', '-i', 'desktop',
+  const проба = await spawnCollect('ffmpeg', ['-hide_banner', ...screenInput({ fps: 1 }),
     '-frames:v', '1', '-f', 'null', '-'], 12000);
   const размер = `${проба.stderr || ''}`.match(/,\s(\d{3,5})x(\d{3,5})[,\s]/);
   if (!размер) return [];
@@ -5989,6 +6008,11 @@ async function desktopAsMonitor() {
 }
 
 async function listMonitors() {
+  if (IS_LINUX) {
+    const список = await listMonitorsX11(spawnCollect);
+    if (список.length) return список;
+    return desktopAsMonitor();
+  }
   const script = `[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { [pscustomobject]@{ id=$_.DeviceName; name=if($_.Primary){'Основной монитор'}else{$_.DeviceName}; x=$_.Bounds.X; y=$_.Bounds.Y; width=$_.Bounds.Width; height=$_.Bounds.Height; primary=$_.Primary } } | ConvertTo-Json -Compress`;
   const список = await runPowerShellJson(script).catch(() => []);
   if (список.length) return список;
@@ -6009,6 +6033,10 @@ async function listWindows() {
 }
 
 async function listWindowsRaw() {
+  if (IS_LINUX) {
+    const окна = await listWindowsX11(spawnCollect);
+    return окна.map(({ path, ...окно }) => ({ ...окно, icon: '' }));
+  }
   const script = `[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -TypeDefinition @'
 using System; using System.Text; using System.Diagnostics; using System.Collections.Generic; using System.Runtime.InteropServices;
 public static class VRCastWindows {
@@ -6047,6 +6075,7 @@ function iconKey(path) {
 }
 
 async function ensureAppIcons(paths) {
+  if (!IS_WIN) return;
   const нужны = [...new Set(paths.filter(Boolean))].filter(path => !existsSync(join(ICON_DIR, `${iconKey(path)}.png`)));
   if (!нужны.length) return;
   mkdirSync(ICON_DIR, { recursive: true });
@@ -6093,7 +6122,7 @@ async function ensureLivePreview() {
   stopLivePreview();
 
   const кадры = '15';
-  if (config.captureMode === 'window') {
+  if (config.captureMode === 'window' && IS_WIN) {
     const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
     if (!existsSync(helper)) return false;
     const захват = inBackground(spawn(helper, ['--hwnd', String(rect.handle), '--width', '960', '--height', '540', '--fps', кадры],
@@ -6107,9 +6136,8 @@ async function ensureLivePreview() {
     перевод.on('close', () => { try { захват.stdin.end(); } catch {} });
     previewProcess = { kill: () => { try { захват.stdin.end(); } catch {} try { перевод.kill('SIGTERM'); } catch {} } };
   } else {
-    const args = ['-hide_banner', '-loglevel', 'error', '-f', 'gdigrab', '-draw_mouse', '1', '-framerate', кадры];
-    if (rect) args.push('-offset_x', String(rect.x), '-offset_y', String(rect.y), '-video_size', `${rect.width}x${rect.height}`, '-i', 'desktop');
-    else args.push('-i', 'desktop');
+    const args = ['-hide_banner', '-loglevel', 'error',
+      ...screenInput({ rect, windowId: config.captureMode === 'window' ? rect.handle : null, fps: кадры })];
     args.push('-vf', 'scale=960:-2:flags=fast_bilinear', '-q:v', '5', '-update', '1', '-y', CAPTURE_PREVIEW);
     previewProcess = inBackground(spawn('ffmpeg', args, { windowsHide: true, stdio: 'ignore' }));
   }
@@ -6135,10 +6163,12 @@ async function generateCapturePreview() {
     return { url: `/api/capture-preview?time=${Date.now()}`, rect, live: true };
   }
   const rect = await selectedCaptureRect();
-  const args = ['-hide_banner', '-loglevel', 'error', '-f', 'gdigrab', '-draw_mouse', '1', '-framerate', '1'];
+  const args = ['-hide_banner', '-loglevel', 'error'];
   if (config.captureMode === 'window') {
     if (!rect) return { unavailable: true, minimized: false, rect: null };
     if (rect.minimized) return { unavailable: false, minimized: true, rect };
+  }
+  if (config.captureMode === 'window' && IS_WIN) {
     const helper = join(ROOT, 'tools', 'VRCast.WindowCapture.exe');
     if (!existsSync(helper)) throw new Error('Компонент изолированного захвата окна не найден.');
     const capture = inBackground(spawn(helper, ['--hwnd', rect.handle, '--width', '960', '--height', '540', '--fps', '5'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
@@ -6153,8 +6183,8 @@ async function generateCapturePreview() {
       converter.on('error', reject); capture.on('error', reject);
     });
     return { url: `/api/capture-preview?time=${Date.now()}`, rect };
-  } else if (rect) args.push('-offset_x', String(rect.x), '-offset_y', String(rect.y), '-video_size', `${rect.width}x${rect.height}`, '-i', 'desktop');
-  else args.push('-i', 'desktop');
+  }
+  args.push(...screenInput({ rect, windowId: config.captureMode === 'window' ? rect.handle : null, fps: 1 }));
   args.push('-frames:v', '1', '-vf', 'scale=960:-2:flags=fast_bilinear', '-q:v', '3', '-y', CAPTURE_PREVIEW);
   const result = await spawnCollect('ffmpeg', args, 12000);
   if (result.status !== 0 || !existsSync(CAPTURE_PREVIEW)) throw new Error((result.stderr || 'Не удалось получить изображение источника.').trim().split(/\r?\n/).pop());
@@ -6321,7 +6351,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/logs/open') {
       // Открыть папку через проводник: копировать путь руками неудобно.
-      spawn('explorer.exe', [DATA_DIR], { windowsHide: true, detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+      spawn(IS_WIN ? 'explorer.exe' : 'xdg-open', [DATA_DIR], { windowsHide: true, detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
       return json(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/api/cache/clear') {
