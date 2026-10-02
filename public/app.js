@@ -999,7 +999,7 @@ function paintLogs(state=ui.status) {
 function syncConfigControls(state) {
   if (Date.now()<ui.configEditUntil) return;
   const c=state.config||{};
-  const значения={quality:c.quality,fps:c.fps,mediaQuality:c.mediaQuality,mediaFps:c.mediaFps,videoBitrate:c.videoBitrate??0,encoderMode:c.encoderMode||'auto',tunnelProviderSelect:c.tunnelProvider||'auto',closeAction:c.closeToTray===false?'exit':'tray'};
+  const значения={quality:c.quality,fps:c.fps,mediaQuality:c.mediaQuality,mediaFps:c.mediaFps,videoBitrate:c.videoBitrate??0,encoderMode:c.encoderMode||'auto',tunnelProviderSelect:c.tunnelProvider||'auto',closeAction:c.closeToTray===false?'exit':'tray',phoneAccess:c.lanAccess?'on':'off'};
   for (const [id,value] of Object.entries(значения)) {
     if (value===undefined||value===null) continue;
     const select=document.getElementById(id);
@@ -1148,7 +1148,7 @@ function configPayload() {
   const handle=$('#windowSource').value||(ждём?saved.captureWindowHandle||'':'');
   const selectedWindow=ui.sources.windows.find(item=>item.handle===handle);
   const processId=selectedWindow?selectedWindow.id:(ждём&&handle===saved.captureWindowHandle?saved.audioProcessId||'':'');
-  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:ждём?saved.captureMonitorId||'':$('#monitorSource').value,captureWindowHandle:handle,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:ждём?saved.audioOutputId||'':$('#audioOutput').value,audioProcessId:processId,captureAudioDevice:ждём?saved.captureAudioDevice||'':$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),muteLocalApp:$('#muteLocalApp').checked,muteDevice:ui.sourcesLoaded?$('#muteDevice').value:(ui.status?.config?.muteDevice||''),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim(),tunnelProvider:$('#tunnelProviderSelect').value,closeToTray:$('#closeAction').value!=='exit' };
+  return { outputMode:ui.output,activeServerId:ui.status?.config?.activeServerId||'',quality:$('#quality').value,fps:Number($('#fps').value),mediaQuality:$('#mediaQuality').value,mediaFps:Number($('#mediaFps').value),videoBitrate:Number($('#videoBitrate').value),encoderMode:$('#encoderMode').value,captureMode:$('#captureMode').value,captureMonitorId:ждём?saved.captureMonitorId||'':$('#monitorSource').value,captureWindowHandle:handle,regionX:Number($('#regionX').value),regionY:Number($('#regionY').value),regionWidth:Number($('#regionWidth').value),regionHeight:Number($('#regionHeight').value),audioMode:$('#audioMode').value,audioOutputId:ждём?saved.audioOutputId||'':$('#audioOutput').value,audioProcessId:processId,captureAudioDevice:ждём?saved.captureAudioDevice||'':$('#audioDevice').value,localAppVolume:Number($('#localAppVolume').value),muteLocalApp:$('#muteLocalApp').checked,muteDevice:ui.sourcesLoaded?$('#muteDevice').value:(ui.status?.config?.muteDevice||''),loopMode:$('#loopSelect').dataset.value,playbackSpeed:Number($('#speedSelect').dataset.value),captureVolume:Number($('#captureVolume').value)/100,mediaVolume:Number($('#mediaVolume').value)/100,whiteIp:$('#whiteIp').value.trim(),tunnelProvider:$('#tunnelProviderSelect').value,closeToTray:$('#closeAction').value!=='exit',lanAccess:$('#phoneAccess').value==='on' };
 }
 async function saveConfig(applyLive = false) { return api('/api/config',{method:'POST',body:JSON.stringify({...configPayload(),applyLive})}); }
 
@@ -1799,7 +1799,7 @@ $('#capturePreview').addEventListener('error',()=>{
   ui.frameTimer=setTimeout(()=>{ if(captureFramesWanted())$('#capturePreview').src=`/api/capture-preview?time=${Date.now()}`; },1000);
 });
 
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#closeAction').value=state.config.closeToTray===false?'exit':'tray';paintCloseNote();$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#muteLocalApp').checked=Boolean(state.config.muteLocalApp);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode,false);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#closeAction').value=state.config.closeToTray===false?'exit':'tray';paintCloseNote();$('#phoneAccess').value=state.config.lanAccess?'on':'off';paintPhoneNote();$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#muteLocalApp').checked=Boolean(state.config.muteLocalApp);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode,false);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
   ui.windowHidden=document.hidden; document.documentElement.classList.toggle('window-hidden',document.hidden);
   render(state);
   // Опрос запускаем до списка источников: тот идёт через PowerShell и может
@@ -2099,6 +2099,20 @@ function paintCloseNote(){
 $('#closeAction').addEventListener('change',async()=>{
   paintCloseNote(); ui.configEditUntil=Date.now()+2500;
   try{ render(await saveConfig(false)); toast($('#closeAction').value==='exit'?'Крестик закрывает программу':'Крестик прячет окно в трей'); }
+  catch(error){ ui.configEditUntil=0; toast(error.message,true); }
+});
+
+async function paintPhoneNote(){
+  const on=$('#phoneAccess').value==='on';
+  if(!on){ setText($('#phoneAccessNote'),'Выключен — телефон в сети не увидит программу'); return; }
+  try{
+    const info=await api('/api/lan-info');
+    setText($('#phoneAccessNote'),`Включён. Приложение найдёт ПК само, а вручную: ${info.addresses.join(', ')||'адрес не найден'}`);
+  }catch{ setText($('#phoneAccessNote'),'Включён'); }
+}
+$('#phoneAccess').addEventListener('change',async()=>{
+  ui.configEditUntil=Date.now()+2500;
+  try{ render(await saveConfig(false)); toast($('#phoneAccess').value==='on'?'Пульт для телефона включён':'Пульт для телефона выключен'); setTimeout(paintPhoneNote,600); }
   catch(error){ ui.configEditUntil=0; toast(error.message,true); }
 });
 

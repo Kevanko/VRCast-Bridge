@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, chmodSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
-import { availableParallelism, constants as osConstants, networkInterfaces, setPriority } from 'node:os';
+import { availableParallelism, constants as osConstants, hostname, networkInterfaces, setPriority } from 'node:os';
 import { basename, delimiter, dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
@@ -9,6 +9,7 @@ import { connect as netConnect, createServer as netCreateServer } from 'node:net
 import { Readable } from 'node:stream';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
+import { isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRouteAllowed, publishService, unpublishService } from './lan.js';
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
 // VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
@@ -112,6 +113,8 @@ const defaults = {
   // Крестик окна прячет программу в трей, эфир продолжает идти. Оболочка
   // читает это поле из /api/status в момент закрытия окна.
   closeToTray: true,
+  // Пульт для телефона: пускать в программу с устройств своей сети.
+  lanAccess: false,
 };
 
 // Битрейт — только из готовых уровней; старые значения (1000, 1800…) — к ближайшему.
@@ -6192,6 +6195,11 @@ async function generateCapturePreview() {
 }
 
 function json(res, code, body) {
+  // Ответы, в которых есть полный статус, отдаём устройствам из сети без данных о серверах.
+  if (res.forNetwork && body) {
+    if (body.config) body = дляСети(body);
+    else if (body.status?.config) body = { ...body, status: дляСети(body.status) };
+  }
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(body));
 }
@@ -6282,6 +6290,58 @@ const TUNNEL_START_OFFSET = 3;
 // 6 — всё ещё вдвое больше отступа старта, запас на джиттер туннеля есть.
 const TUNNEL_WINDOW = 6;
 
+// Состояние для телефона: приложение подписывается и получает полный статус при
+// каждом изменении, без опроса. Heartbeat держит соединение за Wi-Fi-роутером.
+const слушателиСобытий = new Set();
+let последнееСобытие = '';
+let таймерСобытий = null;
+let тактыСобытий = 0;
+
+// Телефону незачем знать адреса и пользователей своих серверов.
+function дляСети(state) {
+  return { ...state, config: { ...state.config, servers: [], whiteIp: '', remoteBindAddress: '' } };
+}
+
+function рассылкаСобытий(только = null) {
+  const текст = JSON.stringify(дляСети(status(false)));
+  if (только) { только.write(`data: ${текст}\n\n`); return; }
+  if (текст === последнееСобытие) return;
+  последнееСобытие = текст;
+  for (const res of слушателиСобытий) res.write(`data: ${текст}\n\n`);
+}
+
+function запуститьСобытия() {
+  if (таймерСобытий) return;
+  таймерСобытий = setInterval(() => {
+    try {
+      рассылкаСобытий();
+      if (++тактыСобытий % 37 === 0) for (const res of слушателиСобытий) res.write(': ping\n\n');
+    } catch {}
+  }, 400);
+  таймерСобытий.unref?.();
+}
+
+function остановитьСобытия() {
+  clearInterval(таймерСобытий);
+  таймерСобытий = null; последнееСобытие = '';
+}
+
+// Включили или выключили пульт: меняем адрес прослушивания и объявление в сети.
+// Выключено — слушаем только свой компьютер (и системе не за что просить файрвол).
+let слушаемАдрес = HOST;
+function applyLanAccess() {
+  const wanted = config.lanAccess === true ? '0.0.0.0' : HOST;
+  if (wanted !== слушаемАдрес) {
+    слушаемАдрес = wanted;
+    server.close();
+    server.closeAllConnections?.();
+    server.listen(PORT, wanted);
+  }
+  if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log });
+  else unpublishService();
+  log(config.lanAccess === true ? 'Пульт для телефона включён' : 'Пульт для телефона выключен');
+}
+
 // Свои адреса: только они имеют право на пульт управления.
 const LOCAL_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`]);
 const OWN_ORIGIN = `http://127.0.0.1:${PORT}`;
@@ -6306,12 +6366,26 @@ const server = http.createServer(async (req, res) => {
     // любая открытая вкладка в браузере могла послать сюда простой POST без
     // предварительного запроса — включить захват экрана, поднять публичную
     // ссылку, снести сервер по SSH — и подменой DNS выдать себя за 127.0.0.1.
-    if (!publicTunnelHost && !LOCAL_HOSTS.has(String(req.headers.host || '').toLowerCase())) {
-      return json(res, 403, { error: 'Обращение с чужого адреса.' });
-    }
-    const origin = String(req.headers.origin || '');
-    if (origin && origin !== OWN_ORIGIN && !publicTunnelHost) {
-      return json(res, 403, { error: 'Запрос со стороннего сайта.' });
+    const hostHeader = String(req.headers.host || '').toLowerCase();
+    const fromNetwork = !publicTunnelHost && !isLoopbackAddress(req.socket.remoteAddress);
+    if (fromNetwork) {
+      // Устройство из своей сети (телефон): только при включённом «пульте для
+      // телефона» и только к разрешённым маршрутам — без ключей, настроек и выхода.
+      if (!config.lanAccess || !isPrivateAddress(req.socket.remoteAddress) || !lanHostAllowed(hostHeader, PORT)) {
+        return json(res, 403, { error: 'Пульт для телефона выключен.' });
+      }
+      res.forNetwork = true;
+      if (!lanRouteAllowed(req.method, url.pathname)) return json(res, 403, { error: 'Это действие доступно только на самом компьютере.' });
+      const origin = String(req.headers.origin || '');
+      if (origin && origin !== `http://${hostHeader}`) return json(res, 403, { error: 'Запрос со стороннего сайта.' });
+    } else {
+      if (!publicTunnelHost && !LOCAL_HOSTS.has(hostHeader)) {
+        return json(res, 403, { error: 'Обращение с чужого адреса.' });
+      }
+      const origin = String(req.headers.origin || '');
+      if (origin && origin !== OWN_ORIGIN && !publicTunnelHost) {
+        return json(res, 403, { error: 'Запрос со стороннего сайта.' });
+      }
     }
     const прокси = req.method === 'GET' && url.pathname.match(/^\/hls-proxy\/([^/]+)\/(?:index\.m3u8|seg\/(\d+)\.ts)$/);
     if (прокси) return await отдатьПрокси(res, decodeURIComponent(прокси[1]), прокси[2] === undefined ? null : Number(прокси[2]));
@@ -6460,6 +6534,20 @@ const server = http.createServer(async (req, res) => {
       if (result.ask) return json(res, 200, { ask: result.ask });
       return json(res, 201, { added: result, status: status() });
     }
+    if (req.method === 'GET' && url.pathname === '/api/lan-info') {
+      const { rtsp, playbackUrl } = status(false);
+      return json(res, 200, { name: hostname(), version: APP_VERSION, port: PORT, lanAccess: config.lanAccess === true,
+        addresses: getLanAddresses().map(address => `http://${address}:${PORT}`), playbackUrl, rtspLanUrls: rtsp?.lanUrls || [] });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/events') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+      res.write('retry: 2000\n\n');
+      слушателиСобытий.add(res);
+      рассылкаСобытий(res);
+      запуститьСобытия();
+      req.on('close', () => { слушателиСобытий.delete(res); if (!слушателиСобытий.size) остановитьСобытия(); });
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/energy') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       res.write('retry: 3000\n\n');
@@ -6580,6 +6668,7 @@ const server = http.createServer(async (req, res) => {
         // Только настоящий булев: строка «false» из кривого запроса не должна
         // превращаться в true и молча прятать окно вместо выхода.
         closeToTray: typeof body.closeToTray === 'boolean' ? body.closeToTray : config.closeToTray !== false,
+        lanAccess: typeof body.lanAccess === 'boolean' ? body.lanAccess : config.lanAccess === true,
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),
         // Каждое поле откатывается к прежнему значению, если его не прислали.
@@ -6624,6 +6713,7 @@ const server = http.createServer(async (req, res) => {
         } catch { return json(res, 400, { error: `Не удаётся писать в ${target}. Выберите другой диск.` }); }
       }
       saveConfig(next);
+      if (Boolean(previousConfig.lanAccess) !== config.lanAccess) res.once('finish', () => setTimeout(applyLanAccess, 50));
       // Сниженный под затор битрейт относится к конкретному каналу до сервера.
       if (previousOutput !== config.outputMode || previousConfig.activeServerId !== config.activeServerId
         || previousConfig.videoBitrate !== config.videoBitrate) remoteBudgetKbps = 0;
@@ -6750,7 +6840,7 @@ const server = http.createServer(async (req, res) => {
       if (hlsHealthTimer) clearInterval(hlsHealthTimer);
       stopUnityBuild();
       if (unityCaptureProcess) { try { unityCaptureProcess.stdin.write('q\n'); } catch {} }
-      stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); json(res, 200, { ok: true });
+      stopActive(true, true, false); stopPublicTunnel(); stopMediaMtx(); unpublishService(); json(res, 200, { ok: true });
       // Перед выходом обязательно возвращаем звук приложениям, уведённым
       // «не слышать у себя». Раньше выход был через 100 мс, лаунчер тут же
       // гасил всё дерево процессов вместе с помощником — и Spotify оставался
@@ -6825,7 +6915,9 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
+слушаемАдрес = config.lanAccess === true ? '0.0.0.0' : HOST;
+server.listen(PORT, слушаемАдрес, () => {
+  if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log });
   restoreRoutedApps();
   дозаполнитьДлительности();
   startRemoteBridge();
