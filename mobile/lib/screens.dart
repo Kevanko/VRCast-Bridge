@@ -223,26 +223,42 @@ class _PreviewState extends State<Preview> {
     _sync();
   }
 
+  Timer? _retry;
+
   void _sync() {
     final state = widget.remote.state;
     final want = Prefs.instance.preview && state != null && state.running && state.streamReady;
     if (want == _wanted) return;
     _wanted = want;
+    _retry?.cancel();
     _controller?.dispose();
     _controller = null;
-    if (!want) return;
+    if (want) _open();
+  }
+
+  /// Открывает HLS-превью; плейлист в первые секунды эфира может быть ещё пуст — пробуем снова.
+  void _open() {
     final controller = VideoPlayerController.networkUrl(Uri.parse(widget.remote.api.absolute('/stream/preview.m3u8')),
         videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true))..setVolume(0);
     _controller = controller;
+    void failed() {
+      if (_controller != controller) return;
+      controller.dispose();
+      _controller = null;
+      if (mounted) setState(() {});
+      if (_wanted) _retry = Timer(const Duration(seconds: 2), () { if (mounted && _wanted && _controller == null) _open(); });
+    }
     controller.initialize().then((_) {
       if (!mounted || _controller != controller) return;
       controller.play();
+      controller.addListener(() { if (controller.value.hasError) failed(); });
       setState(() {});
-    }).catchError((Object _) {});
+    }).catchError((Object _) => failed());
   }
 
   @override
   void dispose() {
+    _retry?.cancel();
     _controller?.dispose();
     super.dispose();
   }

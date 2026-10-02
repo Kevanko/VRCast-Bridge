@@ -57,9 +57,9 @@ class PhoneStream {
       stream.getVideoTracks().first.onEnded = stop;
       live = true;
       startedAt = DateTime.now();
-      // Экран, который почти не меняется, ключевых кадров сам не шлёт, а ПК без них не может
-      // начать читать поток. Поэтому подталкиваем кодек раз в пару секунд.
-      _keyframes = Timer.periodic(const Duration(seconds: 2), (_) => _forceKeyframe());
+      // Статичный экран кадров почти не даёт, а ПК без них не может начать читать поток и
+      // считает эфир зависшим. Подталкиваем кодек чаще секунды: кадры идут без пауз.
+      _keyframes = Timer.periodic(const Duration(milliseconds: 600), (_) => _forceKeyframe());
       Timer(const Duration(milliseconds: 500), _forceKeyframe);
       _changes.add(null);
     } catch (e) {
