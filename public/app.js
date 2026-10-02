@@ -642,6 +642,29 @@ $('#remoteAdapter').addEventListener('change',async event=>{
   try{render(await api('/api/config',{method:'POST',body:JSON.stringify({remoteBindAddress:event.target.value})}));toast(event.target.value?'Поток пойдёт через выбранную карту':'Поток пойдёт как решит система');}
   catch(error){toast(error.message,true);}
 });
+// «Через VPN» в строке статуса — кнопка: ведёт к выбору карты и подсвечивает ту,
+// что идёт мимо VPN.
+function кМимоVpn(){
+  const карта=(ui.status?.network?.adapters||[]).find(к=>!к.vpn);
+  открытьНастройки('setNet');
+  const select=$('#remoteAdapter');
+  select.classList.remove('flash'); void select.offsetWidth; select.classList.add('flash');
+  select.focus();
+  if(карта)toast(`Выберите «${карта.name} · ${карта.address}» — поток пойдёт мимо VPN`);
+}
+$('#netInfo').addEventListener('click',()=>{ if($('#netInfo').classList.contains('warn'))кМимоVpn(); });
+$('#netInfo').addEventListener('keydown',event=>{ if((event.key==='Enter'||event.key===' ')&&$('#netInfo').classList.contains('warn')){ event.preventDefault(); кМимоVpn(); } });
+function paintServerSpeed(state){
+  const замер=state.performance?.remoteSpeedTest, кбит=Number(state.performance?.remoteCapacityKbps)||0, кнопка=$('#serverSpeedTest');
+  кнопка.disabled=Boolean(замер?.running||state.running||!state.config.activeServerId);
+  setText(кнопка,замер?.running?'Меряю…':'Замерить');
+  setTitle(кнопка,state.running?'Остановите эфир — замер займёт весь канал':'Шесть секунд гоним тестовое видео на сервер и считаем скорость');
+  setText($('#serverSpeedHint'),замер?.running?'Гоню тестовое видео, секунд десять…'
+    :замер?.error?замер.error
+    :кбит?`~${(кбит/1000).toLocaleString('ru-RU',{maximumFractionDigits:1})} Мбит/с — битрейт «Авто» подстроится под это`
+    :'Ещё не мерили');
+}
+$('#serverSpeedTest').addEventListener('click',async()=>{try{render(await api('/api/servers/speedtest',{method:'POST'}));}catch(error){toast(error.message,true);}});
 function paintNetInfo(state){
   const наружу=state.config.outputMode!=='local', perf=state.performance||{};
   const мбит=state.config.outputMode==='remote'?Number(perf.remoteCapacityKbps)/1000:Number(state.tunnel?.metrics?.throughputMbps)||0;
@@ -650,13 +673,18 @@ function paintNetInfo(state){
   const маршрут=state.network?.route||'';
   const vpn=наружу&&маршрут!=='direct'?state.network?.vpn:'';
   const части=[];
-  if(наружу&&мбит>0)части.push(`канал ~${мбит.toLocaleString('ru-RU',{maximumFractionDigits:1})} Мбит/с`);
+  const замер=perf.remoteSpeedTest;
+  if(замер?.running)части.push('меряю канал…');
+  else if(наружу&&мбит>0)части.push(`канал ~${мбит.toLocaleString('ru-RU',{maximumFractionDigits:1})} Мбит/с`);
   // Про VPN пишем только когда поток реально идёт через него.
   if(маршрут==='vpn'&&vpn)части.push(`через VPN (${vpn})`);
   setHidden($('#netInfo'),!части.length); setHidden($('#netSep'),!части.length);
   setText($('#netInfo'),части.length?части.join(' · '):'');
   $('#netInfo').classList.toggle('warn',маршрут==='vpn');
-  setTitle($('#netInfo'),маршрут==='vpn'?`Поток идёт через VPN «${vpn}» и упирается в его скорость. Добавьте правило DIRECT для ffmpeg.exe и адреса своего сервера.`:маршрут==='direct'?'Поток идёт напрямую: правило VPN пускает его мимо прокси':vpn?`Включён VPN «${vpn}». Как идёт поток, узнать не удалось — если лагает, добавьте правило DIRECT для ffmpeg.exe.`:'Сколько реально проходит до зрителей');
+  $('#netInfo').tabIndex=маршрут==='vpn'?0:-1;
+  $('#netInfo').setAttribute('role',маршрут==='vpn'?'button':'status');
+  paintServerSpeed(state);
+  setTitle($('#netInfo'),маршрут==='vpn'?`Поток идёт через VPN «${vpn}» и упирается в его скорость. Нажмите, чтобы выбрать сетевую карту мимо VPN.`:маршрут==='direct'?'Поток идёт напрямую: правило VPN пускает его мимо прокси':vpn?`Включён VPN «${vpn}». Как идёт поток, узнать не удалось — если лагает, добавьте правило DIRECT для ffmpeg.exe.`:'Сколько реально проходит до зрителей');
 }
 
 function paintMonitorTags(state){
