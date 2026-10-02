@@ -1,4 +1,5 @@
 // Доступ из локальной сети (пульт для телефона): кто и куда может обращаться.
+import crypto from 'node:crypto';
 import { hostname } from 'node:os';
 
 // ::ffff:192.168.1.5 -> 192.168.1.5
@@ -30,10 +31,27 @@ export function lanHostAllowed(host, port) {
 const ALLOWED = [
   ['GET', /^\/api\/(status|events|lan-info|capture-preview)$/],
   ['GET', /^\/(thumbs|stream|api\/local-media)\//],
-  ['POST', /^\/api\/(playback|stop|skip|queue|queue\/inspect|queue\/move|queue\/upload)$/],
+  ['POST', /^\/api\/(playback|stop|skip|queue|queue\/inspect|queue\/move|queue\/upload|pair)$/],
   ['POST', /^\/api\/start\/(queue|phone)$/],
   ['DELETE', /^\/api\/queue(\/[^/]+)?$/],
 ];
+
+// Настройки эфира: только привязанному телефону (знает код с ПК). Серверы и ключи сюда не входят.
+const PAIRED = [
+  ['GET', /^\/api\/pair\/check$/],
+  ['POST', /^\/api\/(config|tunnels\/test|servers\/speedtest)$/],
+];
+export const lanRoutePaired = (method, pathname) => PAIRED.some(([m, pattern]) => m === method && pattern.test(pathname));
+
+// Из настроек телефон может менять только это.
+const NETWORK_CONFIG = ['outputMode', 'activeServerId', 'tunnelProvider', 'whiteIp', 'quality', 'fps', 'mediaQuality', 'mediaFps', 'videoBitrate', 'encoderMode'];
+export const pickNetworkConfig = body => Object.fromEntries(NETWORK_CONFIG.filter(key => body && key in body).map(key => [key, body[key]]));
+
+export const hashToken = token => crypto.createHash('sha256').update(String(token)).digest('hex');
+export function sameSecret(a, b) {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
 
 // Что разрешено тем, кто пришёл не с самого компьютера. Остальное — только свой ПК.
 export function lanRouteAllowed(method, pathname) {

@@ -87,4 +87,42 @@ void main() {
     expect(api.absolute('/thumbs/a.jpg?v=1'), 'http://192.168.1.5:4717/thumbs/a.jpg?v=1');
     expect(api.absolute('http://x/y'), 'http://x/y');
   });
+
+  test('настройки эфира и список серверов (только названия) разбираются', () {
+    final json = fixture();
+    (json['config'] as Map)['outputMode'] = 'remote';
+    (json['config'] as Map)['activeServerId'] = 's2';
+    (json['config'] as Map)['servers'] = [
+      {'id': 's1', 'name': 'Первый', 'reachable': true},
+      {'id': 's2', 'name': 'Второй', 'reachable': null},
+    ];
+    final s = BridgeState.fromJson(json);
+    expect(s.outputMode, 'remote');
+    expect(s.activeServerId, 's2');
+    expect(s.servers.map((e) => e.name), ['Первый', 'Второй']);
+    expect(s.servers[1].reachable, isNull);
+    expect(s.quality, isNotEmpty);
+    expect(BridgeState.fromJson({}).outputMode, 'local');
+  });
+
+  test('привязка: ключ уходит в заголовке, настройки — в /api/config', () async {
+    final calls = <String>[];
+    final client = MockClient((request) async {
+      calls.add('${request.method} ${request.url.path} token=${request.headers['X-VRCast-Token']} ${request.body}');
+      if (request.url.path == '/api/pair') return http.Response('{"token":"abc123"}', 200);
+      if (request.url.path == '/api/pair/check') return http.Response.bytes(utf8.encode('{"error":"Нужна привязка"}'), 401, headers: {'content-type': 'application/json; charset=utf-8'});
+      return http.Response('{}', 200);
+    });
+    final api = Api(Uri.parse('http://pc:4717'), client: client);
+    expect(await api.pairCheck(), isFalse);
+    final token = await api.pair('123456', 'Телефон');
+    expect(token, 'abc123');
+    api.token = token;
+    await api.setStream({'outputMode': 'tunnel', 'quality': '1080p'});
+    expect(calls, [
+      'GET /api/pair/check token=null ',
+      'POST /api/pair token=null {"code":"123456","name":"Телефон"}',
+      'POST /api/config token=abc123 {"outputMode":"tunnel","quality":"1080p"}',
+    ]);
+  });
 }

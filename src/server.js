@@ -10,7 +10,7 @@ import { Readable } from 'node:stream';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
-import { isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRouteAllowed, publishService, unpublishService } from './lan.js';
+import { hashToken, isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRoutePaired, lanRouteAllowed, pickNetworkConfig, publishService, sameSecret, unpublishService } from './lan.js';
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
 // VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
@@ -123,6 +123,8 @@ const defaults = {
   closeToTray: true,
   // Пульт для телефона: пускать в программу с устройств своей сети.
   lanAccess: false,
+  // Привязанные телефоны: хранится только хеш ключа.
+  pairedPhones: [],
   // Порт программы; новое значение вступает в силу после перезапуска.
   port: 4717,
 };
@@ -2157,6 +2159,7 @@ function status(withLogs = true) {
       expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError,
       speeds: config.tunnelSpeeds || {}, test: проверкаТуннелей },
     config: { ...config,
+      pairedPhones: (config.pairedPhones || []).map(({ id, name, at }) => ({ id, name, at })),
       servers: savedServers().map(item => ({ id: item.id, name: item.name, host: item.host,
         rtspPort: item.rtspPort, addedAt: item.addedAt, reachable: serverReach[item.id] ?? null,
         permanentLink: item.permanentLink !== false, channel: item.channel || 'live', publishKey: undefined })) },
@@ -6254,8 +6257,8 @@ async function generateCapturePreview() {
 function json(res, code, body) {
   // Ответы, в которых есть полный статус, отдаём устройствам из сети без данных о серверах.
   if (res.forNetwork && body) {
-    if (body.config) body = дляСети(body);
-    else if (body.status?.config) body = { ...body, status: дляСети(body.status) };
+    if (body.config) body = дляСети(body, res.paired);
+    else if (body.status?.config) body = { ...body, status: дляСети(body.status, res.paired) };
   }
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(body));
@@ -6388,9 +6391,43 @@ let последнееСобытие = '';
 let таймерСобытий = null;
 let тактыСобытий = 0;
 
-// Телефону незачем знать адреса и пользователей своих серверов.
-function дляСети(state) {
-  return { ...state, config: { ...state.config, servers: [], whiteIp: '', remoteBindAddress: '' } };
+// Телефону незачем знать адреса и пользователей своих серверов: оставляем названия.
+function дляСети(state, paired = false) {
+  const servers = (state.config.servers || []).map(({ id, name, reachable, permanentLink }) => ({ id, name, reachable, permanentLink }));
+  return { ...state, config: { ...state.config, servers, pairedPhones: undefined, whiteIp: paired ? state.config.whiteIp : '', remoteBindAddress: '' } };
+}
+
+// Привязка телефона к ПК: шестизначный код показан в настройках программы, действует
+// десять минут и меняется после каждой привязки. Телефон получает ключ и дальше
+// предъявляет его для настроек эфира.
+let pairingPin = '', pinIssuedAt = 0;
+function rotatePin() { pairingPin = String(crypto.randomInt(0, 1000000)).padStart(6, '0'); pinIssuedAt = Date.now(); }
+function currentPin() { if (!pairingPin || Date.now() - pinIssuedAt > 600000) rotatePin(); return pairingPin; }
+const pairFailures = new Map();
+
+function isPairedRequest(req) {
+  if (isLoopbackAddress(req.socket.remoteAddress)) return true;
+  const token = String(req.headers['x-vrcast-token'] || '');
+  if (!token) return false;
+  const hash = hashToken(token);
+  return (config.pairedPhones || []).some(phone => sameSecret(phone.hash, hash));
+}
+
+function pairPhone(req, body) {
+  const ip = req.socket.remoteAddress;
+  const recent = (pairFailures.get(ip) || []).filter(time => Date.now() - time < 300000);
+  if (recent.length >= 5) throw Object.assign(new Error('Слишком много попыток. Подождите пять минут.'), { status: 429 });
+  if (!sameSecret(String(body.code || '').replace(/\D/g, ''), currentPin())) {
+    pairFailures.set(ip, [...recent, Date.now()]);
+    throw Object.assign(new Error('Неверный код. Он показан в настройках программы на ПК.'), { status: 403 });
+  }
+  const token = crypto.randomBytes(24).toString('base64url');
+  const phone = { id: crypto.randomUUID().slice(0, 8), name: String(body.name || 'Телефон').slice(0, 40), hash: hashToken(token), at: new Date().toISOString() };
+  saveConfig({ pairedPhones: [phone, ...(config.pairedPhones || [])].slice(0, 10) });
+  rotatePin();
+  pairFailures.delete(ip);
+  log(`Телефон привязан: ${phone.name}`);
+  return token;
 }
 
 function рассылкаСобытий(только = null) {
@@ -6468,7 +6505,11 @@ const server = http.createServer(async (req, res) => {
         return json(res, 403, { error: 'Пульт для телефона выключен.' });
       }
       res.forNetwork = true;
-      if (!lanRouteAllowed(req.method, url.pathname)) return json(res, 403, { error: 'Это действие доступно только на самом компьютере.' });
+      res.paired = isPairedRequest(req);
+      if (!lanRouteAllowed(req.method, url.pathname)) {
+        if (!lanRoutePaired(req.method, url.pathname)) return json(res, 403, { error: 'Это действие доступно только на самом компьютере.' });
+        if (!res.paired) return json(res, 401, { error: 'Нужна привязка к ПК: введите код из настроек программы.', code: 'pairing' });
+      }
       const origin = String(req.headers.origin || '');
       if (origin && origin !== `http://${hostHeader}`) return json(res, 403, { error: 'Запрос со стороннего сайта.' });
     } else {
@@ -6627,6 +6668,14 @@ const server = http.createServer(async (req, res) => {
       if (result.ask) return json(res, 200, { ask: result.ask });
       return json(res, 201, { added: result, status: status() });
     }
+    if (req.method === 'POST' && url.pathname === '/api/pair') {
+      try { return json(res, 200, { token: pairPhone(req, await readBody(req)) }); }
+      catch (error) { return json(res, error.status || 400, { error: error.message }); }
+    }
+    if (req.method === 'GET' && url.pathname === '/api/pair/check') return json(res, 200, { paired: true });
+    if (req.method === 'GET' && url.pathname === '/api/pair/pin') return json(res, 200, { pin: currentPin(), phones: (config.pairedPhones || []).length });
+    if (req.method === 'POST' && url.pathname === '/api/pair/pin/rotate') { rotatePin(); return json(res, 200, { pin: pairingPin, phones: (config.pairedPhones || []).length }); }
+    if (req.method === 'POST' && url.pathname === '/api/pair/clear') { saveConfig({ pairedPhones: [] }); rotatePin(); log('Все телефоны отвязаны'); return json(res, 200, { pin: pairingPin, phones: 0 }); }
     if (req.method === 'GET' && url.pathname === '/api/lan-info') {
       const { rtsp, playbackUrl } = status(false);
       return json(res, 200, { name: hostname(), version: APP_VERSION, port: PORT, webrtcPort: WEBRTC_PORT, rtspPort: RTSP_PORT, lanAccess: config.lanAccess === true,
@@ -6761,7 +6810,9 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/config') {
-      const body = await readBody(req);
+      let body = await readBody(req);
+      // Телефон меняет только настройки эфира; кеш, порт, доступ из сети и прочее — на самом ПК.
+      if (res.forNetwork) body = pickNetworkConfig(body);
       const next = {
         outputMode: ['local', 'tunnel', 'remote'].includes(body.outputMode) ? body.outputMode : (config.outputMode || 'local'),
         cacheRoot: typeof body.cacheRoot === 'string' ? body.cacheRoot.trim().slice(0, 300) : config.cacheRoot,

@@ -74,8 +74,9 @@ test('включённый пульт: статус и управление до
   assert.ok(info.addresses.includes(`http://${lanIp}:${port}`));
   assert.equal((await call(host, '/api/playback', { method: 'POST', body: { action: 'toggle' } })).status === 403, false, 'управление разрешено');
 
-  for (const [method, path] of [['POST', '/api/shutdown'], ['POST', '/api/config'], ['GET', '/api/servers'], ['POST', '/api/logs/open']])
+  for (const [method, path] of [['POST', '/api/shutdown'], ['GET', '/api/servers'], ['POST', '/api/logs/open']])
     assert.equal((await call(host, path, { method, body: method === 'POST' ? {} : undefined })).status, 403, `${method} ${path}`);
+  assert.equal((await call(host, '/api/config', { method: 'POST', body: {} })).status, 401, 'настройки эфира — только после привязки');
   assert.equal((await call(`evil.example.com:${port}`, '/api/status', { to: lanIp })).status, 403, 'чужое имя в Host');
   assert.equal((await call(host, '/api/status', { headers: { Origin: 'http://evil.example.com' } })).status, 403, 'чужой Origin');
   assert.equal((await call(`abc.trycloudflare.com`, '/api/status', { to: lanIp })).status, 404, 'туннель видит только поток');
@@ -162,6 +163,58 @@ test('экран телефона: поток с телефона станови
     assert.ok(stopped, 'обрыв потока телефона останавливает эфир');
     assert.equal(JSON.parse((await local('/api/status?logs=0')).text).phoneSource, false);
   } finally { publisher.kill('SIGKILL'); await local('/api/stop', { method: 'POST', body: {} }).catch(() => {}); }
+});
+
+test('привязка телефона: настройки эфира только по коду, лишнего в настройках не меняется', { skip: !lanIp && 'нет сетевого интерфейса' }, async () => {
+  const host = `${lanIp}:${port}`;
+  const post = (path, body, headers = {}) => call(host, path, { method: 'POST', body, headers });
+  const noToken = await post('/api/config', { fps: 60 });
+  assert.equal(noToken.status, 401);
+  assert.equal(JSON.parse(noToken.text).code, 'pairing');
+  assert.equal((await call(host, '/api/pair/pin')).status, 403, 'код видно только на самом ПК');
+
+  const { pin } = JSON.parse((await local('/api/pair/pin')).text);
+  assert.match(pin, /^\d{6}$/);
+  const wrong = pin === '000000' ? '000001' : '000000';
+  assert.equal((await post('/api/pair', { code: wrong })).status, 403);
+
+  const paired = await post('/api/pair', { code: pin, name: 'Тестовый телефон' });
+  assert.equal(paired.status, 200);
+  const token = JSON.parse(paired.text).token;
+  assert.ok(token.length >= 20);
+  assert.equal((await post('/api/pair', { code: pin })).status, 403, 'после привязки код меняется');
+
+  const auth = { 'X-VRCast-Token': token };
+  assert.equal((await call(host, '/api/pair/check', { headers: auth })).status, 200);
+  assert.equal((await call(host, '/api/pair/check', { headers: { 'X-VRCast-Token': 'wrong-token' } })).status, 401);
+  const changed = await post('/api/config', { fps: 60, quality: '1080p', port: 5999, cacheRoot: '/tmp/evil', lanAccess: false, whiteIp: '203.0.113.7' }, auth);
+  assert.equal(changed.status, 200, changed.text);
+  const config = JSON.parse(changed.text).config;
+  assert.equal(config.fps, 60);
+  assert.equal(config.quality, '1080p');
+  assert.equal(config.whiteIp, '203.0.113.7');
+  assert.notEqual(config.port, 5999, 'порт с телефона не меняется');
+  assert.notEqual(config.cacheRoot, '/tmp/evil', 'папка кеша с телефона не меняется');
+  assert.equal(config.lanAccess, true, 'отключить доступ с телефона нельзя');
+  assert.equal(config.pairedPhones, undefined, 'список привязок в сеть не уходит');
+  assert.equal((await post('/api/shutdown', {}, auth)).status, 403, 'выход из программы и с токеном недоступен');
+  assert.equal((await call(host, '/api/servers', { headers: auth })).status, 403);
+
+  await local('/api/config', { method: 'POST', body: { fps: 30, quality: '720p', whiteIp: '' } });
+  assert.equal(JSON.parse((await local('/api/pair/pin')).text).phones, 1);
+  await local('/api/pair/clear', { method: 'POST', body: {} });
+  assert.equal((await call(host, '/api/pair/check', { headers: auth })).status, 401, 'отвязанный телефон теряет доступ');
+});
+
+test('привязка: после пяти неверных кодов подряд вход блокируется', { skip: !lanIp && 'нет сетевого интерфейса' }, async () => {
+  const host = `${lanIp}:${port}`;
+  const post = body => call(host, '/api/pair', { method: 'POST', body });
+  const { pin } = JSON.parse((await local('/api/pair/pin')).text);
+  const wrong = pin === '111111' ? '222222' : '111111';
+  let attempts = 0, blocked = false;
+  while (!blocked && attempts < 6) { attempts++; const r = await post({ code: wrong }); blocked = r.status === 429; assert.ok(blocked || r.status === 403); }
+  assert.ok(blocked && attempts <= 5, `блокировка после пяти неверных кодов (попыток: ${attempts})`);
+  assert.equal((await post({ code: pin })).status, 429, 'даже верный код не принимается во время блокировки');
 });
 
 test('выключили пульт: сеть снова закрыта', { skip: !lanIp && 'нет сетевого интерфейса' }, async () => {

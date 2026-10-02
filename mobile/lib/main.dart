@@ -41,7 +41,7 @@ class _RootState extends State<Root> {
 
   void _connect(String name, Uri base) {
     _remote?.dispose();
-    final remote = Remote(Api(base), pcName: name)..start();
+    final remote = Remote(Api(base, token: Prefs.instance.tokens[base.toString()]), pcName: name)..start();
     Prefs.instance.remember(name, base.toString());
     setState(() => _remote = remote);
   }

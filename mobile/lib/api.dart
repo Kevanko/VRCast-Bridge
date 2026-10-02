@@ -28,9 +28,10 @@ class ApiException implements Exception {
 
 /// Клиент к серверу VRCast Bridge на ПК.
 class Api {
-  Api(this.base, {http.Client? client}) : _client = client ?? http.Client();
+  Api(this.base, {http.Client? client, this.token}) : _client = client ?? http.Client();
 
   final Uri base; // например http://192.168.1.5:4717
+  String? token; // ключ привязки: нужен для настроек эфира
   final http.Client _client;
 
   Uri uri(String path) => base.resolve(path);
@@ -40,6 +41,7 @@ class Api {
 
   Future<Map<String, dynamic>> _send(String method, String path, [Object? body]) async {
     final request = http.Request(method, uri(path));
+    if (token != null) request.headers['X-VRCast-Token'] = token!;
     if (body != null) {
       request.headers['Content-Type'] = 'application/json';
       request.body = jsonEncode(body);
@@ -58,6 +60,7 @@ class Api {
   /// Поток состояний; при обрыве выбрасывает ошибку — переподключается вызывающий.
   Stream<BridgeState> events() async* {
     final request = http.Request('GET', uri('/api/events'))..headers['Accept'] = 'text/event-stream';
+    if (token != null) request.headers['X-VRCast-Token'] = token!;
     final response = await _client.send(request).timeout(const Duration(seconds: 8));
     if (response.statusCode != 200) throw ApiException('Сервер ответил ${response.statusCode}');
     await for (final text in parseSse(response.stream)) {
@@ -68,6 +71,21 @@ class Api {
   Future<void> playback(String action, [Map<String, Object?> extra = const {}]) => _send('POST', '/api/playback', {'action': action, ...extra});
   Future<void> startQueue([String? id]) => _send('POST', '/api/start/queue', id == null ? {} : {'id': id});
   Future<void> stop() => _send('POST', '/api/stop', {});
+
+  /// Привязка к ПК по коду из его настроек; возвращает ключ.
+  Future<String> pair(String code, String name) async => '${(await _send('POST', '/api/pair', {'code': code, 'name': name}))['token']}';
+
+  Future<bool> pairCheck() async {
+    try {
+      await _send('GET', '/api/pair/check');
+      return true;
+    } on ApiException {
+      return false;
+    }
+  }
+
+  /// Настройки эфира на ПК (outputMode, tunnelProvider, activeServerId, quality, fps, encoderMode, whiteIp).
+  Future<void> setStream(Map<String, Object?> values) => _send('POST', '/api/config', values);
 
   /// Эфир с экрана телефона: поток доходит до ПК не сразу, поэтому пробуем несколько раз.
   Future<void> startPhone() async {

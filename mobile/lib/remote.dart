@@ -120,6 +120,7 @@ class Prefs extends ChangeNotifier {
   int defaultPort = 4717;
   List<SavedPc> pcs = [];
   SavedPc? last;
+  Map<String, String> tokens = {}; // адрес ПК → ключ привязки
 
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
@@ -127,6 +128,7 @@ class Prefs extends ChangeNotifier {
     preview = p.getBool('preview') ?? true;
     defaultPort = p.getInt('defaultPort') ?? 4717;
     pcs = [for (final raw in p.getStringList('pcs') ?? const []) if (raw.contains('\n')) SavedPc(raw.split('\n').first, raw.split('\n').last)];
+    tokens = {for (final raw in p.getStringList('tokens') ?? const []) if (raw.contains('\n')) raw.split('\n').first: raw.split('\n').last};
     final l = p.getStringList('lastPc');
     last = l != null && l.length == 2 ? SavedPc(l[0], l[1]) : null;
     notifyListeners();
@@ -137,6 +139,7 @@ class Prefs extends ChangeNotifier {
     await p.setBool('autoConnect', autoConnect);
     await p.setBool('preview', preview);
     await p.setInt('defaultPort', defaultPort);
+    await p.setStringList('tokens', [for (final e in tokens.entries) '${e.key}\n${e.value}']);
     await p.setStringList('pcs', [for (final pc in pcs) '${pc.name}\n${pc.url}']);
     last == null ? await p.remove('lastPc') : await p.setStringList('lastPc', [last!.name, last!.url]);
   }
@@ -159,4 +162,6 @@ class Prefs extends ChangeNotifier {
       });
 
   void leave() => update(() => last = null);
+
+  void setToken(String pcUrl, String? token) => update(() => token == null ? tokens.remove(pcUrl) : tokens[pcUrl] = token);
 }

@@ -17,6 +17,13 @@ class QueueItem {
       );
 }
 
+class ServerChoice {
+  ServerChoice(this.id, this.name, this.reachable);
+  final String id;
+  final String name;
+  final bool? reachable;
+}
+
 class BridgeState {
   BridgeState({
     required this.running,
@@ -39,6 +46,14 @@ class BridgeState {
     required this.tunnelState,
     required this.statusLabel,
     required this.phoneSource,
+    required this.outputMode,
+    required this.tunnelProvider,
+    required this.quality,
+    required this.fps,
+    required this.encoderMode,
+    required this.activeServerId,
+    required this.whiteIp,
+    required this.servers,
     DateTime? receivedAt,
   }) : receivedAt = receivedAt ?? DateTime.now();
 
@@ -62,6 +77,14 @@ class BridgeState {
   final String tunnelState;
   final String statusLabel;
   final bool phoneSource;
+  final String outputMode; // local | tunnel | remote
+  final String tunnelProvider;
+  final String quality;
+  final int fps;
+  final String encoderMode;
+  final String activeServerId;
+  final String whiteIp;
+  final List<ServerChoice> servers;
   final DateTime receivedAt;
 
   QueueItem? get current {
@@ -111,6 +134,17 @@ class BridgeState {
       tunnelUrl: '${tunnel['url'] ?? ''}',
       tunnelState: '${tunnel['state'] ?? ''}',
       phoneSource: json['phoneSource'] == true,
+      outputMode: '${config['outputMode'] ?? 'local'}',
+      tunnelProvider: '${config['tunnelProvider'] ?? 'auto'}',
+      quality: '${config['quality'] ?? '720p'}',
+      fps: (config['fps'] as num?)?.toInt() ?? 30,
+      encoderMode: '${config['encoderMode'] ?? 'auto'}',
+      activeServerId: '${config['activeServerId'] ?? ''}',
+      whiteIp: '${config['whiteIp'] ?? ''}',
+      servers: [
+        for (final item in (config['servers'] as List? ?? const []))
+          ServerChoice('${(item as Map)['id']}', '${item['name'] ?? item['id']}', item['reachable'] as bool?),
+      ],
       statusLabel: !running
           ? 'Эфир остановлен'
           : buffering

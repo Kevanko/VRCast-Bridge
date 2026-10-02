@@ -2102,8 +2102,22 @@ $('#closeAction').addEventListener('change',async()=>{
   catch(error){ ui.configEditUntil=0; toast(error.message,true); }
 });
 
+async function paintPhonePin(){
+  const on=$('#phoneAccess').value==='on';
+  $('#phonePairRow').hidden=!on;
+  if(!on) return;
+  try{
+    const info=await api('/api/pair/pin');
+    setText($('#phonePin'),`${info.pin.slice(0,3)} ${info.pin.slice(3)}`);
+    setText($('#phonePairNote'),info.phones?`Привязано телефонов: ${info.phones}. Код меняется после каждой привязки`:'Введите этот код в приложении на телефоне: Настройки → Эфир на ПК');
+  }catch{}
+}
+$('#phonePinNew').addEventListener('click',async()=>{ try{ await api('/api/pair/pin/rotate',{method:'POST',body:'{}'}); paintPhonePin(); }catch(error){ toast(error.message,true); } });
+$('#phoneUnpair').addEventListener('click',async()=>{ try{ await api('/api/pair/clear',{method:'POST',body:'{}'}); paintPhonePin(); toast('Все телефоны отвязаны'); }catch(error){ toast(error.message,true); } });
+
 async function paintPhoneNote(){
   const on=$('#phoneAccess').value==='on';
+  paintPhonePin();
   if(!on){ setText($('#phoneAccessNote'),'Выключен — телефон в сети не увидит программу'); return; }
   try{
     const info=await api('/api/lan-info');
