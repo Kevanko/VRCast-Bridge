@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# vrcast [start|stop|status|log] — запуск VRCast Bridge; без аргументов стартует и открывает браузер.
+root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+port="${VRCAST_PORT:-4717}"
+url="http://127.0.0.1:$port"
+logfile="${XDG_DATA_HOME:-$HOME/.local/share}/VRCastBridge/vrcast.log"
+up() { curl -fs -o /dev/null --max-time 1 "$url/api/status"; }
+
+case "${1:-start}" in
+  start)
+    command -v node >/dev/null || { echo "Нужен Node.js 20+" >&2; exit 1; }
+    if ! up; then
+      mkdir -p "$(dirname "$logfile")"
+      (cd "$root" && nohup node src/server.js >>"$logfile.stdout" 2>&1 &)
+      for _ in $(seq 50); do up && break; sleep 0.2; done
+      up || { echo "Сервер не запустился, смотрите $logfile.stdout" >&2; exit 1; }
+    fi
+    echo "VRCast Bridge: $url"
+    command -v xdg-open >/dev/null && xdg-open "$url" >/dev/null 2>&1 ;;
+  stop) pkill -f "node src/server.js" && echo "Остановлен" || echo "Не запущен" ;;
+  status) up && echo "Работает: $url" || { echo "Не запущен"; exit 1; } ;;
+  log) tail -f "$logfile" ;;
+  *) echo "Использование: vrcast [start|stop|status|log]" >&2; exit 2 ;;
+esac

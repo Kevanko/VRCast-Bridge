@@ -61,7 +61,7 @@ git clone https://github.com/Kevanko/VRCast-Bridge.git && cd VRCast-Bridge
 npm ci && ./start.sh
 ```
 
-Откройте `http://127.0.0.1:4717`. Данные лежат в `$XDG_DATA_HOME/VRCastBridge` (по умолчанию `~/.local/share/VRCastBridge`).
+Команда `vrcast` (симлинк на `bin/vrcast` в `~/.local/bin`) запускает сервер и открывает интерфейс: `vrcast [start|stop|status|log]`. Адрес — `http://127.0.0.1:4717`. Данные лежат в `$XDG_DATA_HOME/VRCastBridge` (по умолчанию `~/.local/share/VRCastBridge`).
 
 | Что | Как работает в Linux |
 |---|---|
