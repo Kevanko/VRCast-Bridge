@@ -48,7 +48,12 @@ const TEMPLATES_FILE = join(DATA_DIR, 'templates.json');
 const CAPTURE_PREVIEW = join(DATA_DIR, 'capture-preview.jpg');
 const LOG_FILE = join(DATA_DIR, 'vrcast.log');
 const DETAIL_LOG_FILE = join(DATA_DIR, 'vrcast-errors.log');
-const PORT = Number(process.env.VRCAST_PORT || 4717);
+// Порт: переменная окружения главнее, затем выбранный в настройках, затем 4717.
+// RTSP и WebRTC считаются от него, поэтому потолок ниже 65535.
+const PORT_MIN = 1024, PORT_MAX = 65400;
+const validPort = value => Number.isInteger(Number(value)) && Number(value) >= PORT_MIN && Number(value) <= PORT_MAX;
+const savedPort = () => { try { const value = JSON.parse(readFileSync(join(DATA_DIR, 'config.json'), 'utf8')).port; return validPort(value) ? Number(value) : 0; } catch { return 0; } };
+const PORT = Number(process.env.VRCAST_PORT) || savedPort() || 4717;
 const RTSP_PORT = Number(process.env.VRCAST_RTSP_PORT || PORT + 1);
 // Порт WebRTC для предпросмотра: рядом с RTSP, чтобы два экземпляра не спорили.
 const WEBRTC_PORT = RTSP_PORT + 100;
@@ -115,6 +120,8 @@ const defaults = {
   closeToTray: true,
   // Пульт для телефона: пускать в программу с устройств своей сети.
   lanAccess: false,
+  // Порт программы; новое значение вступает в силу после перезапуска.
+  port: 4717,
 };
 
 // Битрейт — только из готовых уровней; старые значения (1000, 1800…) — к ближайшему.
@@ -2088,7 +2095,8 @@ function status(withLogs = true) {
     : config.outputMode === 'tunnel' ? (tunnelState === 'error' || tunnelServes === false ? 'failed' : tunnelUrl ? 'verifying' : 'preparing')
     : config.outputMode === 'remote' ? (remoteReachable === false ? 'failed' : 'preparing') : 'preparing';
   return {
-    appVersion: APP_VERSION, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(), currentTemplate: currentTemplateState(), queueSaved: queueSaved(),
+    appVersion: APP_VERSION,
+    port: PORT, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(), currentTemplate: currentTemplateState(), queueSaved: queueSaved(),
     progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
@@ -6669,6 +6677,7 @@ const server = http.createServer(async (req, res) => {
         // превращаться в true и молча прятать окно вместо выхода.
         closeToTray: typeof body.closeToTray === 'boolean' ? body.closeToTray : config.closeToTray !== false,
         lanAccess: typeof body.lanAccess === 'boolean' ? body.lanAccess : config.lanAccess === true,
+        port: body.port === undefined ? (validPort(config.port) ? Number(config.port) : 4717) : (validPort(body.port) ? Number(body.port) : (validPort(config.port) ? Number(config.port) : 4717)),
         activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),
         // Каждое поле откатывается к прежнему значению, если его не прислали.

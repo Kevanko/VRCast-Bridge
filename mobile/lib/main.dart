@@ -32,8 +32,9 @@ class _RootState extends State<Root> {
   @override
   void initState() {
     super.initState();
-    SavedPc.load().then((saved) {
-      if (saved != null) _connect(saved.name, Uri.parse(saved.url));
+    Prefs.instance.load().then((_) {
+      final last = Prefs.instance.last;
+      if (last != null && Prefs.instance.autoConnect) _connect(last.name, last.base);
       if (mounted) setState(() => _loading = false);
     });
   }
@@ -41,13 +42,13 @@ class _RootState extends State<Root> {
   void _connect(String name, Uri base) {
     _remote?.dispose();
     final remote = Remote(Api(base), pcName: name)..start();
-    SavedPc.save(name, base.toString());
+    Prefs.instance.remember(name, base.toString());
     setState(() => _remote = remote);
   }
 
   void _disconnect() {
     _remote?.dispose();
-    SavedPc.clear();
+    Prefs.instance.leave();
     setState(() => _remote = null);
   }
 

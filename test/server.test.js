@@ -525,6 +525,22 @@ test('«при закрытии окна» хранится в настройк�
   assert.equal((await задать({ closeToTray: true })).config.closeToTray, true);
 });
 
+test('порт программы: сохраняется только допустимый, работающий порт не меняется до перезапуска', async () => {
+  const задать = body => fetch(`http://127.0.0.1:${port}/api/config`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(r => r.json());
+  const before = await fetch(`http://127.0.0.1:${port}/api/status?logs=0`).then(r => r.json());
+  assert.equal(before.port, port, 'статус показывает работающий порт');
+  assert.equal((await задать({ port: 5123 })).config.port, 5123);
+  assert.equal((await задать({ port: 80 })).config.port, 5123, 'привилегированный порт отклоняется');
+  assert.equal((await задать({ port: 'abc' })).config.port, 5123, 'не число отклоняется');
+  assert.equal((await задать({ port: 70000 })).config.port, 5123, 'слишком большой отклоняется');
+  assert.equal((await задать({})).config.port, 5123, 'запрос без поля не сбрасывает порт');
+  const after = await fetch(`http://127.0.0.1:${port}/api/status?logs=0`).then(r => r.json());
+  assert.equal(after.port, port, 'сервер продолжает работать на прежнем порту');
+  await задать({ port: 4717 });
+});
+
 // Дочерние процессы тестового сервера: по ним видно, что реально запущено.
 function serverChildren() {
   if (process.platform !== 'win32') {

@@ -436,6 +436,8 @@
         <div class="setting-row"><span><b>Пульт для телефона</b><small id="phoneAccessNote">Выключен — телефон в сети не увидит программу</small></span>
           <div class="seg" data-for="phoneAccess" role="radiogroup" aria-label="Пульт для телефона"></div>
           <select id="phoneAccess" hidden><option value="off" data-short="Выкл">Выключен</option><option value="on" data-short="Вкл">Включён</option></select></div>
+        <div class="setting-row"><span><b>Порт программы</b><small id="portNote">По умолчанию 4717</small></span>
+          <input id="portInput" type="number" min="1024" max="65400" step="1" inputmode="numeric" style="width:92px" aria-label="Порт программы"></div>
         <div class="setting-row"><span><b>Обновления</b><small id="updateNote">Проверяю…</small></span><button class="btn" id="checkUpdate" type="button"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg>Проверить</button></div>
         <div class="setting-row"><span><b>Если что-то не так</b><small>Журнал поможет разобраться со сбоем</small></span><button class="btn" id="showLogs" type="button"><svg class="ic" aria-hidden="true"><use href="#i-log"/></svg>Открыть журнал</button></div>
       </section>

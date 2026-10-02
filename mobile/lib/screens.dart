@@ -44,14 +44,22 @@ class _ConnectScreenState extends State<ConnectScreen> {
     if (!text.contains('://')) text = 'http://$text';
     var uri = Uri.tryParse(text);
     if (uri == null || uri.host.isEmpty) return setState(() => _error = 'Неверный адрес');
-    if (!uri.hasPort) uri = uri.replace(port: 4717);
+    if (!uri.hasPort) uri = uri.replace(port: Prefs.instance.defaultPort);
     widget.onPick(uri.host, uri);
   }
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('VRCast Bridge')),
+        appBar: AppBar(title: const Text('VRCast Bridge'), actions: [settingsButton(context)]),
         body: ListView(padding: const EdgeInsets.all(16), children: [
+          if (Prefs.instance.pcs.isNotEmpty) ...[
+            Text('Запомненные', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            for (final pc in Prefs.instance.pcs)
+              Card(child: ListTile(leading: const Icon(Icons.history), title: Text(pc.name), subtitle: Text(pc.base.authority),
+                  trailing: const Icon(Icons.chevron_right), onTap: () => widget.onPick(pc.name, pc.base))),
+            const SizedBox(height: 16),
+          ],
           Text('Компьютеры в сети', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           if (_found.isEmpty)
@@ -65,12 +73,71 @@ class _ConnectScreenState extends State<ConnectScreen> {
           const SizedBox(height: 8),
           Row(children: [
             Expanded(child: TextField(controller: _manual, keyboardType: TextInputType.url, onSubmitted: (_) => _connectManual(),
-                decoration: const InputDecoration(hintText: '192.168.1.5:4717', border: OutlineInputBorder()))),
+                decoration: InputDecoration(hintText: '192.168.1.5:${Prefs.instance.defaultPort}', border: OutlineInputBorder()))),
             const SizedBox(width: 8),
             FilledButton(onPressed: _connectManual, child: const Text('Подключить')),
           ]),
           if (_error != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(_error!, style: const TextStyle(color: Colors.redAccent))),
         ]),
+      );
+}
+
+Widget settingsButton(BuildContext context) => IconButton(
+    tooltip: 'Настройки', icon: const Icon(Icons.settings_outlined),
+    onPressed: () {
+      FocusManager.instance.primaryFocus?.unfocus();
+      Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const SettingsScreen()));
+    });
+
+/// Настройки приложения: запомненные компьютеры, автоподключение, превью, порт по умолчанию.
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({super.key});
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  late final TextEditingController _port = TextEditingController(text: '${Prefs.instance.defaultPort}');
+
+  @override
+  void dispose() {
+    _port.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: Prefs.instance,
+        builder: (context, _) {
+          final prefs = Prefs.instance;
+          return Scaffold(
+            appBar: AppBar(title: const Text('Настройки')),
+            body: ListView(children: [
+              SwitchListTile(title: const Text('Подключаться к последнему ПК сам'), subtitle: const Text('Иначе при запуске откроется выбор компьютера'),
+                  value: prefs.autoConnect, onChanged: (v) => prefs.update(() => prefs.autoConnect = v)),
+              SwitchListTile(title: const Text('Видео-превью'), subtitle: const Text('Выключите, чтобы не расходовать трафик Wi-Fi: останется картинка трека'),
+                  value: prefs.preview, onChanged: (v) => prefs.update(() => prefs.preview = v)),
+              ListTile(
+                title: const Text('Порт по умолчанию'),
+                subtitle: const Text('Подставляется, если адрес введён без порта. Должен совпадать с портом на ПК'),
+                trailing: SizedBox(width: 90, child: TextField(controller: _port, keyboardType: TextInputType.number, textAlign: TextAlign.center,
+                    decoration: const InputDecoration(isDense: true, border: OutlineInputBorder()),
+                    onChanged: (text) {
+                      final v = int.tryParse(text);
+                      if (v != null && v >= 1024 && v <= 65400) prefs.update(() => prefs.defaultPort = v);
+                    })),
+              ),
+              const Divider(),
+              const Padding(padding: EdgeInsets.fromLTRB(16, 8, 16, 0), child: Text('Запомненные компьютеры', style: TextStyle(fontWeight: FontWeight.bold))),
+              if (prefs.pcs.isEmpty) const ListTile(title: Text('Пока пусто', style: TextStyle(color: Colors.white54))),
+              for (final pc in prefs.pcs)
+                ListTile(leading: const Icon(Icons.desktop_windows_outlined), title: Text(pc.name), subtitle: Text(pc.base.authority),
+                    trailing: IconButton(tooltip: 'Забыть', icon: const Icon(Icons.delete_outline), onPressed: () => prefs.forget(pc))),
+              const Divider(),
+              const ListTile(title: Text('Включить доступ на ПК'), subtitle: Text('Настройки → Программа → Пульт для телефона. Порт на ПК тоже меняется там')),
+            ]),
+          );
+        },
       );
 }
 
@@ -101,7 +168,7 @@ class _HomeScreenState extends State<HomeScreen> {
         return Scaffold(
           appBar: AppBar(
             title: Text(remote.pcName.isEmpty ? 'VRCast Bridge' : remote.pcName),
-            actions: [IconButton(tooltip: 'Другой компьютер', icon: const Icon(Icons.swap_horiz), onPressed: widget.onDisconnect)],
+            actions: [settingsButton(context), IconButton(tooltip: 'Другой компьютер', icon: const Icon(Icons.swap_horiz), onPressed: widget.onDisconnect)],
             bottom: remote.link == Link.online ? null : PreferredSize(
               preferredSize: const Size.fromHeight(3), child: LinearProgressIndicator(color: remote.link == Link.offline ? Colors.orange : accent)),
           ),
@@ -111,7 +178,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: const Text('Нет связи с ПК. Подключаюсь снова…', textAlign: TextAlign.center)),
             Expanded(child: remote.state == null ? const Center(child: CircularProgressIndicator()) : pages[_tab]),
           ]),
-          bottomNavigationBar: NavigationBar(selectedIndex: _tab, onDestinationSelected: (i) => setState(() => _tab = i), destinations: const [
+          bottomNavigationBar: NavigationBar(selectedIndex: _tab, onDestinationSelected: (i) { FocusManager.instance.primaryFocus?.unfocus(); setState(() => _tab = i); }, destinations: const [
             NavigationDestination(icon: Icon(Icons.play_circle_outline), selectedIcon: Icon(Icons.play_circle), label: 'Сейчас'),
             NavigationDestination(icon: Icon(Icons.queue_music_outlined), selectedIcon: Icon(Icons.queue_music), label: 'Очередь'),
             NavigationDestination(icon: Icon(Icons.link), label: 'Ссылки'),
@@ -148,7 +215,7 @@ class _PreviewState extends State<Preview> {
 
   void _sync() {
     final state = widget.remote.state;
-    final want = state != null && state.running && state.streamReady;
+    final want = Prefs.instance.preview && state != null && state.running && state.streamReady;
     if (want == _wanted) return;
     _wanted = want;
     _controller?.dispose();

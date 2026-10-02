@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # vrcast [start|stop|status|log|install] — запуск VRCast Bridge; без аргументов открывает окно приложения.
 root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-port="${VRCAST_PORT:-4717}"
+conf="${XDG_DATA_HOME:-$HOME/.local/share}/VRCastBridge/config.json"
+saved="$(grep -o '"port": *[0-9]*' "$conf" 2>/dev/null | grep -o '[0-9]*$')"
+port="${VRCAST_PORT:-${saved:-4717}}"
 url="http://127.0.0.1:$port"
 logfile="${XDG_DATA_HOME:-$HOME/.local/share}/VRCastBridge/vrcast.log"
 up() { curl -fs -o /dev/null --max-time 1 "$url/api/status"; }

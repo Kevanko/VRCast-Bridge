@@ -10,9 +10,11 @@ const path = require('node:path');
 app.commandLine.appendSwitch('no-sandbox');
 
 const ROOT = path.resolve(__dirname, '..');
-const PORT = Number(process.env.VRCAST_PORT || 4717);
-const URL_BASE = `http://127.0.0.1:${PORT}/`;
 const DATA_DIR = path.join(process.env.XDG_DATA_HOME || path.join(app.getPath('home'), '.local', 'share'), 'VRCastBridge');
+// Тот же порядок, что у сервера: переменная окружения, порт из настроек, 4717.
+const savedPort = () => { try { const v = Number(JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'config.json'), 'utf8')).port); return v >= 1024 && v <= 65400 ? v : 0; } catch { return 0; } };
+const PORT = Number(process.env.VRCAST_PORT) || savedPort() || 4717;
+const URL_BASE = `http://127.0.0.1:${PORT}/`;
 const GEOMETRY_FILE = path.join(DATA_DIR, 'window.txt');
 const ICON = path.join(ROOT, 'launcher', 'assets', 'vrcast-icon.png');
 const MEDIA_EXTENSIONS = ['mp4', 'mkv', 'webm', 'mov', 'avi', 'm4v', 'ts', 'mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus'];

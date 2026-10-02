@@ -72,15 +72,63 @@ class Remote extends ChangeNotifier {
   }
 }
 
-/// Последний выбранный ПК запоминаем: при следующем запуске подключаемся сразу.
 class SavedPc {
-  static const _key = 'lastPc';
-  static Future<({String name, String url})?> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList(_key);
-    return raw == null || raw.length != 2 ? null : (name: raw[0], url: raw[1]);
+  SavedPc(this.name, this.url);
+  final String name;
+  final String url;
+  Uri get base => Uri.parse(url);
+  @override
+  bool operator ==(Object other) => other is SavedPc && other.url == url;
+  @override
+  int get hashCode => url.hashCode;
+}
+
+/// Настройки приложения и запомненные компьютеры.
+class Prefs extends ChangeNotifier {
+  static final Prefs instance = Prefs();
+
+  bool autoConnect = true;
+  bool preview = true;
+  int defaultPort = 4717;
+  List<SavedPc> pcs = [];
+  SavedPc? last;
+
+  Future<void> load() async {
+    final p = await SharedPreferences.getInstance();
+    autoConnect = p.getBool('autoConnect') ?? true;
+    preview = p.getBool('preview') ?? true;
+    defaultPort = p.getInt('defaultPort') ?? 4717;
+    pcs = [for (final raw in p.getStringList('pcs') ?? const []) if (raw.contains('\n')) SavedPc(raw.split('\n').first, raw.split('\n').last)];
+    final l = p.getStringList('lastPc');
+    last = l != null && l.length == 2 ? SavedPc(l[0], l[1]) : null;
+    notifyListeners();
   }
 
-  static Future<void> save(String name, String url) async => (await SharedPreferences.getInstance()).setStringList(_key, [name, url]);
-  static Future<void> clear() async => (await SharedPreferences.getInstance()).remove(_key);
+  Future<void> _save() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setBool('autoConnect', autoConnect);
+    await p.setBool('preview', preview);
+    await p.setInt('defaultPort', defaultPort);
+    await p.setStringList('pcs', [for (final pc in pcs) '${pc.name}\n${pc.url}']);
+    last == null ? await p.remove('lastPc') : await p.setStringList('lastPc', [last!.name, last!.url]);
+  }
+
+  void update(void Function() change) {
+    change();
+    notifyListeners();
+    _save();
+  }
+
+  void remember(String name, String url) => update(() {
+        final pc = SavedPc(name, url);
+        pcs = [pc, ...pcs.where((e) => e != pc)].take(10).toList();
+        last = pc;
+      });
+
+  void forget(SavedPc pc) => update(() {
+        pcs = pcs.where((e) => e != pc).toList();
+        if (last == pc) last = null;
+      });
+
+  void leave() => update(() => last = null);
 }
