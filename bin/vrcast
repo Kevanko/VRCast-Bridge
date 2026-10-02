@@ -16,6 +16,13 @@ case "${1:-start}" in
       up || { echo "Сервер не запустился, смотрите $logfile.stdout" >&2; exit 1; }
     fi
     echo "VRCast Bridge: $url"
+    # Окно приложения без вкладок и адресной строки; нет Chromium — обычный браузер.
+    for browser in google-chrome google-chrome-stable chromium chromium-browser; do
+      if command -v "$browser" >/dev/null; then
+        nohup "$browser" --app="$url" --user-data-dir="${XDG_DATA_HOME:-$HOME/.local/share}/VRCastBridge/window" >/dev/null 2>&1 &
+        exit 0
+      fi
+    done
     command -v xdg-open >/dev/null && xdg-open "$url" >/dev/null 2>&1 ;;
   stop) pkill -f "node src/server.js" && echo "Остановлен" || echo "Не запущен" ;;
   status) up && echo "Работает: $url" || { echo "Не запущен"; exit 1; } ;;

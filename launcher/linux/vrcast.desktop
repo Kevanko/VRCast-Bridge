@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=VRCast Bridge
+Comment=Экран и видео одной ссылкой в плеер VRChat
+Exec=~/.local/bin/vrcast
+Icon=~/Desktop/VRCast-Bridge-work/VRCast-Bridge/launcher/assets/vrcast-icon.png
+Terminal=false
+Categories=AudioVideo;Network;
