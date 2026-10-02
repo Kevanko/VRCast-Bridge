@@ -25,7 +25,7 @@ async function запуститьСервер(env = {}) {
   const data = await mkdtemp(join(tmpdir(), 'vrcast-release-'));
   const child = spawn(process.execPath, ['src/server.js'], {
     cwd: ROOT, windowsHide: true, stdio: 'ignore',
-    env: { ...process.env, VRCAST_PORT: String(port), LOCALAPPDATA: data, ...env },
+    env: { ...process.env, VRCAST_PORT: String(port), LOCALAPPDATA: data, XDG_DATA_HOME: data, ...env },
   });
   const base = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + 10000;

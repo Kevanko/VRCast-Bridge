@@ -15,7 +15,7 @@ let dataDirectory;
 function launchServer() {
   return spawn(process.execPath, ['src/server.js'], {
     cwd: new URL('..', import.meta.url),
-    env: { ...process.env, VRCAST_PORT: String(port), LOCALAPPDATA: dataDirectory },
+    env: { ...process.env, VRCAST_PORT: String(port), LOCALAPPDATA: dataDirectory, XDG_DATA_HOME: dataDirectory },
     windowsHide: true, stdio: 'ignore',
   });
 }
@@ -451,8 +451,9 @@ test('формат TS-потока не меняется при смене ис�
   await fetch(`http://127.0.0.1:${port}/api/stop`, { method: 'POST' });
 });
 
-test('мгновенный RTSP-канал публикуется и отдаётся как основная ссылка', async () => {
-  const deadline = Date.now() + 15000;
+test('мгновенный RTSP-канал публикуется и отдаётся как основная ссылка', { timeout: 120000 }, async () => {
+  // В Linux MediaMTX докачивается из сети в свежую папку данных теста.
+  const deadline = Date.now() + (process.platform === 'win32' ? 15000 : 90000);
   let state;
   while (Date.now() < deadline) {
     state = await fetch(`http://127.0.0.1:${port}/api/status`).then(response => response.json());
@@ -526,6 +527,11 @@ test('«при закрытии окна» хранится в настройк�
 
 // Дочерние процессы тестового сервера: по ним видно, что реально запущено.
 function serverChildren() {
+  if (process.platform !== 'win32') {
+    const result = spawnSync('ps', ['-o', 'pid=,comm=,args=', '--ppid', String(server.pid)], { encoding: 'utf8', timeout: 20000 });
+    return String(result.stdout || '').split(/\r?\n/).map(line => line.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/)).filter(Boolean)
+      .map(m => ({ pid: Number(m[1]), name: m[2], commandLine: m[3] }));
+  }
   const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     `Get-CimInstance Win32_Process -Filter "ParentProcessId=${server.pid}" | ForEach-Object { "$($_.ProcessId)|$($_.Name)|$($_.CommandLine)" }`],
   { windowsHide: true, encoding: 'utf8', timeout: 20000 });
@@ -550,7 +556,7 @@ test('«Стоп» во время запуска захвата не подни
   await new Promise(resolve => setTimeout(resolve, 2500));
   const state = await currentStatus();
   assert.equal(state.running, false, `после «Стоп» эфир не должен идти (activeKind=${state.activeKind})`);
-  assert.ok(!serverChildren().some(child => /gdigrab|ddagrab/.test(child.commandLine)), 'процесс захвата экрана не должен остаться');
+  assert.ok(!serverChildren().some(child => /gdigrab|ddagrab|x11grab/.test(child.commandLine)), 'процесс захвата экрана не должен остаться');
   await api('/api/stop');
 });
 
@@ -739,7 +745,7 @@ test('упавший продюсер локального ролика прод
     for (let i = 0; i < 40 && !first; i++) { await new Promise(resolve => setTimeout(resolve, 250)); first = producer(); }
     assert.ok(first, 'продюсер ролика должен запуститься');
     await new Promise(resolve => setTimeout(resolve, 3000));
-    process.kill(first.pid);
+    process.kill(first.pid, 'SIGKILL');
     let second;
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
@@ -758,10 +764,10 @@ test('упавший продюсер локального ролика прод
   }
 });
 
-test('упавший захват экрана поднимается сам, а после «Стоп» — нет', async () => {
+test('упавший захват экрана поднимается сам, а после «Стоп» — нет', { skip: process.platform === 'linux' && !process.env.DISPLAY && 'нужен X11-дисплей (DISPLAY)' }, async () => {
   const settings = { outputMode: 'local', quality: '480p', fps: 30, captureMode: 'region', regionX: 0, regionY: 0, regionWidth: 320, regionHeight: 240, audioMode: 'none' };
   await api('/api/config', settings);
-  const capture = () => serverChildren().find(child => /gdigrab|ddagrab/.test(child.commandLine));
+  const capture = () => serverChildren().find(child => /gdigrab|ddagrab|x11grab/.test(child.commandLine));
   try {
     assert.equal((await api('/api/start/screen')).status, 200);
     let first;

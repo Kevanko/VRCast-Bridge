@@ -52,6 +52,27 @@
 
 Всё недостающее — Node.js, FFmpeg, загрузчик видео, медиасервер и WebView2 — она докачает при первом запуске. Ставить руками ничего не нужно.
 
+## Linux
+
+Запуск из исходников (нужны Node.js 20+ и `ffmpeg`; `yt-dlp`, MediaMTX и cloudflared программа докачает сама или возьмёт из `PATH`):
+
+```bash
+git clone https://github.com/Kevanko/VRCast-Bridge.git && cd VRCast-Bridge
+npm ci && ./start.sh
+```
+
+Откройте `http://127.0.0.1:4717`. Данные лежат в `$XDG_DATA_HOME/VRCastBridge` (по умолчанию `~/.local/share/VRCastBridge`).
+
+| Что | Как работает в Linux |
+|---|---|
+| Экран, монитор, область, окно | X11 через `x11grab`; список мониторов — `xrandr`, окон — `xprop` и `xwininfo`. В Wayland захват идёт через XWayland и видит только X11-окна |
+| Звук | PulseAudio / PipeWire (`pw-dump` или `pactl`): системный звук, выбранный выход или микрофон. Звук одного приложения не вырезается — берётся весь системный |
+| Автообновление, захват окна через Windows Graphics Capture, регулировка звука приложений | Только Windows |
+
+Если MediaMTX не стартует с ошибкой `inotify: too many open files`, поднимите лимит: `sudo sysctl fs.inotify.max_user_instances=512`.
+
+Тесты: `npm test` (тесты с захватом экрана пропускаются без `DISPLAY`).
+
 ## Как пользоваться
 
 1. Добавьте ссылку или файлы — либо откройте «Экран» и выберите монитор, окно или область.
