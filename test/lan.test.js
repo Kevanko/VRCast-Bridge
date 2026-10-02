@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { request } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRouteAllowed } from '../src/lan.js';
@@ -95,6 +96,40 @@ test('события: статус приходит сразу и обновля
   await local('/api/config', { method: 'POST', body: { loopMode: 'all' } });
   await waitFor(() => events.length > before && events.at(-1).config.loopMode === 'all', 'изменение должно прийти событием');
   res.destroy();
+});
+
+test('загрузка с телефона: файл попадает в очередь, чужие типы и пути отвергаются, удаление чистит диск', { skip: !lanIp && 'нет сетевого интерфейса' }, async () => {
+  await local('/api/config', { method: 'POST', body: { lanAccess: true } });
+  const host = `${lanIp}:${port}`;
+  for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 150)); if (await call(host, '/api/status?logs=0').then(r => r.status === 200, () => false)) break; }
+  const sample = join(dataDirectory, 'phone-clip.mp4');
+  const made = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=15', '-f', 'lavfi', '-i', 'sine=frequency=330',
+    '-t', '3', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-shortest', '-y', sample]);
+  assert.equal(made.status, 0);
+  const bytes = readFileSync(sample);
+  const send = (name, body) => new Promise((resolve, reject) => {
+    const req = request({ host: lanIp, port, path: `/api/queue/upload?name=${encodeURIComponent(name)}`, method: 'POST',
+      headers: { Host: host, 'Content-Type': 'application/octet-stream', 'Content-Length': body.length } }, res => {
+      let text = ''; res.setEncoding('utf8'); res.on('data', c => { text += c; }); res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(text || '{}') }));
+    });
+    req.on('error', reject); req.end(body);
+  });
+  const ok = await send('Мой ролик.mp4', bytes);
+  assert.equal(ok.status, 201, JSON.stringify(ok.json));
+  assert.equal(ok.json.added[0].title, 'Мой ролик.mp4', 'в названии нет служебного префикса');
+  assert.ok(ok.json.added[0].duration >= 2);
+  const folder = join(dataDirectory, 'VRCastBridge', 'uploads');
+  assert.equal(readdirSync(folder).length, 1);
+  assert.equal((await send('virus.exe', Buffer.from('MZ'))).status >= 400, true, 'не медиа-файл отвергается');
+  const evil = await send('../../escape.mp4', bytes);
+  assert.equal(evil.status, 201);
+  assert.ok(!existsSync(join(dataDirectory, 'escape.mp4')) && !existsSync(join(dataDirectory, 'VRCastBridge', 'escape.mp4')), 'путь из имени не должен выводить из папки');
+  assert.equal((await send('broken.mp4', Buffer.from('это не видео'))).status >= 400, true, 'мусор под видом видео отвергается');
+  assert.equal(readdirSync(folder).filter(n => n.endsWith('.part')).length, 0, 'недокачанных файлов не остаётся');
+  const queue = JSON.parse((await local('/api/status?logs=0')).text).queue;
+  assert.equal(queue.length, 2);
+  for (const item of queue) await call(host, `/api/queue/${item.id}`, { method: 'DELETE' });
+  assert.equal(readdirSync(folder).length, 0, 'удалённые из очереди файлы стираются');
 });
 
 test('выключили пульт: сеть снова закрыта', { skip: !lanIp && 'нет сетевого интерфейса' }, async () => {

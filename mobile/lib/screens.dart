@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:video_player/video_player.dart';
@@ -349,6 +350,33 @@ class QueuePage extends StatefulWidget {
 class _QueuePageState extends State<QueuePage> {
   final _link = TextEditingController();
   bool _adding = false;
+  String? _uploadName; // файл, который сейчас уходит на ПК
+  int _uploadIndex = 0, _uploadTotal = 0;
+  double _uploadProgress = 0;
+
+  static const _extensions = ['mp4', 'mkv', 'webm', 'mov', 'avi', 'm4v', 'ts', 'mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus'];
+
+  /// Файлы с телефона уходят на ПК по одному и встают в очередь.
+  Future<void> _pickAndUpload() async {
+    if (_uploadName != null) return;
+    final picked = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: _extensions);
+    final files = picked.where((f) => f.path != null).toList();
+    if (files.isEmpty) return;
+    setState(() { _uploadTotal = files.length; _uploadIndex = 0; });
+    var failed = 0;
+    for (final file in files) {
+      setState(() { _uploadName = file.name; _uploadProgress = 0; _uploadIndex += 1; });
+      try {
+        await widget.remote.api.uploadFile(file.path!, file.name, (p) { if (mounted && (p - _uploadProgress > 0.01 || p >= 1)) setState(() => _uploadProgress = p); });
+      } catch (e) {
+        failed += 1;
+        if (mounted) toastError(context, '${file.name}: $e');
+      }
+    }
+    if (!mounted) return;
+    setState(() => _uploadName = null);
+    if (failed == 0) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Отправлено на ПК: ${files.length}')));
+  }
 
   @override
   void dispose() {
@@ -387,6 +415,14 @@ class _QueuePageState extends State<QueuePage> {
         const SizedBox(width: 8),
         FilledButton(onPressed: _adding ? null : _add, child: _adding ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Добавить')),
       ])),
+      if (_uploadName != null)
+        Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Отправляю на ПК ($_uploadIndex из $_uploadTotal): $_uploadName', maxLines: 1, overflow: TextOverflow.ellipsis),
+          const SizedBox(height: 4),
+          LinearProgressIndicator(value: _uploadProgress),
+        ])),
+      Padding(padding: const EdgeInsets.fromLTRB(12, 0, 12, 4), child: Align(alignment: Alignment.centerLeft, child: TextButton.icon(
+          onPressed: _uploadName == null ? _pickAndUpload : null, icon: const Icon(Icons.upload_file), label: const Text('Добавить файлы с телефона')))),
       Expanded(child: s.queue.isEmpty
           ? const Center(child: Text('Очередь пуста', style: TextStyle(color: Colors.white54)))
           : ReorderableListView.builder(

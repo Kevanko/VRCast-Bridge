@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { connect as netConnect, createServer as netCreateServer } from 'node:net';
 import { Readable } from 'node:stream';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
 import { isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRouteAllowed, publishService, unpublishService } from './lan.js';
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
@@ -36,6 +37,8 @@ const STANDBY_IMAGE = join(PUBLIC_DIR, 'standby.png');
 const DATA_DIR = join(dataBase(), 'VRCastBridge');
 const HLS_DIR = join(DATA_DIR, 'hls');
 const THUMB_DIR = join(DATA_DIR, 'thumbs');
+// Файлы, присланные с телефона: лежат здесь, пока трек в очереди.
+const UPLOAD_DIR = join(DATA_DIR, 'uploads');
 const DEFAULT_CACHE_DIR = join(DATA_DIR, 'media-cache');
 const UNITY_DIR = join(DATA_DIR, 'unity');
 const UNITY_ITEMS_DIR = join(UNITY_DIR, 'items');
@@ -6298,6 +6301,40 @@ const TUNNEL_START_OFFSET = 3;
 // 6 — всё ещё вдвое больше отступа старта, запас на джиттер туннеля есть.
 const TUNNEL_WINDOW = 6;
 
+// Приём файла с телефона: тело запроса пишется на диск как есть. Имя очищаем от
+// путей и служебных символов, тип проверяем по расширению, размер ограничиваем
+// свободным местом — загрузка не должна забить диск.
+function safeUploadName(raw) {
+  const name = basename(String(raw || '').replace(/\\/g, '/')).replace(/[\u0000-\u001f<>:"|?*]/g, '_').trim().slice(-120);
+  return name && name !== '.' && name !== '..' ? name : '';
+}
+
+async function receiveUpload(req, rawName) {
+  const name = safeUploadName(rawName);
+  if (!name || !MEDIA_EXTENSIONS.has(extname(name).toLowerCase())) throw new Error('Нужен видео- или аудиофайл (mp4, mkv, webm, mov, mp3 и т. п.).');
+  const size = Number(req.headers['content-length']) || 0;
+  mkdirSync(UPLOAD_DIR, { recursive: true });
+  const free = (await statfs(UPLOAD_DIR)).bavail * (await statfs(UPLOAD_DIR)).bsize;
+  if (size && size > free - 2 * 1024 ** 3) throw new Error('На компьютере не хватает места для этого файла.');
+  const target = join(UPLOAD_DIR, `${crypto.randomUUID().slice(0, 8)}-${name}`);
+  const partial = `${target}.part`;
+  try {
+    await pipeline(req, createWriteStream(partial));
+    if (size && statSync(partial).size !== size) throw new Error('Файл пришёл не полностью, попробуйте ещё раз.');
+    renameSync(partial, target);
+  } catch (error) { rmSync(partial, { force: true }); throw error; }
+  log(`Файл с телефона: ${name} (${Math.round(statSync(target).size / 1048576)} МБ)`);
+  return target;
+}
+
+// Трек убрали из очереди — присланный файл больше не нужен (если его не держит другой трек).
+function dropUploadedFile(item) {
+  const file = item?.local ? resolve(String(item.sourceUrl || '')) : '';
+  if (!file || !file.startsWith(UPLOAD_DIR + sep) || queue.some(other => other.sourceUrl === item.sourceUrl)
+    || templates.some(list => list.items.some(other => other.sourceUrl === item.sourceUrl))) return;
+  try { rmSync(file, { force: true }); } catch {}
+}
+
 // Состояние для телефона: приложение подписывается и получает полный статус при
 // каждом изменении, без опроса. Heartbeat держит соединение за Wi-Fi-роутером.
 const слушателиСобытий = new Set();
@@ -6638,11 +6675,25 @@ const server = http.createServer(async (req, res) => {
       }
       return json(res, 200, status());
     }
+    if (req.method === 'POST' && url.pathname === '/api/queue/upload') {
+      const file = await receiveUpload(req, url.searchParams.get('name'));
+      const added = await addLocalFiles([file]);
+      // Нечитаемый файл addLocalFiles кладёт в очередь «недоступным»; присланное с телефона так не оставляем.
+      if (!added.length || added.some(item => item.unavailable)) {
+        queue = queue.filter(item => !added.includes(item)); saveQueue(); rmSync(file, { force: true });
+        throw new Error('Файл не удалось прочитать: это не видео и не звук.');
+      }
+      for (const item of added) item.title = safeUploadName(url.searchParams.get('name')) || item.title;
+      saveQueue();
+      return json(res, 201, { added, status: status() });
+    }
     if (req.method === 'DELETE' && url.pathname.startsWith('/api/queue/')) {
       const id = decodeURIComponent(url.pathname.split('/').pop());
       const removedIndex = queue.findIndex(item => item.id === id);
       if (removedIndex >= 0) log(`Убрано из очереди: «${queue[removedIndex].title}»${id === currentId && activeKind === 'queue' ? ' — оно играло, перехожу к следующему' : ''}`);
+      const removedItem = removedIndex >= 0 ? queue[removedIndex] : null;
       queue = queue.filter(item => item.id !== id); forgetItemState(id); saveQueue();
+      if (removedItem) dropUploadedFile(removedItem);
       // Удаление играющего трека раньше оставляло висячий currentId и сбитый
       // queueIndex: UI показывал «эфир не запущен», а очередь после трека вставала.
       if (activeKind === 'queue' && removedIndex >= 0) {
@@ -6654,7 +6705,9 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, status());
     }
     if (req.method === 'DELETE' && url.pathname === '/api/queue') {
+      const previous = [...queue];
       очиститьОчередь();
+      previous.forEach(dropUploadedFile);
       // Очистили очередь — дальше собирается новый список, а не правится старый.
       saveConfig({ currentTemplateId: '' });
       return json(res, 200, status());

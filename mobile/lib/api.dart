@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -72,6 +73,28 @@ class Api {
 
   /// Добавить ссылку. Сервер может переспросить (большой плейлист) — тогда вернётся ask.
   Future<Map<String, dynamic>> addLink(String url, {bool confirm = false}) => _send('POST', '/api/queue', {'url': url, if (confirm) 'confirm': true});
+
+  /// Отправить файл с телефона в очередь ПК. Тело идёт потоком, память не растёт на больших файлах.
+  Future<void> uploadFile(String path, String name, void Function(double) onProgress) async {
+    final file = File(path);
+    final length = await file.length();
+    final request = http.StreamedRequest('POST', uri('/api/queue/upload?name=${Uri.encodeQueryComponent(name)}'))
+      ..contentLength = length
+      ..headers['Content-Type'] = 'application/octet-stream';
+    final response = _client.send(request);
+    var sent = 0;
+    await request.sink.addStream(file.openRead().map((chunk) {
+      sent += chunk.length;
+      onProgress(length == 0 ? 1 : sent / length);
+      return chunk;
+    }));
+    await request.sink.close();
+    final done = await http.Response.fromStream(await response);
+    if (done.statusCode >= 400) {
+      final decoded = done.body.isEmpty ? null : jsonDecode(done.body);
+      throw ApiException('${decoded is Map ? decoded['error'] : null ?? 'Ошибка ${done.statusCode}'}');
+    }
+  }
 
   void close() => _client.close();
 }

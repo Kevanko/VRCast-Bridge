@@ -30,8 +30,8 @@ export function lanHostAllowed(host, port) {
 const ALLOWED = [
   ['GET', /^\/api\/(status|events|lan-info|capture-preview)$/],
   ['GET', /^\/(thumbs|stream|api\/local-media)\//],
-  ['POST', /^\/api\/(playback|stop|skip|queue|queue\/inspect|queue\/move)$/],
-  ['POST', /^\/api\/start\/(queue|screen)$/],
+  ['POST', /^\/api\/(playback|stop|skip|queue|queue\/inspect|queue\/move|queue\/upload)$/],
+  ['POST', /^\/api\/start\/(queue|phone)$/],
   ['DELETE', /^\/api\/queue(\/[^/]+)?$/],
 ];
 

@@ -39,6 +39,7 @@ dependencies:
   video_player: ^2.14.0
   shared_preferences: ^2.5.5
   share_plus: ^13.3.1
+  file_picker: ^13.1.0
 
 dev_dependencies:
   flutter_test:
