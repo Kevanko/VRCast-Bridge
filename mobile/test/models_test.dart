@@ -122,7 +122,7 @@ void main() {
     await api.setStream({'outputMode': 'tunnel', 'quality': '1080p'});
     expect(calls, [
       'GET /api/pair/check token=null ',
-      'POST /api/pair token=null {"code":"123456","name":"Телефон"}',
+      'POST /api/pair token=null {"code":"123456","name":"Телефон","kind":"phone"}',
       'POST /api/config token=abc123 {"outputMode":"tunnel","quality":"1080p"}',
     ]);
   });

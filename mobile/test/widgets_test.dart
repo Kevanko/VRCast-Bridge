@@ -8,6 +8,7 @@ import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vrcast_remote/api.dart';
 import 'package:vrcast_remote/discovery.dart';
+import 'package:vrcast_remote/media_server.dart';
 import 'package:vrcast_remote/main.dart';
 import 'package:vrcast_remote/models.dart';
 import 'package:vrcast_remote/own_server.dart';
@@ -20,8 +21,18 @@ Map<String, dynamic> fixture() => (jsonDecode(File('test/fixtures/status.json').
 http.Response json(Object body, [int code = 200]) =>
     http.Response.bytes(utf8.encode(jsonEncode(body)), code, headers: {'content-type': 'application/json; charset=utf-8'});
 
+/// Сервер файлов без сокета: тесты проверяют, что телефон сообщает группе, а не сеть.
+class FakeMedia extends MediaServer {
+  FakeMedia() : super(files: () => Prefs.instance.sharedFiles, key: 'fake-media-key-0123456789');
+  @override
+  Future<int> start({int port = 0}) async => 4242;
+  @override
+  Future<void> stop() async {}
+}
+
 Remote makeRemote(MockClient client, {Link link = Link.online, Map<String, dynamic>? state, String? token}) {
-  final remote = Remote(Api(Uri.parse('http://192.168.1.5:4717'), client: client, token: token), pcName: 'Тест-ПК');
+  Prefs.instance.mediaAddress = '192.168.1.50:4242';
+  final remote = Remote(Api(Uri.parse('http://192.168.1.5:4717'), client: client, token: token), pcName: 'Тест-ПК', media: FakeMedia());
   remote.state = BridgeState.fromJson(state ?? fixture());
   remote.link = link;
   return remote;
@@ -165,9 +176,6 @@ void main() {
     expect(find.text('Ждёт подключения к ПК'), findsOneWidget);
     await tester.pump(const Duration(seconds: 6)); // первое сообщение уходит, показывается следующее
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Добавить файлы с телефона'));
-    await tester.pump();
-    expect(find.textContaining('сначала подключитесь к ПК'), findsOneWidget, reason: 'файлы без ПК не отправить, но человеку сказано почему');
     await tester.tap(find.byTooltip('Убрать'));
     await tester.pump();
     expect(Prefs.instance.pendingLinks, isEmpty);
@@ -241,25 +249,83 @@ void main() {
     expect(Prefs.instance.ownServers, isEmpty);
   });
 
-  testWidgets('подключение к ПК: ссылки и серверы уходят на ПК, серверы ПК приходят на телефон', (tester) async {
+  testWidgets('подключение к ПК: ссылки уходят в очередь, файлы и серверы — группе; серверы ПК к телефону не прилипают', (tester) async {
     Prefs.instance.addPendingLink('https://example.com/a.mp4');
     Prefs.instance.saveOwnServer(OwnServer(name: 'Мой', host: '198.51.100.20', rtspPort: 9554, key: 'phone-key'));
+    Prefs.instance.addSharedFiles([SharedFile(id: 'f1', path: '/tmp/f1.mp4', title: 'Мой ролик.mp4'), SharedFile(id: 'f2', path: '/tmp/f2.mp3', title: 'Песня.mp3')]);
     final calls = <String>[];
     final remote = makeRemote(MockClient((request) async {
       calls.add('${request.method} ${request.url.path} ${request.body}');
-      if (request.url.path == '/api/servers/export') return json({'servers': [{'id': 's1', 'name': 'С ПК', 'host': '203.0.113.9', 'rtspPort': 8554, 'publishKey': 'pc-key'}]});
+      if (request.url.path == '/api/pair/check') return json({'paired': true, 'id': 'abc123'});
+      if (request.url.path == '/api/group/contribute') return json({'removed': ['f2']});
       return json({});
     }), token: 'tok');
-    final added = await tester.runAsync(() async {
-      await remote.syncAll();
-      return Prefs.instance.ownServers.length;
-    });
+    await tester.runAsync(() => remote.syncAll());
     expect(calls.first, 'POST /api/queue {"url":"https://example.com/a.mp4","confirm":true}', reason: 'накопленные ссылки уходят в очередь ПК первыми');
-    expect(calls, contains('GET /api/servers/export '));
-    expect(calls.any((c) => c.startsWith('POST /api/servers/import') && c.contains('"publishKey":"phone-key"') && c.contains('"publishKey":"pc-key"')), isTrue,
-        reason: 'на ПК уходят и серверы телефона, и полученные с ПК — без потерь');
+    expect(remote.myId, 'abc123', reason: 'телефон знает свой номер в группе');
+    final contribution = calls.firstWhere((c) => c.startsWith('POST /api/group/contribute'));
+    expect(contribution, contains('"base":"http://192.168.1.50:4242"'));
+    expect(contribution, contains('"key":"fake-media-key-0123456789"'));
+    expect(contribution, contains('"id":"f1"'));
+    expect(contribution, contains('"publishKey":"phone-key"'));
+    expect(calls.any((c) => c.contains('/api/servers/')), isFalse, reason: 'серверы между устройствами больше не копируются насовсем');
+    expect(Prefs.instance.ownServers.map((e) => e.name), ['Мой']);
+    expect(Prefs.instance.sharedFiles.map((e) => e.id), ['f1'], reason: 'файл, который убрали другие, пропал и у владельца');
     expect(Prefs.instance.pendingLinks, isEmpty);
-    expect(added, 2, reason: 'у телефона теперь и свой сервер, и сервер ПК');
+  });
+
+  testWidgets('группа: видно, кто ведёт эфир и кто подключён; чужой эфир можно перехватить', (tester) async {
+    tallScreen(tester);
+    final calls = <String>[];
+    final state = fixture()
+      ..['group'] = {
+        'admin': {'id': 'dev1', 'name': 'Игровой ПК', 'kind': 'pc'},
+        'controller': {'id': 'm2', 'name': 'Телефон Ани', 'kind': 'phone', 'at': 1},
+        'members': [
+          {'id': 'm1', 'name': 'Мой телефон', 'kind': 'phone', 'online': true, 'files': 1, 'servers': 0},
+          {'id': 'm2', 'name': 'Телефон Ани', 'kind': 'phone', 'online': true, 'files': 0, 'servers': 1},
+          {'id': 'm3', 'name': 'Ноутбук', 'kind': 'pc', 'online': false, 'files': 0, 'servers': 0},
+        ],
+      };
+    final remote = makeRemote(MockClient((request) async {
+      calls.add('${request.method} ${request.url.path}');
+      return json({});
+    }), state: state, token: 'tok');
+    remote.myId = 'm1';
+    await tester.pumpWidget(app(Scaffold(body: NowPlayingPage(remote: remote))));
+    expect(find.text('Эфир ведёт: Телефон Ани'), findsOneWidget);
+    expect(find.text('Игровой ПК · админ'), findsOneWidget);
+    expect(find.text('Мой телефон · вы'), findsOneWidget);
+    expect(find.text('Ноутбук'), findsOneWidget);
+    await tester.tap(find.text('Перехватить'));
+    await tester.pump();
+    expect(calls, contains('POST /api/group/take'));
+
+    // Эфир ведёт этот телефон — кнопки перехвата нет.
+    final mine = makeRemote(MockClient((_) async => json({})), state: (fixture()..['group'] = {
+      'admin': {'name': 'Игровой ПК'}, 'controller': {'id': 'm1', 'name': 'Мой телефон'}, 'members': [{'id': 'm1', 'name': 'Мой телефон', 'kind': 'phone', 'online': true}]}));
+    mine.myId = 'm1';
+    await tester.pumpWidget(app(Scaffold(body: NowPlayingPage(remote: mine))));
+    expect(find.text('Эфир ведёте вы'), findsOneWidget);
+    expect(find.text('Перехватить'), findsNothing);
+  });
+
+  testWidgets('очередь: у файлов видно владельца; свой файл без связи ждёт подключения', (tester) async {
+    tallScreen(tester);
+    final state = fixture();
+    (state['queue'] as List).addAll([
+      {'id': 'm2.x', 'title': 'Клип Ани', 'duration': 65, 'member': 'm2', 'owner': 'Телефон Ани', 'ownerItemId': 'x', 'thumbnail': ''},
+      {'id': 'm1.f1', 'title': 'Мой ролик', 'duration': 30, 'member': 'm1', 'owner': 'Мой телефон', 'ownerItemId': 'f1', 'thumbnail': ''},
+    ]);
+    Prefs.instance.addSharedFiles([SharedFile(id: 'f1', path: '/tmp/a', title: 'Мой ролик'), SharedFile(id: 'f9', path: '/tmp/b', title: 'Ещё не ушёл.mp4')]);
+    final remote = makeRemote(MockClient((_) async => json({})), state: state);
+    remote.myId = 'm1';
+    await tester.pumpWidget(app(Scaffold(body: ListenableBuilder(listenable: remote, builder: (_, __) => QueuePage(remote: remote)))));
+    expect(find.text('1:05 · Телефон Ани'), findsOneWidget);
+    expect(find.text('0:30 · мой файл'), findsOneWidget);
+    expect(find.text('Ещё не ушёл.mp4'), findsOneWidget, reason: 'свой файл, которого ещё нет в общей очереди, виден как ожидающий');
+    expect(find.text('Добавляется в общую очередь…'), findsOneWidget);
+    expect(find.text('Мой ролик'), findsOneWidget, reason: 'уже ушедший файл показан только в очереди, второй строки нет');
   });
 
   group('устройства в сети', () {
@@ -416,7 +482,7 @@ void main() {
     final seen = <String>[];
     final api = Api(Uri.parse('http://pc:4717'), client: MockClient((request) async { seen.add(request.body); return json({'token': 't'}); }));
     await api.pair('1234', Prefs.instance.deviceName);
-    expect(seen.single, '{"code":"1234","name":"Телефон Ани"}', reason: 'ПК увидит именно это имя в списке привязанных');
+    expect(seen.single, '{"code":"1234","name":"Телефон Ани","kind":"phone"}', reason: 'ПК увидит именно это имя в списке привязанных');
   });
 
   testWidgets('настройки эфира без привязки: значения с ПК видны, менять нельзя', (tester) async {

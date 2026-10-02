@@ -436,7 +436,9 @@ test('формат TS-потока не меняется при смене ис�
     const audio = data.streams?.find(stream => stream.codec_type === 'audio') || {};
     return `${video.width}x${video.height} sar=${video.sample_aspect_ratio} ${video.r_frame_rate} | ${audio.codec_name} ${audio.channels}ch ${audio.sample_rate}`;
   };
-  await fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  // Два ffmpeg выше блокируют тест дольше 5 с: сервер успевает закрыть простаивающее соединение, и первый запрос на нём обрывается. Повторяем.
+  const resetQueue = () => fetch(`http://127.0.0.1:${port}/api/queue`, { method: 'DELETE' });
+  await resetQueue().catch(resetQueue);
   await fetch(`http://127.0.0.1:${port}/api/queue/local`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paths: [plain, weird] }) });
   await fetch(`http://127.0.0.1:${port}/api/start/queue`, { method: 'POST' });
   await new Promise(resolve => setTimeout(resolve, 6000));

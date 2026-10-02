@@ -81,7 +81,10 @@ class Api {
   Future<void> stop() => _send('POST', '/api/stop', {});
 
   /// Привязка к ПК по коду из его настроек; возвращает ключ.
-  Future<String> pair(String code, String name) async => '${(await _send('POST', '/api/pair', {'code': code, 'name': name}))['token']}';
+  Future<String> pair(String code, String name) async => '${(await _send('POST', '/api/pair', {'code': code, 'name': name, 'kind': 'phone'}))['token']}';
+
+  /// Номер этого устройства в группе на ПК (по ключу привязки).
+  Future<String> myId() async => '${(await _send('GET', '/api/pair/check'))['id'] ?? ''}';
 
   Future<bool> pairCheck() async {
     try {
@@ -92,16 +95,18 @@ class Api {
     }
   }
 
-  /// Свои серверы с ключами (только привязанному телефону): чтобы работать без ПК.
-  Future<List<OwnServer>> exportServers() async {
-    final data = await _send('GET', '/api/servers/export');
-    return [for (final item in (data['servers'] as List? ?? const [])) OwnServer.fromJson((item as Map).cast<String, dynamic>())];
+  /// Отдаём группе свои файлы и серверы, пока подключены. ПК отвечает, какие файлы другие убрали из общей очереди.
+  Future<List<String>> contribute({required String mediaBase, required String mediaKey, required List<Map<String, Object?>> files, required List<OwnServer> servers}) async {
+    final reply = await _send('POST', '/api/group/contribute', {
+      'media': {'base': mediaBase, 'key': mediaKey},
+      'queue': files,
+      'servers': [for (final s in servers) {'id': s.id, 'name': s.name, 'host': s.host, 'rtspPort': s.rtspPort, 'publishKey': s.key}],
+    });
+    return [for (final id in (reply['removed'] as List? ?? const [])) '$id'];
   }
 
-  /// Серверы телефона отправляются на ПК (нужна привязка): там они появятся в списке серверов.
-  Future<void> importServers(List<OwnServer> servers) => _send('POST', '/api/servers/import', {
-        'servers': [for (final s in servers) {'name': s.name, 'host': s.host, 'rtspPort': s.rtspPort, 'publishKey': s.key}],
-      });
+  /// Забрать эфир себе: дальше его ведёт это устройство.
+  Future<void> take() => _send('POST', '/api/group/take', {});
 
   /// Настройки эфира на ПК (outputMode, tunnelProvider, activeServerId, quality, fps, encoderMode, whiteIp).
   Future<void> setStream(Map<String, Object?> values) => _send('POST', '/api/config', values);

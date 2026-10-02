@@ -11,6 +11,7 @@ import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
 import { hashToken, isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRouteOpenWithPin, lanRoutePaired, lanRouteAllowed, pickNetworkConfig, publishService, sameSecret, unpublishService } from './lan.js';
+import { hideMemberSource, sanitizeContribution, sharedQueueItem, sharedServer, takeInitiative } from './group.js';
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
 // VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
@@ -125,6 +126,8 @@ const defaults = {
   lanAccess: false,
   // Как ПК называется в сети (по умолчанию имя компьютера) и необязательный PIN для подключения устройств.
   deviceName: '',
+  // Постоянный номер этого устройства: по нему группа отличает ПК друг от друга.
+  deviceId: '',
   accessPin: '',
   // Привязанные телефоны: хранится только хеш ключа.
   pairedPhones: [],
@@ -607,7 +610,8 @@ function loadQueue() {
 }
 
 function saveQueue() {
-  writeJsonAtomic(QUEUE_FILE, queue);
+  // Файлы подключённых устройств живут только пока те подключены — на диск не пишем.
+  writeJsonAtomic(QUEUE_FILE, queue.filter(item => !item.member));
   warmQueueSoon();
 }
 
@@ -686,6 +690,7 @@ function templateSummaries() {
 function очиститьОчередь() {
   if (queue.length) log(`Очередь очищена: убрано видео — ${queue.length}`);
   if (activeKind === 'queue') stopActive();
+  for (const item of queue) if (item.member) groupMembers.get(item.member)?.removed.add(item.ownerItemId);
   queue = []; resolvedMedia.clear(); mediaFailures.clear(); cacheDeclined.clear(); saveQueue();
 }
 
@@ -710,7 +715,7 @@ function saveQueueTemplate(body) {
   if (!name) throw new Error('Введите название шаблона.');
   const existing = templates.find(item => item.id === String(body.id || ''));
   const now = new Date().toISOString();
-  const snapshot = queue.map(item => ({ ...item }));
+  const snapshot = queue.filter(item => !item.member).map(item => ({ ...item }));
   if (existing) {
     backupTemplate(existing);
     existing.name = name; existing.items = snapshot; existing.updatedAt = now;
@@ -1527,8 +1532,13 @@ function savedServers() {
   return Array.isArray(config.servers) ? config.servers : [];
 }
 
+// Свои серверы плюс серверы подключённых устройств (те не сохраняются).
+function allServers() {
+  return [...savedServers(), ...groupServers];
+}
+
 function activeServer() {
-  return savedServers().find(item => item.id === config.activeServerId) || null;
+  return allServers().find(item => item.id === config.activeServerId) || null;
 }
 
 // Случайный путь для «временной» ссылки: буква впереди, чтобы путь RTSP был
@@ -2128,7 +2138,7 @@ function status(withLogs = true) {
   return {
     appVersion: APP_VERSION,
     port: PORT,
-    phoneSource, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue, templates: templateSummaries(), currentTemplate: currentTemplateState(), queueSaved: queueSaved(),
+    phoneSource, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue: queue.map(hideMemberSource), templates: templateSummaries(), currentTemplate: currentTemplateState(), queueSaved: queueSaved(),
     progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
@@ -2186,9 +2196,10 @@ function status(withLogs = true) {
       speeds: config.tunnelSpeeds || {}, test: проверкаТуннелей },
     config: { ...config,
       pairedPhones: (config.pairedPhones || []).map(({ id, name, at }) => ({ id, name, at })),
-      servers: savedServers().map(item => ({ id: item.id, name: item.name, host: item.host,
+      servers: allServers().map(item => ({ id: item.id, name: item.name, host: item.host, owner: item.owner || '',
         rtspPort: item.rtspPort, addedAt: item.addedAt, reachable: serverReach[item.id] ?? null,
         permanentLink: item.permanentLink !== false, channel: item.channel || 'live', publishKey: undefined })) },
+    group: groupState(),
     playbackUrl: publicAddress(),
     webrtcUrl: mediaMtxProcess ? `http://127.0.0.1:${WEBRTC_PORT}/live/whep` : '',
     localPlaybackUrl: `http://127.0.0.1:${PORT}/stream/live.m3u8`,
@@ -6430,7 +6441,7 @@ let тактыСобытий = 0;
 
 // Телефону незачем знать адреса и пользователей своих серверов: оставляем названия.
 function дляСети(state, paired = false) {
-  const servers = (state.config.servers || []).map(({ id, name, reachable, permanentLink }) => ({ id, name, reachable, permanentLink }));
+  const servers = (state.config.servers || []).map(({ id, name, reachable, permanentLink, owner }) => ({ id, name, reachable, permanentLink, owner }));
   return { ...state, config: { ...state.config, servers, pairedPhones: undefined, accessPin: undefined, whiteIp: paired ? state.config.whiteIp : '', remoteBindAddress: '' } };
 }
 
@@ -6462,12 +6473,132 @@ function pairPhone(req, body) {
     throw Object.assign(new Error(accessPinSet() ? 'Неверный PIN.' : 'Неверный код. Он показан в настройках программы на ПК.'), { status: 403 });
   }
   const token = crypto.randomBytes(24).toString('base64url');
-  const phone = { id: crypto.randomUUID().slice(0, 8), name: String(body.name || 'Телефон').slice(0, 40), hash: hashToken(token), at: new Date().toISOString() };
+  const phone = { id: crypto.randomUUID().slice(0, 8), name: String(body.name || 'Телефон').slice(0, 40), kind: body.kind === 'pc' ? 'pc' : 'phone', hash: hashToken(token), at: new Date().toISOString() };
   saveConfig({ pairedPhones: [phone, ...(config.pairedPhones || [])].slice(0, 10) });
   rotatePin();
   pairFailures.delete(ip);
   log(`Устройство привязано: ${phone.name}`);
   return token;
+}
+
+// ── Группа устройств ───────────────────────────────────────────────────────
+// Админ — это ПК, к которому подключились. Участники (телефоны, другие ПК) равны:
+// присылают свои файлы и серверы, пока подключены, и могут управлять эфиром.
+// Эфир один, ведёт его тот, кто начал последним; перехватить можно с любого устройства.
+const groupMembers = new Map(); // id привязки -> { dropTimer, removed:Set }
+let groupServers = [];
+let groupController = null;
+const GROUP_GRACE_MS = Number(process.env.VRCAST_GROUP_GRACE_MS) || 15000;
+
+function pairedByToken(token) {
+  if (!token) return null;
+  const hash = hashToken(token);
+  return (config.pairedPhones || []).find(phone => sameSecret(phone.hash, hash)) || null;
+}
+
+// Кто прислал запрос: сам ПК (окно программы) или привязанное устройство.
+function actorOf(req) {
+  if (isLoopbackAddress(req.socket.remoteAddress)) return { id: 'self', name: deviceName(), kind: 'pc' };
+  const phone = pairedByToken(String(req.headers['x-vrcast-token'] || ''));
+  return phone ? { id: phone.id, name: phone.name, kind: phone.kind || 'phone' } : null;
+}
+
+function takeLead(req) { groupController = takeInitiative(groupController, actorOf(req)); }
+
+const memberOnline = id => [...слушателиСобытий].some(res => res.memberId === id);
+
+function dropQueueItems(match) {
+  const gone = queue.filter(match);
+  if (!gone.length) return;
+  const wasCurrent = gone.some(item => item.id === currentId);
+  const currentPosition = queue.findIndex(item => item.id === currentId);
+  queue = queue.filter(item => !match(item));
+  for (const item of gone) forgetItemState(item.id);
+  saveQueue();
+  if (activeKind !== 'queue') return;
+  if (wasCurrent) {
+    if (!queue.length) stopActive();
+    else transitionQueueTo(Math.min(Math.max(0, currentPosition), queue.length - 1), 0);
+  } else if (currentId) queueIndex = Math.max(0, queue.findIndex(item => item.id === currentId));
+}
+
+function dropMember(id, why = 'отключилось') {
+  const state = groupMembers.get(id);
+  clearTimeout(state?.dropTimer);
+  groupMembers.delete(id);
+  const hadItems = queue.some(item => item.member === id);
+  const hadServers = groupServers.some(item => item.member === id);
+  if (!hadItems && !hadServers) return;
+  const usedServer = groupServers.some(item => item.member === id && item.id === config.activeServerId);
+  groupServers = groupServers.filter(item => item.member !== id);
+  dropQueueItems(item => item.member === id);
+  // Эфир шёл на сервер ушедшего устройства — возвращаемся на местную ссылку, иначе поток уйдёт в никуда.
+  if (usedServer) {
+    stopActive(true, true, false);
+    saveConfig({ activeServerId: '', outputMode: 'local' });
+    remoteReachable = null; remoteChannelRejected = false;
+  }
+  if (groupController?.id === id) groupController = null;
+  log(`Устройство ${why}: его файлы и серверы убраны из общего списка`);
+}
+
+// Устройство отвалилось от потока событий: ждём, не вернётся ли (смена сети, сон экрана).
+function scheduleMemberDrop(id) {
+  if (!id || memberOnline(id)) return;
+  const state = groupMembers.get(id) || { removed: new Set() };
+  groupMembers.set(id, state);
+  clearTimeout(state.dropTimer);
+  state.dropTimer = setTimeout(() => { if (!memberOnline(id)) dropMember(id); }, GROUP_GRACE_MS);
+  state.dropTimer.unref?.();
+}
+
+function applyContribution(member, body, address) {
+  const shared = sanitizeContribution(body, address);
+  const state = groupMembers.get(member.id) || { removed: new Set() };
+  groupMembers.set(member.id, state);
+  clearTimeout(state.dropTimer); state.dropTimer = null;
+  const sent = new Set(shared.queue.map(item => item.id));
+  state.removed = new Set([...state.removed].filter(id => sent.has(id)));
+  const ours = new Map(queue.filter(item => item.member === member.id).map(item => [item.ownerItemId, item]));
+  dropQueueItems(item => item.member === member.id && !sent.has(item.ownerItemId));
+  let changed = false;
+  for (const item of shared.queue) {
+    if (state.removed.has(item.id)) continue;
+    const fresh = sharedQueueItem(member, item, shared.media);
+    const known = ours.get(item.id);
+    // Уже знакомый файл: обновляем только адрес и название, разобранное ffprobe не трогаем.
+    if (known && queue.includes(known)) {
+      Object.assign(known, { title: fresh.title, sourceUrl: fresh.sourceUrl, owner: fresh.owner });
+      // Файл мог не открыться (ещё не было связи) — при очередном обмене пробуем снова.
+      if (known.unavailable && !known.duration) { known.unavailable = false; probeSharedItem(known); }
+      continue;
+    }
+    queue.push(fresh); changed = true; probeSharedItem(fresh);
+  }
+  if (changed) { saveQueue(); log(`Файлы устройства «${member.name}» в общем списке: ${shared.queue.length - state.removed.size}`); }
+  const before = groupServers.filter(item => item.member === member.id).map(item => item.id).join();
+  groupServers = [...groupServers.filter(item => item.member !== member.id), ...shared.servers.map(item => sharedServer(member, item))];
+  if (before !== groupServers.filter(item => item.member === member.id).map(item => item.id).join()) log(`Серверы устройства «${member.name}» доступны всем`);
+  return { removed: [...state.removed] };
+}
+
+// У файла телефона нет длительности и обложки: узнаём их по сети, как у своих файлов.
+function probeSharedItem(item) {
+  mediaInfoAsync(item.sourceUrl).then(info => {
+    if (!queue.includes(item)) return;
+    Object.assign(item, { duration: item.duration || info.duration, hasVideo: info.hasVideo, hasAudio: info.hasAudio,
+      videoCodec: info.videoCodec, audioCodec: info.audioCodec });
+    if (info.hasVideo || info.hasAudio) generateThumbnail(item); else item.unavailable = true;
+  }).catch(() => { if (queue.includes(item)) item.unavailable = true; });
+}
+
+function groupState() {
+  return {
+    admin: { id: config.deviceId || '', name: deviceName(), kind: 'pc' },
+    controller: groupController,
+    members: (config.pairedPhones || []).map(phone => ({ id: phone.id, name: phone.name, kind: phone.kind || 'phone', online: memberOnline(phone.id),
+      files: queue.filter(item => item.member === phone.id).length, servers: groupServers.filter(item => item.member === phone.id).length })),
+  };
 }
 
 function рассылкаСобытий(только = null) {
@@ -6702,7 +6833,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && /^\/api\/servers\/[^/]+\/activate$/.test(url.pathname)) {
       const id = decodeURIComponent(url.pathname.split('/')[3]);
-      if (!savedServers().some(item => item.id === id)) throw new Error('Сервер не найден.');
+      if (!allServers().some(item => item.id === id)) throw new Error('Сервер не найден.');
       // Уже вещаем через этот же сервер — не дёргаем пушер заново. Раньше
       // быстрые повторные тычки по карточке рвали и поднимали RTSP по кругу,
       // и переключение будто зависало.
@@ -6726,17 +6857,37 @@ const server = http.createServer(async (req, res) => {
       try { return json(res, 200, { token: pairPhone(req, await readBody(req)) }); }
       catch (error) { return json(res, error.status || 400, { error: error.message }); }
     }
-    if (req.method === 'GET' && url.pathname === '/api/pair/check') return json(res, 200, { paired: true });
+    if (req.method === 'GET' && url.pathname === '/api/pair/check') return json(res, 200, { paired: true, id: actorOf(req)?.id || '' });
     // Свои серверы для работы телефона без ПК: только привязанному телефону, вместе с ключом публикации.
     if (req.method === 'GET' && url.pathname === '/api/servers/export') {
       return json(res, 200, { servers: savedServers().filter(item => item.host).map(item => ({ id: item.id, name: item.name, host: item.host,
         rtspPort: Number(item.rtspPort) || SERVER_RTSP_PORT, publishKey: item.publishKey || '' })) });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/group/contribute') {
+      const member = pairedByToken(String(req.headers['x-vrcast-token'] || ''));
+      if (!member) return json(res, 401, { error: 'Сначала привяжите устройство.', code: 'pin' });
+      const reply = applyContribution(member, await readBody(req), req.socket.remoteAddress);
+      return json(res, 200, { ...reply, controller: groupController });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/group/take') {
+      const actor = actorOf(req);
+      if (!actor) return json(res, 401, { error: 'Сначала привяжите устройство.', code: 'pin' });
+      groupController = takeInitiative(groupController, actor);
+      return json(res, 200, { controller: groupController });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/group/leave') {
+      const member = pairedByToken(String(req.headers['x-vrcast-token'] || ''));
+      if (!member) return json(res, 401, { error: 'Устройство не привязано.' });
+      saveConfig({ pairedPhones: (config.pairedPhones || []).filter(phone => phone.id !== member.id) });
+      dropMember(member.id, 'вышло из группы');
+      return json(res, 200, { ok: true });
     }
     if (req.method === 'GET' && url.pathname === '/api/pair/pin') return json(res, 200, { pin: currentPin(), phones: (config.pairedPhones || []).length });
     if (req.method === 'POST' && url.pathname === '/api/pair/pin/rotate') { rotatePin(); return json(res, 200, { pin: pairingPin, phones: (config.pairedPhones || []).length }); }
     if (req.method === 'POST' && url.pathname === '/api/pair/remove') {
       const body = await readBody(req);
       saveConfig({ pairedPhones: (config.pairedPhones || []).filter(phone => phone.id !== String(body.id)) });
+      dropMember(String(body.id), 'удалено админом');
       return json(res, 200, { phones: (config.pairedPhones || []).length });
     }
     if (req.method === 'POST' && url.pathname === '/api/pair/rename') {
@@ -6746,12 +6897,13 @@ const server = http.createServer(async (req, res) => {
       saveConfig({ pairedPhones: (config.pairedPhones || []).map(phone => phone.id === String(body.id) ? { ...phone, name } : phone) });
       return json(res, 200, { phones: (config.pairedPhones || []).length });
     }
-    if (req.method === 'POST' && url.pathname === '/api/pair/clear') { saveConfig({ pairedPhones: [] }); rotatePin(); log('Все телефоны отвязаны'); return json(res, 200, { pin: pairingPin, phones: 0 }); }
+    if (req.method === 'POST' && url.pathname === '/api/pair/clear') { for (const phone of config.pairedPhones || []) dropMember(phone.id, 'отвязано'); saveConfig({ pairedPhones: [] }); rotatePin(); log('Все телефоны отвязаны'); return json(res, 200, { pin: pairingPin, phones: 0 }); }
     if (req.method === 'GET' && url.pathname === '/api/lan-info') {
       const pinRequired = accessPinSet();
       if (pinRequired && !isPairedRequest(req)) return json(res, 200, { name: deviceName(), version: APP_VERSION, port: PORT, pinRequired });
       const { rtsp, playbackUrl } = status(false);
-      return json(res, 200, { name: deviceName(), version: APP_VERSION, port: PORT, webrtcPort: WEBRTC_PORT, rtspPort: RTSP_PORT, lanAccess: config.lanAccess === true, pinRequired,
+      if (!config.deviceId) saveConfig({ deviceId: crypto.randomUUID() });
+      return json(res, 200, { id: config.deviceId, kind: 'pc', name: deviceName(), version: APP_VERSION, port: PORT, webrtcPort: WEBRTC_PORT, rtspPort: RTSP_PORT, lanAccess: config.lanAccess === true, pinRequired,
         addresses: getLanAddresses().map(address => `http://${address}:${PORT}`), playbackUrl, rtspLanUrls: rtsp?.lanUrls || [] });
     }
     if (req.method === 'GET' && url.pathname === '/api/events') {
@@ -6759,10 +6911,12 @@ const server = http.createServer(async (req, res) => {
       res.write('retry: 2000\n\n');
       // Помним, чей это поток: отвязали устройство или сменили PIN — поток закроем, а не оставим жить до обрыва.
       res.networkToken = fromNetwork ? String(req.headers['x-vrcast-token'] || '') : null;
+      res.memberId = res.networkToken ? pairedByToken(res.networkToken)?.id || null : null;
+      if (res.memberId) clearTimeout(groupMembers.get(res.memberId)?.dropTimer);
       слушателиСобытий.add(res);
       рассылкаСобытий(res);
       запуститьСобытия();
-      req.on('close', () => { слушателиСобытий.delete(res); if (!слушателиСобытий.size) остановитьСобытия(); });
+      req.on('close', () => { слушателиСобытий.delete(res); scheduleMemberDrop(res.memberId); if (!слушателиСобытий.size) остановитьСобытия(); });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/energy') {
@@ -6864,6 +7018,8 @@ const server = http.createServer(async (req, res) => {
       const removedIndex = queue.findIndex(item => item.id === id);
       if (removedIndex >= 0) log(`Убрано из очереди: «${queue[removedIndex].title}»${id === currentId && activeKind === 'queue' ? ' — оно играло, перехожу к следующему' : ''}`);
       const removedItem = removedIndex >= 0 ? queue[removedIndex] : null;
+      // Чужой файл убрали: владельцу сообщим при следующем обмене, и он уберёт его у себя.
+      if (removedItem?.member) groupMembers.get(removedItem.member)?.removed.add(removedItem.ownerItemId);
       queue = queue.filter(item => item.id !== id); forgetItemState(id); saveQueue();
       if (removedItem) dropUploadedFile(removedItem);
       // Удаление играющего трека раньше оставляло висячий currentId и сбитый
@@ -6908,7 +7064,7 @@ const server = http.createServer(async (req, res) => {
         // PIN — только цифры, 4–8; пустая строка выключает. Неверный формат не меняет прежний PIN.
         accessPin: typeof body.accessPin === 'string' && (body.accessPin === '' || /^\d{4,8}$/.test(body.accessPin)) ? body.accessPin : (config.accessPin || ''),
         port: body.port === undefined ? (validPort(config.port) ? Number(config.port) : 4717) : (validPort(body.port) ? Number(body.port) : (validPort(config.port) ? Number(config.port) : 4717)),
-        activeServerId: savedServers().some(item => item.id === String(body.activeServerId || ''))
+        activeServerId: allServers().some(item => item.id === String(body.activeServerId || ''))
           ? String(body.activeServerId) : (activeServer() ? config.activeServerId : (savedServers()[0]?.id || '')),
         // Каждое поле откатывается к прежнему значению, если его не прислали.
         // Раньше половина полей падала в значение по умолчанию, и любой
@@ -7050,7 +7206,7 @@ const server = http.createServer(async (req, res) => {
       }
       return json(res, 200, status());
     }
-    if (req.method === 'POST' && url.pathname === '/api/start/screen') { phoneSource = false; requireReadyOutput(); await startScreen(); return json(res, 200, status()); }
+    if (req.method === 'POST' && url.pathname === '/api/start/screen') { phoneSource = false; requireReadyOutput(); await startScreen(); takeLead(req); return json(res, 200, status()); }
     if (req.method === 'POST' && url.pathname === '/api/start/phone') {
       requireReadyOutput();
       const info = await probePhoneStream();
@@ -7058,6 +7214,7 @@ const server = http.createServer(async (req, res) => {
       phoneSource = true; phoneHasAudio = info.audio;
       log(`Эфир с экрана телефона${info.audio ? ' со звуком' : ' без звука'}`);
       try { await startScreen(); } catch (error) { phoneSource = false; throw error; }
+      takeLead(req);
       return json(res, 200, status());
     }
     if (req.method === 'POST' && url.pathname === '/api/start/queue') {
@@ -7066,6 +7223,7 @@ const server = http.createServer(async (req, res) => {
       const индекс = body.id ? queue.findIndex(item => item.id === String(body.id)) : 0;
       log(`Старт эфира очереди с «${queue[индекс < 0 ? 0 : индекс]?.title || 'первого видео'}» (всего ${queue.length})`);
       startQueue(индекс < 0 ? 0 : индекс);
+      takeLead(req);
       return json(res, 200, status());
     }
     // Локальный предпросмотр: отдаём файл трека прямо браузеру, без эфира.
@@ -7079,7 +7237,7 @@ const server = http.createServer(async (req, res) => {
       return void serveRangeMp4(req, res, item.sourceUrl);
     }
     if (req.method === 'POST' && url.pathname === '/api/skip') { transitionQueue('next'); return json(res, 200, status()); }
-    if (req.method === 'POST' && url.pathname === '/api/playback') { const body = await readBody(req); return json(res, 200, await playbackCommand(body)); }
+    if (req.method === 'POST' && url.pathname === '/api/playback') { const body = await readBody(req); const reply = await playbackCommand(body); if (body.action === 'jump') takeLead(req); return json(res, 200, reply); }
     if (req.method === 'POST' && url.pathname === '/api/stop') { phoneSource = false; if (activeKind) log(activeKind === 'screen' ? 'Эфир остановлен: захват экрана выключен' : 'Эфир остановлен по кнопке'); stopActive(); return json(res, 200, status()); }
     if (req.method === 'POST' && url.pathname === '/api/shutdown') {
       shuttingDown = true;

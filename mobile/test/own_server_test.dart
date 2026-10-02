@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vrcast_remote/api.dart';
+import 'package:vrcast_remote/media_server.dart';
 import 'package:vrcast_remote/models.dart';
 import 'package:vrcast_remote/own_server.dart';
 import 'package:vrcast_remote/phone_stream.dart';
@@ -57,16 +58,20 @@ void main() {
       expect(Prefs.instance.currentOwnServer?.host, 'a.example.com', reason: 'после удаления выбран оставшийся');
     });
 
-    test('серверы с ПК объединяются: новые считаются, ключ и название обновляются', () {
-      Prefs.instance.saveOwnServer(OwnServer(name: 'Старое', host: 'h', key: 'old'));
-      final added = Prefs.instance.mergeServers([
-        OwnServer(name: 'Новое', host: 'h', key: 'new'),
-        OwnServer(name: 'Другой', host: 'x', key: 'k'),
-      ]);
-      expect(added, 1);
-      expect(Prefs.instance.ownServers, hasLength(2));
-      expect(Prefs.instance.ownServers.firstWhere((e) => e.host == 'h').key, 'new');
-      expect(Prefs.instance.ownServers.firstWhere((e) => e.host == 'h').name, 'Новое');
+    test('общие файлы: добавляются, убираются и переживают перезапуск; каждая правка меняет ревизию', () async {
+      final start = Prefs.instance.shareRevision;
+      Prefs.instance.addSharedFiles([SharedFile(id: 'a1', path: '/tmp/a.mp4', title: 'a.mp4'), SharedFile(id: 'b2', path: '/tmp/b.mp3', title: 'b.mp3')]);
+      expect(Prefs.instance.shareRevision, start + 1);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await Prefs.instance.load();
+      expect(Prefs.instance.sharedFiles.map((e) => e.id), ['a1', 'b2']);
+      Prefs.instance.dropSharedFiles(['a1', 'нет-такого']);
+      expect(Prefs.instance.sharedFiles.map((e) => e.id), ['b2']);
+      expect(Prefs.instance.shareRevision, start + 2);
+      Prefs.instance.saveOwnServer(OwnServer(name: 'Свой', host: 'h', key: 'k'));
+      expect(Prefs.instance.shareRevision, start + 3, reason: 'сервер тоже уходит группе — ревизия растёт');
+      Prefs.instance.removeOwnServer(Prefs.instance.ownServers.first);
+      expect(Prefs.instance.shareRevision, start + 4);
     });
 
     test('качество с ПК запоминается для работы без ПК', () async {
@@ -139,18 +144,24 @@ void main() {
     });
   });
 
-  test('серверы с ПК запрашиваются с ключом привязки и разбираются', () async {
+  test('файлы и серверы уходят группе с ключом привязки; ПК отвечает, что убрали другие', () async {
     final seen = <String>[];
     final api = Api(Uri.parse('http://pc:4717'), token: 'tok', client: MockClient((request) async {
-      seen.add('${request.method} ${request.url.path} ${request.headers['X-VRCast-Token']}');
-      return http.Response.bytes(utf8.encode(jsonEncode({'servers': [{'id': 's1', 'name': 'Мой VPS', 'host': '203.0.113.9', 'rtspPort': 8554, 'publishKey': 'sec'}]})), 200,
-          headers: {'content-type': 'application/json; charset=utf-8'});
+      seen.add('${request.method} ${request.url.path} ${request.headers['X-VRCast-Token']} ${request.body}');
+      return http.Response.bytes(utf8.encode(jsonEncode({'removed': ['b2'], 'controller': null})), 200, headers: {'content-type': 'application/json; charset=utf-8'});
     }));
-    final servers = await api.exportServers();
-    expect(seen, ['GET /api/servers/export tok']);
-    expect(servers.single.name, 'Мой VPS');
-    expect(servers.single.key, 'sec');
-    expect(servers.single.whip.port, 8565);
+    final removed = await api.contribute(
+      mediaBase: 'http://192.168.1.50:4242',
+      mediaKey: 'key-key-key-key-key-key',
+      files: [{'id': 'a1', 'title': 'a.mp4'}],
+      servers: [OwnServer(name: 'Мой VPS', host: '203.0.113.9', key: 'sec')],
+    );
+    expect(removed, ['b2']);
+    final sent = jsonDecode(seen.single.split('tok ').last) as Map;
+    expect(seen.single, startsWith('POST /api/group/contribute tok'));
+    expect(sent['media'], {'base': 'http://192.168.1.50:4242', 'key': 'key-key-key-key-key-key'});
+    expect(sent['queue'], [{'id': 'a1', 'title': 'a.mp4'}]);
+    expect((sent['servers'] as List).single, {'id': '203.0.113.9:8554', 'name': 'Мой VPS', 'host': '203.0.113.9', 'rtspPort': 8554, 'publishKey': 'sec'});
   });
 
   group('кодек для сервера', () {

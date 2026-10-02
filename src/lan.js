@@ -47,7 +47,7 @@ export const lanRouteOpenWithPin = (method, pathname) => OPEN_WITH_PIN.some(([m,
 // Настройки эфира: только привязанному телефону (знает код с ПК). Серверы и ключи сюда не входят.
 const PAIRED = [
   ['GET', /^\/api\/(pair\/check|servers\/export)$/],
-  ['POST', /^\/api\/(config|tunnels\/test|servers\/speedtest|servers\/import)$/],
+  ['POST', /^\/api\/(config|tunnels\/test|servers\/speedtest|servers\/import|group\/contribute|group\/leave|group\/take)$/],
 ];
 export const lanRoutePaired = (method, pathname) => PAIRED.some(([m, pattern]) => m === method && pattern.test(pathname));
 

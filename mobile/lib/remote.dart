@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
+import 'media_server.dart';
 import 'models.dart';
 import 'own_server.dart';
 import 'phone_stream.dart';
@@ -14,9 +15,10 @@ enum Link { idle, connecting, online, offline }
 
 /// Соединение с одним ПК: живое состояние по SSE и команды.
 class Remote extends ChangeNotifier {
-  Remote(this.api, {this.pcName = '', PhoneStream? phone})
+  Remote(this.api, {this.pcName = '', PhoneStream? phone, MediaServer? media})
       : isLocal = false,
-        phone = phone ?? PhoneStream() {
+        phone = phone ?? PhoneStream(),
+        media = media ?? MediaServer(files: () => Prefs.instance.sharedFiles) {
     _listenPhone();
   }
 
@@ -26,6 +28,7 @@ class Remote extends ChangeNotifier {
       : api = Api(Uri.parse('http://127.0.0.1:1')),
         pcName = '',
         isLocal = true,
+        media = MediaServer(files: () => Prefs.instance.sharedFiles),
         phone = phone ?? PhoneStream() {
     _listenPhone();
     final cached = Prefs.instance.cachedState;
@@ -40,8 +43,10 @@ class Remote extends ChangeNotifier {
   final Api api;
   final String pcName;
   final bool isLocal;
+  final MediaServer media; // отдаёт файлы этого телефона в общую очередь
   bool _phoneViaPc = false;
   bool needsPin = false; // ПК закрыт PIN-кодом, ключа у телефона нет
+  String myId = ''; // номер этого телефона в группе на ПК
 
   bool get online => link == Link.online;
 
@@ -52,12 +57,16 @@ class Remote extends ChangeNotifier {
   bool _closed = false;
   Timer? _tick;
   final PhoneStream phone;
-  bool _serversSynced = false;
+  bool _synced = false;
+  bool _contributing = false;
+  int _seenRevision = 0;
+  Timer? _shareTimer;
   StreamSubscription<void>? _phoneSub;
 
   /// Подключаемся и держим соединение: при обрыве пробуем снова.
   void start() {
     if (isLocal || link != Link.idle) return;
+    Prefs.instance.addListener(_prefsChanged);
     _loop();
     _tick = Timer.periodic(const Duration(milliseconds: 500), (_) {
       if (state?.isPlaying == true) notifyListeners();
@@ -79,7 +88,7 @@ class Remote extends ChangeNotifier {
           final since = phone.startedAt;
           if (phone.live && !next.phoneSource && since != null && DateTime.now().difference(since).inSeconds > 8) phone.stop();
           Prefs.instance.cacheState(next.json);
-          if (!_serversSynced) { _serversSynced = true; syncAll(); }
+          if (!_synced) { _synced = true; syncAll(); }
           Prefs.instance.mirrorProfile(next.profileQuality, next.profileFps);
           // Качество, частоту кадров и битрейт отправки берём из профиля ПК: поменяли там — телефон подстроился.
           if (phone.live) phone.applyProfile(quality: next.profileQuality, fps: next.profileFps, bitrateKbps: next.profileBitrateKbps);
@@ -118,12 +127,55 @@ class Remote extends ChangeNotifier {
 
   Future<String?> playback(String action, [Map<String, Object?> extra = const {}]) => run(() => api.playback(action, extra));
 
-  /// Двусторонняя синхронизация при подключении: накопленные без связи ссылки уходят в очередь ПК,
-  /// серверы переходят в обе стороны (для серверов нужна привязка).
+  /// При подключении: накопленные без связи ссылки уходят в очередь ПК, а свои файлы и серверы
+  /// становятся видны всей группе (пока телефон подключён).
   Future<void> syncAll() async {
     await pushPendingLinks();
-    if (api.token != null) await syncServers();
+    if (api.token != null) {
+      try { myId = await api.myId(); } catch (_) {}
+    }
+    await contribute();
   }
+
+  // Файлы или серверы поменялись — группа должна узнать об этом сразу, а не при следующем подключении.
+  void _prefsChanged() {
+    if (Prefs.instance.shareRevision == _seenRevision || !online) return;
+    _shareTimer?.cancel();
+    _shareTimer = Timer(const Duration(milliseconds: 300), contribute);
+  }
+
+  /// Отдать группе свои файлы и серверы. ПК в ответ сообщает, какие файлы другие убрали из общей очереди, —
+  /// у себя убираем их тоже.
+  Future<void> contribute() async {
+    final prefs = Prefs.instance;
+    if (isLocal || !online || api.token == null || _contributing) return;
+    _contributing = true;
+    try {
+      final port = await media.start(port: prefs.mediaPort);
+      var base = prefs.mediaAddress.isEmpty ? null : 'http://${prefs.mediaAddress}';
+      if (base == null) {
+        final address = await localAddressFor(api.base.host);
+        if (address == null) return;
+        base = 'http://$address:$port';
+      }
+      final revision = prefs.shareRevision;
+      final removed = await api.contribute(
+        mediaBase: base,
+        mediaKey: media.key,
+        files: [for (final file in prefs.sharedFiles) {'id': file.id, 'title': file.title}],
+        servers: prefs.ownServers,
+      );
+      _seenRevision = revision;
+      if (removed.isNotEmpty) prefs.dropSharedFiles(removed);
+    } catch (_) {
+      _synced = false; // не дошло — повторим с ближайшим событием
+    } finally {
+      _contributing = false;
+    }
+  }
+
+  /// Перехватить эфир: дальше его ведёт это устройство.
+  Future<String?> takeLead() => run(api.take);
 
   /// Ссылки, добавленные без связи, отправляем в очередь ПК; что не ушло, остаётся ждать.
   Future<int> pushPendingLinks() async {
@@ -146,21 +198,8 @@ class Remote extends ChangeNotifier {
     api.token = token;
     Prefs.instance.setToken(api.base.toString(), token);
     needsPin = false;
-    _serversSynced = false;
+    _synced = false;
     notifyListeners();
-  }
-
-  /// Серверы: с ПК на телефон и с телефона на ПК. Возвращает, сколько новых серверов получил телефон.
-  Future<int> syncServers() async {
-    try {
-      final added = Prefs.instance.mergeServers(await api.exportServers());
-      if (Prefs.instance.ownServers.isNotEmpty) await api.importServers(Prefs.instance.ownServers);
-      notifyListeners();
-      return added;
-    } catch (_) {
-      _serversSynced = false;
-      return 0;
-    }
   }
 
   /// Куда пойдёт экран телефона: через ПК (он есть и на связи) или напрямую на свой сервер.
@@ -207,6 +246,9 @@ class Remote extends ChangeNotifier {
 
   @override
   void dispose() {
+    Prefs.instance.removeListener(_prefsChanged);
+    _shareTimer?.cancel();
+    media.stop();
     phone.stop();
     _phoneSub?.cancel();
     _closed = true;
@@ -246,6 +288,12 @@ class Prefs extends ChangeNotifier {
   String? cachedState;
   List<OwnServer> ownServers = [];
   String? ownServerId;
+  // Файлы этого телефона, которые он отдаёт в общую очередь, пока подключён. shareRevision растёт при любой правке файлов и серверов.
+  List<SharedFile> sharedFiles = [];
+  int shareRevision = 0;
+  // Для проверки на эмуляторе, где адрес телефона не виден ПК: «адрес:порт», который назвать ПК, и порт сервера файлов.
+  String mediaAddress = '';
+  int mediaPort = 0;
   String standaloneQuality = '720p';
   int standaloneFps = 30;
 
@@ -258,6 +306,9 @@ class Prefs extends ChangeNotifier {
     tokens = {for (final raw in p.getStringList('tokens') ?? const []) if (raw.contains('\n')) raw.split('\n').first: raw.split('\n').last};
     ownServers = [for (final raw in p.getStringList('ownServers') ?? const []) OwnServer.fromJson((jsonDecode(raw) as Map).cast<String, dynamic>())];
     ownServerId = p.getString('ownServerId');
+    sharedFiles = [for (final raw in p.getStringList('sharedFiles') ?? const []) SharedFile.fromJson((jsonDecode(raw) as Map).cast<String, dynamic>())];
+    mediaAddress = p.getString('mediaAddress') ?? '';
+    mediaPort = p.getInt('mediaPort') ?? 0;
     pendingLinks = p.getStringList('pendingLinks') ?? [];
     deviceName = p.getString('deviceName') ?? 'Телефон';
     aliases = {for (final raw in p.getStringList('aliases') ?? const []) if (raw.contains('\n')) raw.split('\n').first: raw.split('\n').last};
@@ -276,6 +327,7 @@ class Prefs extends ChangeNotifier {
     await p.setInt('defaultPort', defaultPort);
     await p.setStringList('ownServers', [for (final s in ownServers) jsonEncode(s.toJson())]);
     ownServerId == null ? await p.remove('ownServerId') : await p.setString('ownServerId', ownServerId!);
+    await p.setStringList('sharedFiles', [for (final f in sharedFiles) jsonEncode(f.toJson())]);
     await p.setStringList('pendingLinks', pendingLinks);
     await p.setString('deviceName', deviceName);
     await p.setStringList('aliases', [for (final e in aliases.entries) '${e.key}\n${e.value}']);
@@ -354,11 +406,13 @@ class Prefs extends ChangeNotifier {
   void saveOwnServer(OwnServer server) => update(() {
         ownServers = [server, ...ownServers.where((e) => e.id != server.id)];
         ownServerId = server.id;
+        shareRevision++;
       });
 
   void removeOwnServer(OwnServer server) => update(() {
         ownServers = ownServers.where((e) => e.id != server.id).toList();
         if (ownServerId == server.id) ownServerId = null;
+        shareRevision++;
       });
 
   void selectOwnServer(OwnServer server) => update(() => ownServerId = server.id);
@@ -368,18 +422,18 @@ class Prefs extends ChangeNotifier {
         standaloneFps = fps ?? standaloneFps;
       });
 
-  /// Серверы, полученные с ПК: объединяем со своими, ключ и название обновляются. Возвращает, сколько новых.
-  int mergeServers(List<OwnServer> incoming) {
-    var added = 0;
-    update(() {
-      for (final server in incoming) {
-        if (!ownServers.any((e) => e.id == server.id)) added++;
-        ownServers = [...ownServers.where((e) => e.id != server.id), server];
-      }
-      ownServerId ??= ownServers.isEmpty ? null : ownServers.first.id;
-    });
-    return added;
-  }
+  void addSharedFiles(List<SharedFile> files) => update(() {
+        sharedFiles = [...sharedFiles, ...files];
+        shareRevision++;
+      });
+
+  void removeSharedFile(String id) => dropSharedFiles([id]);
+
+  /// Убрать файлы из общей очереди (сам убрал, либо их убрало другое устройство).
+  void dropSharedFiles(List<String> ids) => update(() {
+        sharedFiles = sharedFiles.where((f) => !ids.contains(f.id)).toList();
+        shareRevision++;
+      });
 
   /// Пока ПК рядом, качество для работы без ПК берём с него — переход между режимами без сюрпризов.
   void mirrorProfile(String quality, int fps) {

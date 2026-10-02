@@ -556,6 +556,7 @@ function renderTemplates(state) {
 
 // Откуда ролик — по адресу: человеку понятнее «YouTube», чем «медиа по ссылке».
 function источник(item){
+  if(item.member)return `С устройства «${item.owner}»`;
   if(item.local)return 'Файл';
   const адрес=String(item.sourceUrl||'').toLowerCase();
   if(/youtu\.?be/.test(адрес))return 'YouTube';
@@ -2108,7 +2109,10 @@ function paintPairedList(){
   const box=$('#pairedList'); box.textContent='';
   for(const phone of phones){
     const row=document.createElement('div'); row.style.cssText='display:flex;gap:6px;align-items:center';
-    const name=document.createElement('span'); name.textContent=phone.name; name.title=new Date(phone.at).toLocaleString('ru-RU');
+    const group=ui.status?.group, member=(group?.members||[]).find(entry=>entry.id===phone.id);
+    const name=document.createElement('span');
+    name.textContent=`${phone.name} · ${member?.online?'в сети':'не в сети'}${member?.files?`, файлов: ${member.files}`:''}${group?.controller?.id===phone.id?' · ведёт эфир':''}`;
+    name.title=new Date(phone.at).toLocaleString('ru-RU');
     const rename=document.createElement('button'); rename.className='btn'; rename.type='button'; rename.textContent='Переименовать';
     rename.addEventListener('click',async()=>{ const value=prompt('Имя устройства',phone.name); if(!value||!value.trim()) return; try{ await api('/api/pair/rename',{method:'POST',body:JSON.stringify({id:phone.id,name:value.trim()})}); render(await api('/api/status')); }catch(error){ toast(error.message,true); } });
     const remove=document.createElement('button'); remove.className='btn'; remove.type='button'; remove.textContent='Отвязать';

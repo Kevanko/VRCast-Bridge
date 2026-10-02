@@ -8,6 +8,7 @@ import 'package:video_player/video_player.dart';
 
 import 'api.dart';
 import 'discovery.dart';
+import 'media_server.dart';
 import 'own_server.dart';
 import 'models.dart';
 import 'remote.dart';
@@ -324,7 +325,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               const Divider(),
               const Padding(padding: EdgeInsets.fromLTRB(16, 8, 16, 0), child: Text('Свои серверы', style: TextStyle(fontWeight: FontWeight.bold))),
-              const Padding(padding: EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text('Нужны, чтобы вещать экран телефона без ПК. Когда ПК на связи, серверы синхронизируются в обе стороны.', style: TextStyle(color: Colors.white54, fontSize: 12))),
+              const Padding(padding: EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text('Нужны, чтобы вещать экран телефона без ПК. Пока телефон подключён к ПК, их видит и может использовать вся группа; после отключения они снова только ваши.', style: TextStyle(color: Colors.white54, fontSize: 12))),
               for (final server in prefs.ownServers)
                 ListTile(
                   leading: Icon(server.id == prefs.currentOwnServer?.id ? Icons.radio_button_checked : Icons.radio_button_off),
@@ -347,17 +348,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   if (saved != null) prefs.saveOwnServer(saved);
                 },
               ),
-              if (widget.remote != null && widget.remote!.online && widget.remote!.api.token != null)
-                ListTile(
-                  leading: const Icon(Icons.sync),
-                  title: const Text('Синхронизировать с ПК'),
-                  subtitle: const Text('Серверы и ссылки, накопленные без связи, уйдут на ПК; серверы ПК появятся здесь'),
-                  onTap: () async {
-                    final added = await widget.remote!.syncServers();
-                    await widget.remote!.pushPendingLinks();
-                    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(added > 0 ? 'С ПК получено серверов: $added' : 'Всё уже синхронизировано')));
-                  },
-                ),
               const Divider(),
               const Padding(padding: EdgeInsets.fromLTRB(16, 8, 16, 0), child: Text('Запомненные компьютеры', style: TextStyle(fontWeight: FontWeight.bold))),
               if (prefs.pcs.isEmpty) const ListTile(title: Text('Пока пусто', style: TextStyle(color: Colors.white54))),
@@ -576,6 +566,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
         const SizedBox(width: 6),
         Text(direct ? 'Идёт экран телефона ${remote.streamTarget}' : s.statusLabel, style: const TextStyle(color: Colors.white70)),
       ]),
+      if (remote.online) _GroupCard(remote: remote, onTake: () => _do(remote.takeLead())),
       const SizedBox(height: 8),
       Slider(
         value: seekable ? position.clamp(0, s.duration).toDouble() : 0,
@@ -641,36 +632,17 @@ class QueuePage extends StatefulWidget {
 class _QueuePageState extends State<QueuePage> {
   final _link = TextEditingController();
   bool _adding = false;
-  String? _uploadName; // файл, который сейчас уходит на ПК
-  int _uploadIndex = 0, _uploadTotal = 0;
-  double _uploadProgress = 0;
-
   static const _extensions = ['mp4', 'mkv', 'webm', 'mov', 'avi', 'm4v', 'ts', 'mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus'];
 
-  /// Файлы с телефона уходят на ПК по одному и встают в очередь.
-  Future<void> _pickAndUpload() async {
-    if (_uploadName != null) return;
-    if (!widget.remote.online) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Файлы отправляются на ПК: сначала подключитесь к ПК')));
-      return;
-    }
+  /// Файлы остаются на телефоне и встают в общую очередь, пока телефон подключён к ПК.
+  Future<void> _pickShared() async {
     final picked = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: _extensions);
-    final files = picked.where((f) => f.path != null).toList();
-    if (files.isEmpty) return;
-    setState(() { _uploadTotal = files.length; _uploadIndex = 0; });
-    var failed = 0;
-    for (final file in files) {
-      setState(() { _uploadName = file.name; _uploadProgress = 0; _uploadIndex += 1; });
-      try {
-        await widget.remote.api.uploadFile(file.path!, file.name, (p) { if (mounted && (p - _uploadProgress > 0.01 || p >= 1)) setState(() => _uploadProgress = p); });
-      } catch (e) {
-        failed += 1;
-        if (mounted) toastError(context, '${file.name}: $e');
-      }
-    }
-    if (!mounted) return;
-    setState(() => _uploadName = null);
-    if (failed == 0) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Отправлено на ПК: ${files.length}')));
+    final files = [for (final f in picked) if (f.path != null) SharedFile(id: SharedFile.newId(), path: f.path!, title: f.name)];
+    if (files.isEmpty || !mounted) return;
+    Prefs.instance.addSharedFiles(files);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(widget.remote.online
+        ? 'Файлы в общей очереди: ${files.length}. Они остаются на телефоне'
+        : 'Файлы сохранены: встанут в общую очередь при подключении к ПК')));
   }
 
   @override
@@ -717,14 +689,8 @@ class _QueuePageState extends State<QueuePage> {
         const SizedBox(width: 8),
         FilledButton(onPressed: _adding ? null : _add, child: _adding ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Добавить')),
       ])),
-      if (_uploadName != null)
-        Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('Отправляю на ПК ($_uploadIndex из $_uploadTotal): $_uploadName', maxLines: 1, overflow: TextOverflow.ellipsis),
-          const SizedBox(height: 4),
-          LinearProgressIndicator(value: _uploadProgress),
-        ])),
       Padding(padding: const EdgeInsets.fromLTRB(12, 0, 12, 4), child: Align(alignment: Alignment.centerLeft, child: TextButton.icon(
-          onPressed: _uploadName == null ? _pickAndUpload : null, icon: const Icon(Icons.upload_file), label: const Text('Добавить файлы с телефона')))),
+          onPressed: _pickShared, icon: const Icon(Icons.upload_file), label: const Text('Добавить файлы с телефона')))),
       ListenableBuilder(
         listenable: Prefs.instance,
         builder: (context, _) => Column(children: [
@@ -735,6 +701,15 @@ class _QueuePageState extends State<QueuePage> {
               title: Text(pending, maxLines: 1, overflow: TextOverflow.ellipsis),
               subtitle: const Text('Ждёт подключения к ПК'),
               trailing: IconButton(tooltip: 'Убрать', icon: const Icon(Icons.close), onPressed: () => Prefs.instance.removePendingLink(pending)),
+            ),
+          // Свои файлы, которых ещё нет в общей очереди (нет связи с ПК или ещё не дошли).
+          for (final file in Prefs.instance.sharedFiles.where((f) => !s.queue.any((q) => q.member == remote.myId && q.ownerItemId == f.id)))
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.phone_android),
+              title: Text(file.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle: Text(remote.online ? 'Добавляется в общую очередь…' : 'Появится в общей очереди при подключении к ПК'),
+              trailing: IconButton(tooltip: 'Убрать', icon: const Icon(Icons.close), onPressed: () => Prefs.instance.removeSharedFile(file.id)),
             ),
         ]),
       ),
@@ -752,14 +727,21 @@ class _QueuePageState extends State<QueuePage> {
                   key: ValueKey(item.id),
                   direction: DismissDirection.endToStart,
                   background: Container(color: Colors.red.shade900, alignment: Alignment.centerRight, padding: const EdgeInsets.only(right: 20), child: const Icon(Icons.delete)),
-                  onDismissed: (_) => remote.run(() => remote.api.removeFromQueue(item.id)),
+                  onDismissed: (_) {
+                    // Свой файл убираем и у себя, чужой — сообщим владельцу через ПК.
+                    if (item.member.isNotEmpty && item.member == remote.myId) Prefs.instance.removeSharedFile(item.ownerItemId);
+                    remote.run(() => remote.api.removeFromQueue(item.id));
+                  },
                   child: ListTile(
                     key: ValueKey('t${item.id}'),
                     leading: SizedBox(width: 72, height: 40, child: ClipRRect(borderRadius: BorderRadius.circular(6), child: item.thumbnail.isEmpty
                         ? const ColoredBox(color: Colors.black26)
                         : Image.network(remote.api.absolute(item.thumbnail), fit: BoxFit.cover, errorBuilder: (_, _, _) => const ColoredBox(color: Colors.black26)))),
                     title: Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(color: item.unavailable ? Colors.redAccent : null, fontWeight: playing ? FontWeight.bold : null)),
-                    subtitle: Text(item.duration > 0 ? formatTime(item.duration) : ''),
+                    subtitle: Text([
+                      if (item.duration > 0) formatTime(item.duration),
+                      if (item.member.isNotEmpty) item.member == remote.myId ? 'мой файл' : item.owner,
+                    ].join(' · ')),
                     trailing: playing ? const Icon(Icons.equalizer, color: accent) : null,
                     onTap: () async { final e = await remote.playback('jump', {'id': item.id}); if (context.mounted) toastError(context, e); },
                   ),
@@ -846,14 +828,10 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
     final api = widget.remote.api;
     setState(() => _busy = true);
     try {
-      final token = await api.pair(_code.text, 'Телефон');
-      api.token = token;
-      Prefs.instance.setToken(api.base.toString(), token);
-      final copied = await widget.remote.syncServers();
-      if (mounted) {
-        setState(() => _paired = true);
-        if (copied > 0) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Серверы с ПК скопированы на телефон: $copied')));
-      }
+      final token = await api.pair(_code.text, Prefs.instance.deviceName);
+      widget.remote.acceptToken(token);
+      widget.remote.syncAll();
+      if (mounted) setState(() => _paired = true);
     } catch (e) {
       if (mounted) toastError(context, '$e');
     } finally {
@@ -931,7 +909,7 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
               value: server.id,
               groupValue: s.activeServerId,
               title: Text(server.name),
-              subtitle: Text(server.reachable == null ? 'Проверка…' : server.reachable! ? 'Отвечает' : 'Не отвечает'),
+              subtitle: Text(server.owner.isNotEmpty ? 'Сервер устройства «${server.owner}»' : server.reachable == null ? 'Проверка…' : server.reachable! ? 'Отвечает' : 'Не отвечает'),
               onChanged: editable ? (v) => v == null ? null : _set({'activeServerId': v}) : null,
             ),
       ],
@@ -966,6 +944,41 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
 }
 
 /// Сводка эфира на ПК: куда идёт, в каком качестве и как себя чувствует. Всё берётся с ПК.
+/// Кто в группе и кто ведёт эфир. Перехватить эфир можно с любого устройства — как в Spotify.
+class _GroupCard extends StatelessWidget {
+  const _GroupCard({required this.remote, required this.onTake});
+  final Remote remote;
+  final VoidCallback onTake;
+
+  @override
+  Widget build(BuildContext context) {
+    final group = remote.state!.group;
+    if (group.members.isEmpty) return const SizedBox.shrink();
+    final mine = group.controllerId.isNotEmpty && group.controllerId == remote.myId;
+    final leader = group.controllerId.isEmpty ? null : (group.controllerId == 'self' ? group.adminName : group.controllerName);
+    return Card(
+      margin: const EdgeInsets.only(top: 8),
+      child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.devices, size: 18, color: Colors.white54),
+          const SizedBox(width: 8),
+          Expanded(child: Text(leader == null ? 'Эфир пока никто не вёл' : mine ? 'Эфир ведёте вы' : 'Эфир ведёт: $leader', style: const TextStyle(fontWeight: FontWeight.w600))),
+          if (leader != null && !mine) TextButton(onPressed: onTake, child: const Text('Перехватить')),
+        ]),
+        Wrap(spacing: 8, runSpacing: 4, children: [
+          Chip(avatar: const Icon(Icons.desktop_windows, size: 16), label: Text('${group.adminName} · админ'), visualDensity: VisualDensity.compact),
+          for (final member in group.members)
+            Chip(
+              avatar: Icon(member.kind == 'pc' ? Icons.desktop_windows : Icons.phone_android, size: 16, color: member.online ? Colors.greenAccent : Colors.grey),
+              label: Text(member.id == remote.myId ? '${member.name} · вы' : member.name),
+              visualDensity: VisualDensity.compact,
+            ),
+        ]),
+      ])),
+    );
+  }
+}
+
 class _StreamSummary extends StatelessWidget {
   const _StreamSummary({required this.state, required this.onTap});
   final BridgeState state;
