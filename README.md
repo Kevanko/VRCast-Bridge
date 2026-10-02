@@ -73,6 +73,14 @@ vrcast                              # окно приложения; vrcast stop
 
 Если MediaMTX не стартует с ошибкой `inotify: too many open files`, поднимите лимит: `sudo sysctl fs.inotify.max_user_instances=512`.
 
+### Пульт для телефона (Android)
+
+В настройках ПК включите «Пульт для телефона» — программа начнёт принимать устройства своей сети и объявится по mDNS (`_vrcast._tcp`). Приложение из `mobile/` (Flutter) само находит ПК, показывает превью, что играет, очередь и ссылки, и управляет эфиром в реальном времени (SSE `/api/events`). Из сети доступны только управление эфиром и очередью; настройки, ключи серверов и выход из программы открыты лишь на самом ПК. В Linux может понадобиться `sudo ufw allow 4717/tcp` и `sudo ufw allow 5353/udp`.
+
+```bash
+cd mobile && flutter pub get && flutter test && flutter build apk --release   # app-release.apk
+```
+
 Тесты: `npm test` (тесты с захватом экрана пропускаются без `DISPLAY`).
 
 ## Как пользоваться
