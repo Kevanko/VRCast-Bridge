@@ -94,6 +94,12 @@ class FakeFiles extends FileBroadcast {
   @override
   void next() => calls.add('next');
   @override
+  void setSpeed(double value) { calls.add('speed $value'); super.setSpeed(value); }
+  @override
+  void setVolume(double value) { calls.add('volume $value'); super.setVolume(value); }
+  @override
+  void profileChanged() => calls.add('profile');
+  @override
   void previous() => calls.add('previous');
 }
 
@@ -575,6 +581,46 @@ void main() {
     expect(Prefs.instance.ownServers, isEmpty);
   });
 
+  testWidgets('без ПК: громкость, скорость и качество как на ПК — настройки запоминаются и сразу уходят в эфир', (tester) async {
+    tallScreen(tester);
+    final files = FakeFiles();
+    final remote = Remote.local(phone: FakeStream(), files: files);
+    await tester.pumpWidget(app(Scaffold(body: ListenableBuilder(listenable: remote, builder: (_, __) => NowPlayingPage(remote: remote)))));
+    expect(find.text('100%'), findsOneWidget);
+    expect(find.text('1.0x'), findsOneWidget);
+    expect(find.text('Качество: как в файле'), findsOneWidget);
+    // Громкость: ползунок.
+    await tester.drag(find.byType(Slider).last, const Offset(-120, 0));
+    await tester.pump();
+    expect(files.calls.any((c) => c.startsWith('volume ')), isTrue);
+    expect(Prefs.instance.playVolume, isNot(1.0));
+    // Скорость.
+    await tester.tap(find.text('1.0x'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('1.5x'));
+    await tester.pumpAndSettle();
+    expect(files.calls, contains('speed 1.5'));
+    expect(Prefs.instance.playSpeed, 1.5);
+    expect(find.text('1.5x'), findsOneWidget);
+    // Качество: окно с выбором; пока «как в файле», кадры и битрейт недоступны.
+    await tester.tap(find.text('Качество: как в файле'));
+    await tester.pumpAndSettle();
+    expect(find.text('Качество эфира'), findsOneWidget);
+    await tester.tap(find.text('720p'));
+    await tester.pumpAndSettle();
+    expect(files.calls, contains('profile'));
+    expect(Prefs.instance.videoProfile.quality, '720p');
+    await tester.tap(find.text('60'));
+    await tester.pumpAndSettle();
+    expect(Prefs.instance.videoFps, 60);
+    await tester.tap(find.text('5 Мбит/с'));
+    await tester.pumpAndSettle();
+    expect(Prefs.instance.videoBitrate, 5000);
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
+    expect(find.text('720p · 60 к/с'), findsOneWidget);
+  });
+
   testWidgets('ссылки: переключатель rtspt:// и rtsp:// меняет ссылки, у своего сервера есть запасная HLS-ссылка', (tester) async {
     tallScreen(tester);
     Prefs.instance.saveOwnServer(OwnServer(name: 'VPS', host: '203.0.113.7', rtspPort: 9554, key: 'k'));
@@ -901,14 +947,4 @@ class FakeDiscovery extends Discovery {
   Future<void> start() async => onChange(devices);
   @override
   Future<void> stop() async {}
-}
-
-class _NoH264Stream extends FakeStream {
-  @override
-  String selectedCodec = 'нет H.264';
-}
-
-class _FailingStream extends FakeStream {
-  @override
-  Future<void> startDirect(OwnServer server, {String quality = '720p', int fps = 30}) async => throw 'Сервер отклонил ключ. Проверьте ключ в настройках сервера.';
 }

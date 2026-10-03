@@ -8,14 +8,53 @@ import android.os.Looper
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.BasicMessageChannel
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.StandardMessageCodec
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.concurrent.thread
 
 class MainActivity : FlutterActivity() {
+    private var engine: TranscodeEngine? = null
+    private var engineSession = 0
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // Движок перекодирования: команды по одному каналу, готовые кадры (H.264 и AAC) по другому.
+        val frames = BasicMessageChannel(flutterEngine.dartExecutor.binaryMessenger, "vrcast/engine/frames", StandardMessageCodec.INSTANCE)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "vrcast/engine").setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> {
+                    engine?.stop()
+                    val a = call.arguments as Map<*, *>
+                    @Suppress("UNCHECKED_CAST")
+                    val params = TranscodeEngine.Params(
+                        videoSource = a["videoSource"] as String?,
+                        audioSource = a["audioSource"] as String?,
+                        startUs = (a["startUs"] as Number).toLong(),
+                        width = (a["width"] as Number).toInt(),
+                        height = (a["height"] as Number).toInt(),
+                        fps = (a["fps"] as Number).toInt(),
+                        videoBitrate = (a["videoBitrate"] as Number).toInt(),
+                        audioBitrate = (a["audioBitrate"] as Number).toInt(),
+                        volume = (a["volume"] as Number).toFloat(),
+                        speed = (a["speed"] as Number).toFloat(),
+                        headers = a["headers"] as Map<String, String>?,
+                    )
+                    val session = ++engineSession
+                    val created = TranscodeEngine { message -> runOnUiThread { frames.send(message + ("session" to session)) } }
+                    engine = created
+                    created.start(params)
+                    result.success(session)
+                }
+                "pause" -> { engine?.pause(); result.success(null) }
+                "resume" -> { engine?.resume(); result.success(null) }
+                "stop" -> { engine?.stop(); engine = null; result.success(null) }
+                "volume" -> { engine?.setVolume((call.argument<Number>("value") ?: 1).toFloat()); result.success(null) }
+                else -> result.notImplemented()
+            }
+        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "vrcast/screen").setMethodCallHandler { call, result ->
             when (call.method) {
                 "start" -> {

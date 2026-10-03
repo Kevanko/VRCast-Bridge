@@ -39,7 +39,19 @@ abstract class LinkResolver {
   Future<ByteSource> open(SharedFile item);
 }
 
-class DefaultLinkResolver implements LinkResolver {
+/// Что отдать движку перекодирования: у YouTube картинка и звук лежат в разных файлах.
+class EngineSource {
+  const EngineSource({this.video, this.audio});
+  final String? video;
+  final String? audio;
+}
+
+/// Умеет выдать источники для перекодирования (в том числе HD с YouTube, которого нет в готовых mp4).
+abstract class EngineLinkResolver {
+  Future<EngineSource> engineSource(SharedFile item, {required int maxHeight});
+}
+
+class DefaultLinkResolver implements LinkResolver, EngineLinkResolver {
   static final _direct = RegExp(r'\.(mp4|m4v|mov|m4a)$', caseSensitive: false);
   static const maxPlaylist = 200;
 
@@ -173,6 +185,62 @@ class DefaultLinkResolver implements LinkResolver {
     } finally {
       await source.close();
     }
+  }
+
+  /// Картинка и звук отдельно, до [maxHeight]: H.264 предпочтительнее (его телефоны декодируют аппаратно), VP9 — до 720p.
+  @override
+  Future<EngineSource> engineSource(SharedFile item, {required int maxHeight}) async {
+    if (item.kind != 'youtube') return EngineSource(video: item.url);
+    final yt = YoutubeExplode();
+    try {
+      final manifest = await yt.videos.streamsClient.getManifest(VideoId(item.sourceId));
+      final pick = pickYoutubeStreams(
+        [for (final s in manifest.videoOnly) (url: s.url.toString(), codec: s.videoCodec, height: s.videoResolution.height, bitrate: s.bitrate.bitsPerSecond)],
+        [for (final s in manifest.audioOnly) (url: s.url.toString(), codec: s.audioCodec, bitrate: s.bitrate.bitsPerSecond)],
+        maxHeight,
+      );
+      if (pick.video == null) {
+        // Раздельных потоков нет — берём готовый (картинка со звуком в одном файле).
+        final muxed = manifest.muxed.toList()..sort((a, b) => a.videoQuality.index.compareTo(b.videoQuality.index));
+        if (muxed.isEmpty) throw UnsupportedLink('У этого видео нет доступного потока');
+        return EngineSource(video: muxed.last.url.toString());
+      }
+      return pick;
+    } on UnsupportedLink {
+      rethrow;
+    } catch (e) {
+      throw UnsupportedLink('Не удалось получить поток YouTube: $e');
+    } finally {
+      yt.close();
+    }
+  }
+
+  /// Выбор потоков YouTube. Вынесен отдельно, чтобы проверять без сети.
+  static EngineSource pickYoutubeStreams(
+    List<({String url, String codec, int height, int bitrate})> videos,
+    List<({String url, String codec, int bitrate})> audios,
+    int maxHeight,
+  ) {
+    String? video;
+    final inLimit = videos.where((v) => v.height <= maxHeight).toList();
+    int better(({String url, String codec, int height, int bitrate}) a, ({String url, String codec, int height, int bitrate}) b) =>
+        a.height != b.height ? a.height.compareTo(b.height) : a.bitrate.compareTo(b.bitrate);
+    final h264 = inLimit.where((v) => v.codec.startsWith('avc1')).toList()..sort(better);
+    final vp9 = inLimit.where((v) => v.codec.startsWith('vp9') && v.height <= 720).toList()..sort(better);
+    if (h264.isNotEmpty) {
+      video = h264.last.url;
+    } else if (vp9.isNotEmpty) {
+      video = vp9.last.url;
+    } else if (videos.isNotEmpty) {
+      // Ничего нет в пределах лимита: берём самый маленький, при равенстве — H.264.
+      int avc(({String url, String codec, int height, int bitrate}) v) => v.codec.startsWith('avc1') ? 0 : 1;
+      final lowest = [...videos]..sort((a, b) => a.height != b.height ? a.height.compareTo(b.height) : avc(a).compareTo(avc(b)));
+      video = lowest.first.url;
+    }
+    final aac = audios.where((a) => a.codec.startsWith('mp4a')).toList()..sort((a, b) => a.bitrate.compareTo(b.bitrate));
+    final any = [...audios]..sort((a, b) => a.bitrate.compareTo(b.bitrate));
+    final audio = aac.isNotEmpty ? aac.last.url : any.isNotEmpty ? any.last.url : null;
+    return EngineSource(video: video, audio: audio);
   }
 
   @override

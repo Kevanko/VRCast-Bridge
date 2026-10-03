@@ -129,6 +129,27 @@ void main() {
       expect(server.hlsLink, 'http://203.0.113.7:9564/phone/index.m3u8');
     });
 
+    test('качество эфира, скорость и громкость: значения по умолчанию, границы, запоминание', () async {
+      expect(Prefs.instance.videoProfile.isCopy, isTrue);
+      expect((Prefs.instance.playSpeed, Prefs.instance.playVolume, Prefs.instance.videoFps), (1.0, 1.0, 30));
+      Prefs.instance.setVideoProfile(quality: '1080p', fps: 60, bitrate: 6000);
+      Prefs.instance.setVideoProfile(quality: 'нет-такого', fps: 17, bitrate: -5);
+      expect(Prefs.instance.videoQuality, '1080p', reason: 'неизвестное качество не принимается');
+      expect(Prefs.instance.videoFps, 60, reason: 'и неизвестная частота кадров тоже');
+      expect(Prefs.instance.videoBitrate, 0, reason: 'отрицательный битрейт — «авто»');
+      Prefs.instance.setVideoProfile(bitrate: 6000);
+      Prefs.instance.setPlayback(speed: 9, volume: 5);
+      expect((Prefs.instance.playSpeed, Prefs.instance.playVolume), (2.0, 2.0), reason: 'скорость до 2×, громкость до 200%');
+      Prefs.instance.setPlayback(speed: 0.1, volume: -1);
+      expect((Prefs.instance.playSpeed, Prefs.instance.playVolume), (0.5, 0.0));
+      Prefs.instance.setPlayback(speed: 1.25, volume: 0.8);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await Prefs.instance.load();
+      expect(Prefs.instance.videoProfile.quality, '1080p');
+      expect(Prefs.instance.videoProfile.bitrate, 6000000);
+      expect((Prefs.instance.playSpeed, Prefs.instance.playVolume), (1.25, 0.8));
+    });
+
     test('качество с ПК запоминается для работы без ПК', () async {
       expect(Prefs.instance.standaloneQuality, '720p');
       Prefs.instance.mirrorProfile('1080p', 60);

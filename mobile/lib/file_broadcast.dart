@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -11,6 +12,7 @@ import 'own_server.dart';
 import 'rtp.dart';
 import 'rtsp_session.dart';
 import 'sinks.dart';
+import 'transcode.dart';
 
 typedef RtspOpener = Future<RtspOut> Function(
   Uri url, {
@@ -48,8 +50,21 @@ class FileBroadcast extends ChangeNotifier {
     this.speedUp = 1,
     this.hold = holdAwake,
     LinkResolver? resolver,
+    this.engineStarter,
+    VideoProfile Function()? profile,
   }) : _open = opener ?? _openRtsp,
-       _resolver = resolver ?? DefaultLinkResolver();
+       _resolver = resolver ?? DefaultLinkResolver(),
+       profileOf = profile ?? (() => VideoProfile.copy);
+
+  /// Движок перекодирования (на Android). Без него эфир только «как в файле»: скорость, громкость и качество недоступны.
+  final EngineStarter? engineStarter;
+
+  /// Качество эфира сейчас (берётся из настроек при каждом запуске ролика).
+  final VideoProfile Function() profileOf;
+
+  /// Скорость (0,5–2×) и громкость (0–200%): любое отличие от обычного включает перекодирование.
+  double speed = 1;
+  double volume = 1;
 
   final RtspOpener _open;
   final LinkResolver _resolver;
@@ -172,6 +187,39 @@ class FileBroadcast extends ChangeNotifier {
     _changed();
   }
 
+  /// Перезапустить ролик с того же места (после смены скорости или качества): перекодированный поток собирается заново.
+  void _restartHere() {
+    if (active && engineStarter != null) {
+      _command(_Cmd.seek, value: position);
+    } else {
+      _changed();
+    }
+  }
+
+  void setSpeed(double value) {
+    final next = value.clamp(0.5, 2.0).toDouble();
+    if (next == speed) return;
+    speed = next;
+    _restartHere();
+  }
+
+  /// Громкость меняется на лету, пока идёт перекодирование; из режима «как в файле» уходит на перекодирование с этого места.
+  void setVolume(double value) {
+    final next = value.clamp(0.0, 2.0).toDouble();
+    if (next == volume) return;
+    final wasEngine = _engine != null;
+    volume = next;
+    unawaited(_engine?.session.setVolume(volume));
+    if (!wasEngine) {
+      _restartHere();
+    } else {
+      _changed();
+    }
+  }
+
+  /// Качество в настройках поменяли: применяется с текущего места.
+  void profileChanged() => _restartHere();
+
   /// Остановить эфир с причиной (например, пропала ссылка).
   void fail(String message) {
     stop();
@@ -203,85 +251,160 @@ class FileBroadcast extends ChangeNotifier {
 
   bool _alive(int run) => run == _run && active;
 
+  // Приёмник эфира (RTSP-сеанс или HLS) живёт между роликами, пока формат один.
+  Sink? _pub;
+  _EngineRun? _engine;
+
+  bool get _wantsEngine =>
+      engineStarter != null &&
+      (speed != 1 || volume != 1 || !profileOf().isCopy);
+
   Future<void> _loop(int run) async {
-    Sink? pub;
     final skipped = <String>{};
     var startAt = 0.0;
     var reconnects = 0;
+
+    // true — идём дальше, false — повторить круг, null — эфир закончен.
+    Future<bool?> ensureSink(Mp4Info info) async {
+      final current = _pub;
+      if (current != null && !current.closed && current.compatible(info)) {
+        connecting = false;
+        _changed();
+        return true;
+      }
+      await current?.close();
+      _pub = null;
+      connecting = true;
+      _changed();
+      try {
+        _pub = await _connect(info);
+      } catch (e) {
+        if (!_alive(run)) return null;
+        if (++reconnects > 3) {
+          error = '$e';
+          _finishRun(run);
+          return null;
+        }
+        await Future<void>.delayed(const Duration(seconds: 2));
+        return false;
+      }
+      reconnects = 0;
+      connecting = false;
+      _changed();
+      return true;
+    }
+
+    // Пропустить ролик с причиной. false — играть больше нечего, эфир закончен.
+    bool skip(SharedFile file, String why) {
+      warning = '${file.title}: $why';
+      skipped.add(file.id);
+      if (skipped.length >= playlist.length) {
+        error = warning;
+        _finishRun(run);
+        return false;
+      }
+      _step(1);
+      startAt = 0;
+      _changed();
+      return true;
+    }
+
     try {
       while (_alive(run)) {
         final file = playlist[index];
-        Mp4Info info;
-        ByteSource source;
-        try {
-          source = file.isLink
-              ? await _resolver.open(file)
-              : FileSource(file.path);
+        _Result result;
+        var viaEngine = _wantsEngine;
+        ByteSource? source;
+        Mp4Info? copyInfo;
+        if (!viaEngine) {
           try {
-            info = await readMp4From(source);
-          } catch (_) {
-            await source.close();
-            rethrow;
-          }
-        } catch (e) {
-          warning =
-              '${file.title}: ${e is Mp4Unsupported || e is UnsupportedLink
+            source = file.isLink
+                ? await _resolver.open(file)
+                : FileSource(file.path);
+            try {
+              copyInfo = await readMp4From(source);
+            } catch (_) {
+              await source.close();
+              source = null;
+              rethrow;
+            }
+          } catch (e) {
+            // Формат не подходит для отправки как есть (HEVC, MKV, mp3, YouTube без готового mp4): перекодируем.
+            if ((e is Mp4Unsupported || e is UnsupportedLink) &&
+                engineStarter != null) {
+              viaEngine = true;
+              debugPrint(
+                'эфир: «${file.title}» нельзя отправить как есть ($e): перекодирую',
+              );
+            } else {
+              final why = e is Mp4Unsupported || e is UnsupportedLink
                   ? e.toString()
                   : file.isLink
                   ? 'ссылка не открылась'
-                  : 'файл не открылся'}';
-          skipped.add(file.id);
-          if (skipped.length >= playlist.length) {
-            error = warning;
-            _finishRun(run);
-            return;
+                  : 'файл не открылся';
+              if (!skip(file, why)) return;
+              continue;
+            }
           }
-          _step(1);
-          startAt = 0;
-          _changed();
-          continue;
         }
-        skipped.remove(file.id);
-        duration = info.duration;
-        if (pub == null || pub.closed || !pub.compatible(info)) {
-          await pub?.close();
-          connecting = true;
-          _changed();
+        if (viaEngine) {
+          _EngineRun? engine;
           try {
-            pub = await _connect(info);
+            engine = await _startEngine(file, startAt);
+            _engine = engine;
+            final info = await engine.configured(const Duration(seconds: 25));
+            duration = file.duration > 0 ? file.duration : 0;
+            final ok = await ensureSink(info);
+            if (ok == null) return;
+            if (ok == false) continue;
+            skipped.remove(file.id);
+            result = await _consumeEngine(run, _pub!, engine, info, startAt);
           } catch (e) {
             if (!_alive(run)) return;
-            if (++reconnects > 3) {
-              error = '$e';
-              _finishRun(run);
-              return;
-            }
-            await Future<void>.delayed(const Duration(seconds: 2));
+            debugPrint('эфир: перекодирование «${file.title}» не вышло: $e');
+            final why = e is UnsupportedLink || e is _EngineFailure
+                ? e.toString()
+                : 'не удалось перекодировать';
+            if (!skip(file, why)) return;
+            continue;
+          } finally {
+            _engine = null;
+            await engine?.stop();
+          }
+        } else {
+          skipped.remove(file.id);
+          duration = copyInfo!.duration;
+          final ok = await ensureSink(copyInfo);
+          if (ok == null) {
+            await source!.close();
+            return;
+          }
+          if (ok == false) {
+            await source!.close();
             continue;
           }
-          reconnects = 0;
-        }
-        connecting = false;
-        _changed();
-        final _Result result;
-        try {
-          result = await _playItem(run, pub, info, startAt, source);
-        } finally {
-          await source.close();
+          final copySource = source!;
+          try {
+            result = await _playItem(run, _pub!, copyInfo, startAt, copySource);
+          } finally {
+            await copySource.close();
+          }
         }
         if (!_alive(run)) return;
         startAt = 0;
         switch (result) {
           case _Result.lost:
-            debugPrint('эфир: соединение с сервером потеряно, переподключаюсь (попытка ${reconnects + 1})');
+            debugPrint(
+              'эфир: соединение с сервером потеряно, переподключаюсь (попытка ${reconnects + 1})',
+            );
             if (++reconnects > 3) {
               error = 'Связь с сервером потеряна';
               _finishRun(run);
               return;
             }
             startAt = position;
-            await pub.close();
-            pub = null;
+            await _pub?.close();
+            _pub = null;
           case _Result.finished:
             if (!_advance()) {
               _finishRun(run);
@@ -313,7 +436,121 @@ class FileBroadcast extends ChangeNotifier {
         _changed();
       }
     } finally {
-      await pub?.close();
+      await _pub?.close();
+      _pub = null;
+    }
+  }
+
+  /// Запустить движок перекодирования на ролик с места [startAt] (секунды источника).
+  Future<_EngineRun> _startEngine(SharedFile file, double startAt) async {
+    final profile = profileOf();
+    final EngineSource source;
+    if (file.isLink) {
+      final resolver = _resolver;
+      source = resolver is EngineLinkResolver
+          ? await (resolver as EngineLinkResolver).engineSource(
+              file,
+              maxHeight: profile.isCopy ? 720 : profile.height,
+            )
+          : EngineSource(video: file.url);
+    } else {
+      source = EngineSource(video: file.path);
+    }
+    // «Как в файле» здесь невозможно (перекодировать всё же нужно): берём 720p с выбранной частотой кадров.
+    final effective = profile.isCopy
+        ? VideoProfile(
+            quality: '720p',
+            fps: profile.fps,
+            bitrateKbps: profile.bitrateKbps,
+          )
+        : profile;
+    final session = await engineStarter!(
+      EngineParams(
+        videoSource: source.video,
+        audioSource: source.audio,
+        startUs: (startAt * 1e6).round(),
+        profile: effective,
+        volume: volume,
+        speed: speed,
+      ),
+    );
+    return _EngineRun(session);
+  }
+
+  /// Отправить в приёмник кадры и звук, которые присылает движок. Темп реального времени держит сам движок.
+  Future<_Result> _consumeEngine(
+    int run,
+    Sink pub,
+    _EngineRun engine,
+    Mp4Info info,
+    double startAt,
+  ) async {
+    final video = info.video!, audio = info.audio!;
+    final segBase = _timeline + 0.04;
+    pub.begin(info);
+    var lastReport = DateTime.now();
+    var lastKeepAlive = lastReport;
+    var enginePaused = false;
+    var lastPts = 0.0;
+    while (true) {
+      if (!_alive(run) || _cmd != _Cmd.none) return _Result.command;
+      if (pub.closed) return _Result.lost;
+      if (paused != enginePaused) {
+        enginePaused = paused;
+        unawaited(paused ? engine.session.pause() : engine.session.resume());
+      }
+      final now = DateTime.now();
+      // На паузе и при заминке движка сервер должен слышать нас: иначе он закроет публикацию.
+      void keepAlive() {
+        if (now.difference(lastReport).inSeconds >= 2) {
+          lastReport = now;
+          pub.report(now);
+          unawaited(pub.flush());
+        }
+        if (now.difference(lastKeepAlive).inSeconds >= 4) {
+          lastKeepAlive = now;
+          unawaited(pub.keepAlive());
+        }
+      }
+
+      if (paused) {
+        keepAlive();
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        continue;
+      }
+      final event = await engine.next(const Duration(milliseconds: 250));
+      if (event == null) {
+        keepAlive();
+        continue;
+      }
+      switch (event['type']) {
+        case 'v':
+          final pts = (event['pts'] as num) / 1e6;
+          pub.video(
+            video,
+            event['data'] as Uint8List,
+            pts: segBase + pts,
+            dts: segBase + pts,
+            sync: event['key'] == true,
+          );
+          if (pts > lastPts) lastPts = pts.toDouble();
+          position = startAt + pts * speed;
+        case 'a':
+          final pts = (event['pts'] as num) / 1e6;
+          pub.audio(audio, event['data'] as Uint8List, pts: segBase + pts);
+        case 'end':
+          _timeline = segBase + lastPts;
+          return _Result.finished;
+        case 'error':
+          warning = '${playlist[index].title}: ${event['message']}';
+          _timeline = segBase + lastPts;
+          return _Result.finished;
+      }
+      if (now.difference(lastReport).inMilliseconds >= 2000) {
+        lastReport = now;
+        pub.report(now);
+      }
+      await pub.flush();
     }
   }
 
@@ -370,7 +607,12 @@ class FileBroadcast extends ChangeNotifier {
 
   /// Чтение по сети бывает медленным (слабый интернет, долгое соединение): пока ждём, сервер должен слышать нас,
   /// иначе он закроет публикацию, и эфир оборвётся.
-  Future<Uint8List> _readAlive(ByteSource source, Sink pub, int offset, int size) async {
+  Future<Uint8List> _readAlive(
+    ByteSource source,
+    Sink pub,
+    int offset,
+    int size,
+  ) async {
     final reading = source.read(offset, size);
     var ticks = 0;
     final keep = Timer.periodic(const Duration(seconds: 2), (_) {
@@ -509,3 +751,83 @@ class FileBroadcast extends ChangeNotifier {
 }
 
 enum _Result { finished, command, lost }
+
+class _EngineFailure implements Exception {
+  _EngineFailure(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
+
+/// Один запуск движка: буфер событий и ожидание параметров кодеков.
+class _EngineRun {
+  _EngineRun(this.session) {
+    _sub = session.events.listen(
+      _onEvent,
+      onDone: () {
+        ended = true;
+        _wake?.complete();
+      },
+    );
+  }
+
+  final EngineSession session;
+  late final StreamSubscription<Map<String, dynamic>> _sub;
+  final _queue = Queue<Map<String, dynamic>>();
+  Completer<void>? _wake;
+  Map<String, dynamic>? _video;
+  Map<String, dynamic>? _audio;
+  bool ended = false;
+
+  void _onEvent(Map<String, dynamic> event) {
+    switch (event['type']) {
+      case 'vcfg':
+        _video = event;
+      case 'acfg':
+        _audio = event;
+      default:
+        _queue.add(event);
+    }
+    _wake?.complete();
+  }
+
+  /// Дождаться параметров кодеков (картинка и звук): по ним приёмник описывает эфир.
+  Future<Mp4Info> configured(Duration timeout) async {
+    final until = DateTime.now().add(timeout);
+    while (_video == null || _audio == null) {
+      final failed = _queue.where((e) => e['type'] == 'error').firstOrNull;
+      if (failed != null) throw _EngineFailure('${failed['message']}');
+      if (ended) throw _EngineFailure('движок закончил, не начав эфир');
+      final left = until.difference(DateTime.now());
+      if (left <= Duration.zero)
+        throw _EngineFailure('движок не запустился за ${timeout.inSeconds} с');
+      await _wait(left);
+    }
+    return engineInfo(
+      sps: (_video!['sps'] as List).cast<int>(),
+      pps: (_video!['pps'] as List).cast<int>(),
+      asc: (_audio!['asc'] as List).cast<int>(),
+      sampleRate: (_audio!['sampleRate'] as num?)?.toInt() ?? 48000,
+      channels: (_audio!['channels'] as num?)?.toInt() ?? 2,
+    );
+  }
+
+  Future<void> _wait(Duration limit) async {
+    final wake = _wake = Completer<void>();
+    await wake.future.timeout(limit, onTimeout: () {});
+    if (identical(_wake, wake)) _wake = null;
+  }
+
+  /// Следующий кадр или звук; null, если за [timeout] ничего не пришло.
+  Future<Map<String, dynamic>?> next(Duration timeout) async {
+    if (_queue.isEmpty && !ended) await _wait(timeout);
+    if (_queue.isNotEmpty) return _queue.removeFirst();
+    if (ended) return {'type': 'end'};
+    return null;
+  }
+
+  Future<void> stop() async {
+    await _sub.cancel();
+    await session.stop();
+  }
+}

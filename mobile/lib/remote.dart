@@ -13,6 +13,7 @@ import 'media_server.dart';
 import 'models.dart';
 import 'own_server.dart';
 import 'phone_stream.dart';
+import 'transcode.dart';
 
 enum Link { idle, connecting, online, offline }
 
@@ -360,6 +361,12 @@ class Prefs extends ChangeNotifier {
   int lanPort = 4718; // порт мгновенной ссылки по сети (как на ПК)
   String tunnelProvider = 'auto'; // сервис бесплатной ссылки: auto | cloudflare | serveo
   String tunnelKey = ''; // одноразовый SSH-ключ для Serveo, создаётся при первом запуске
+  // Качество эфира файлов и ссылок (как на ПК), скорость и громкость. «Как в файле» не перекодирует.
+  String videoQuality = 'copy';
+  int videoFps = 30;
+  int videoBitrate = 0; // кбит/с, 0 — по умолчанию для размера
+  double playSpeed = 1;
+  double playVolume = 1;
   bool transportTcp = true; // ссылка rtspt:// (поверх TCP) или rtsp:// (плеер выбирает сам, в том числе UDP)
   int shareRevision = 0;
   // Для проверки на эмуляторе, где адрес телефона не виден ПК: «адрес:порт», который назвать ПК, и порт сервера файлов.
@@ -383,6 +390,12 @@ class Prefs extends ChangeNotifier {
     fileDelivery = saved == 'cloudflare' || saved == 'tunnel' ? 'tunnel' : saved == 'lan' ? 'lan' : 'server';
     lanPort = p.getInt('lanPort') ?? 4718;
     transportTcp = p.getBool('transportTcp') ?? true;
+    final quality = p.getString('videoQuality');
+    videoQuality = VideoProfile.qualities.containsKey(quality) ? quality! : 'copy';
+    videoFps = const [24, 30, 60].contains(p.getInt('videoFps')) ? p.getInt('videoFps')! : 30;
+    videoBitrate = p.getInt('videoBitrate') ?? 0;
+    playSpeed = (p.getDouble('playSpeed') ?? 1).clamp(0.5, 2.0).toDouble();
+    playVolume = (p.getDouble('playVolume') ?? 1).clamp(0.0, 2.0).toDouble();
     final provider = p.getString('tunnelProvider');
     tunnelProvider = const ['cloudflare', 'serveo'].contains(provider) ? provider! : 'auto';
     tunnelKey = p.getString('tunnelKey') ?? '';
@@ -411,6 +424,11 @@ class Prefs extends ChangeNotifier {
     await p.setString('fileDelivery', fileDelivery);
     await p.setInt('lanPort', lanPort);
     await p.setBool('transportTcp', transportTcp);
+    await p.setString('videoQuality', videoQuality);
+    await p.setInt('videoFps', videoFps);
+    await p.setInt('videoBitrate', videoBitrate);
+    await p.setDouble('playSpeed', playSpeed);
+    await p.setDouble('playVolume', playVolume);
     await p.setString('tunnelProvider', tunnelProvider);
     await p.setString('tunnelKey', tunnelKey);
     await p.setStringList('pendingLinks', pendingLinks);
@@ -508,6 +526,19 @@ class Prefs extends ChangeNotifier {
       });
 
   void setTransport(bool tcp) => update(() => transportTcp = tcp);
+
+  VideoProfile get videoProfile => VideoProfile(quality: videoQuality, fps: videoFps, bitrateKbps: videoBitrate);
+
+  void setVideoProfile({String? quality, int? fps, int? bitrate}) => update(() {
+        if (quality != null && VideoProfile.qualities.containsKey(quality)) videoQuality = quality;
+        if (fps != null && const [24, 30, 60].contains(fps)) videoFps = fps;
+        if (bitrate != null) videoBitrate = bitrate < 0 ? 0 : bitrate;
+      });
+
+  void setPlayback({double? speed, double? volume}) => update(() {
+        if (speed != null) playSpeed = speed.clamp(0.5, 2.0).toDouble();
+        if (volume != null) playVolume = volume.clamp(0.0, 2.0).toDouble();
+      });
 
   void setTunnelProvider(String value) => update(() => tunnelProvider = const ['cloudflare', 'serveo'].contains(value) ? value : 'auto');
 

@@ -11,6 +11,7 @@ import 'media_server.dart';
 import 'public_tunnel.dart';
 import 'remote.dart';
 import 'rtsp_server.dart';
+import 'transcode.dart';
 import 'ssh.dart';
 import 'ssh_tunnel.dart';
 
@@ -20,7 +21,7 @@ import 'ssh_tunnel.dart';
 class Broadcaster extends ChangeNotifier {
   Broadcaster({FileBroadcast? files, LinkResolver? resolver, Future<String?> Function()? cloudflared, Future<PublicTunnel> Function(String provider, int localPort)? tunnelStarter})
       : resolver = resolver ?? DefaultLinkResolver(),
-        files = files ?? FileBroadcast(resolver: resolver),
+        files = files ?? FileBroadcast(resolver: resolver, engineStarter: PlatformEngineSession.start, profile: () => Prefs.instance.videoProfile),
         _cloudflared = cloudflared ?? bundledCloudflared,
         _tunnelStarter = tunnelStarter {
     this.files.addListener(_onFiles);
@@ -50,6 +51,8 @@ class Broadcaster extends ChangeNotifier {
     final list = prefs.sharedFiles;
     if (list.isEmpty) return 'Сначала добавьте файлы на вкладке «Очередь».';
     if (starting) return null;
+    files.speed = prefs.playSpeed;
+    files.volume = prefs.playVolume;
     debugPrint('Эфир своей очереди: способ «$delivery», роликов ${list.length}');
     try {
       final index = fromId == null ? 0 : list.indexWhere((f) => f.id == fromId);
@@ -64,6 +67,26 @@ class Broadcaster extends ChangeNotifier {
     } catch (e) {
       return '$e';
     }
+  }
+
+  /// Скорость и громкость запоминаются и сразу применяются к идущему эфиру.
+  void setSpeed(double value) {
+    Prefs.instance.setPlayback(speed: value);
+    files.setSpeed(Prefs.instance.playSpeed);
+    notifyListeners();
+  }
+
+  void setVolume(double value) {
+    Prefs.instance.setPlayback(volume: value);
+    files.setVolume(Prefs.instance.playVolume);
+    notifyListeners();
+  }
+
+  /// Качество поменяли в настройках: идущий эфир перезапускается с того же места.
+  void setProfile({String? quality, int? fps, int? bitrate}) {
+    Prefs.instance.setVideoProfile(quality: quality, fps: fps, bitrate: bitrate);
+    files.profileChanged();
+    notifyListeners();
   }
 
   Future<void> stop() async {

@@ -15,6 +15,7 @@ import 'local_probe.dart';
 import 'media_server.dart';
 import 'own_server.dart';
 import 'ssh.dart';
+import 'transcode.dart';
 import 'models.dart';
 import 'remote.dart';
 
@@ -649,14 +650,37 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
         _LinkCard(title: 'Ссылка для VRChat', hint: 'Мгновенная ссылка по сети Wi-Fi: компьютер и телефон должны быть в одной сети. Задержка около полусекунды', url: Prefs.instance.withTransport(files.viewLink)),
       if (live && cloud && files.viewLink.isNotEmpty)
         _LinkCard(title: 'Ссылка для VRChat', hint: 'Бесплатная ссылка (${remote.broadcaster.tunnelName}). Работает, пока идёт эфир и приложение открыто', url: files.viewLink),
+      // Громкость, скорость и качество, как на ПК. Любое из них отличное от обычного включает перекодирование на телефоне.
+      Row(children: [
+        Icon(Prefs.instance.playVolume == 0 ? Icons.volume_off : Icons.volume_up, color: Colors.white54),
+        Expanded(child: Slider(
+          value: Prefs.instance.playVolume.clamp(0, 2).toDouble(),
+          max: 2,
+          divisions: 20,
+          label: '${(Prefs.instance.playVolume * 100).round()}%',
+          onChanged: (v) => remote.broadcaster.setVolume(v),
+        )),
+        SizedBox(width: 44, child: Text('${(Prefs.instance.playVolume * 100).round()}%', textAlign: TextAlign.end, style: const TextStyle(color: Colors.white70, fontSize: 12))),
+      ]),
       Wrap(spacing: 8, runSpacing: 8, alignment: WrapAlignment.center, children: [
+        PopupMenuButton<double>(
+          onSelected: remote.broadcaster.setSpeed,
+          itemBuilder: (_) => [for (final v in _speeds) CheckedPopupMenuItem(value: v, checked: v == Prefs.instance.playSpeed, child: Text('${v}x'))],
+          child: Chip(avatar: const Icon(Icons.speed, size: 18), label: Text('${Prefs.instance.playSpeed}x')),
+        ),
         PopupMenuButton<String>(
           onSelected: files.setLoop,
           itemBuilder: (_) => [for (final e in _loops.entries) CheckedPopupMenuItem(value: e.key, checked: e.key == files.loopMode, child: Text(e.value))],
           child: Chip(avatar: const Icon(Icons.repeat, size: 18), label: Text(_loops[files.loopMode] ?? files.loopMode)),
         ),
+        ActionChip(avatar: const Icon(Icons.tune, size: 18), label: Text(_profileLabel()), onPressed: () => showQualitySheet(context, remote)),
       ]),
     ];
+  }
+
+  String _profileLabel() {
+    final p = Prefs.instance.videoProfile;
+    return p.isCopy ? 'Качество: как в файле' : '${p.quality} · ${p.fps} к/с';
   }
 
   @override
@@ -1338,6 +1362,49 @@ class _DirectSummary extends StatelessWidget {
         },
       );
 }
+
+/// Качество эфира, как на ПК: размер, кадры в секунду, битрейт. «Как в файле» не перекодирует и почти не греет телефон.
+Future<void> showQualitySheet(BuildContext context, Remote remote) => showModalBottomSheet<void>(
+      context: context,
+      builder: (sheet) => ListenableBuilder(
+        listenable: Prefs.instance,
+        builder: (context, _) {
+          final p = Prefs.instance.videoProfile;
+          return SafeArea(child: Padding(padding: const EdgeInsets.all(16), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Качество эфира', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            const Text('«Как в файле» отправляет видео без перекодирования: телефон не греется. Любое другое качество, скорость или громкость включают перекодирование.', style: TextStyle(color: Colors.white54, fontSize: 12)),
+            const SizedBox(height: 12),
+            SegmentedButton<String>(
+              showSelectedIcon: false,
+              segments: [for (final e in VideoProfile.qualities.entries) ButtonSegment(value: e.key, label: Text(e.value, style: const TextStyle(fontSize: 12)))],
+              selected: {p.quality},
+              onSelectionChanged: (v) => remote.broadcaster.setProfile(quality: v.first),
+            ),
+            const SizedBox(height: 12),
+            const Text('Кадров в секунду'),
+            const SizedBox(height: 4),
+            SegmentedButton<int>(
+              showSelectedIcon: false,
+              segments: const [ButtonSegment(value: 24, label: Text('24')), ButtonSegment(value: 30, label: Text('30')), ButtonSegment(value: 60, label: Text('60'))],
+              selected: {p.fps},
+              onSelectionChanged: p.isCopy ? null : (v) => remote.broadcaster.setProfile(fps: v.first),
+            ),
+            const SizedBox(height: 12),
+            const Text('Битрейт'),
+            const SizedBox(height: 4),
+            Wrap(spacing: 8, children: [
+              for (final kbps in const [0, 1500, 3000, 5000, 8000])
+                ChoiceChip(
+                  label: Text(kbps == 0 ? 'Авто' : '${kbps ~/ 1000 == kbps / 1000 ? kbps ~/ 1000 : (kbps / 1000).toStringAsFixed(1)} Мбит/с'),
+                  selected: p.bitrateKbps == kbps,
+                  onSelected: p.isCopy ? null : (_) => remote.broadcaster.setProfile(bitrate: kbps),
+                ),
+            ]),
+          ])));
+        },
+      ),
+    );
 
 /// Журнал приложения: скопировать, отправить, очистить.
 class LogScreen extends StatelessWidget {
