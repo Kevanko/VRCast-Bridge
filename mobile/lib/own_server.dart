@@ -3,12 +3,16 @@ import 'dart:convert';
 /// Свой сервер трансляции (VPS с MediaMTX из server/install.sh): к нему телефон может
 /// подключаться напрямую, без ПК.
 class OwnServer {
-  OwnServer({required this.name, required this.host, this.rtspPort = 8554, required this.key});
+  OwnServer({required this.name, required this.host, this.rtspPort = 8554, required this.key, this.sshPort = 22, this.user = 'root', this.hostKey = ''});
 
   final String name;
   final String host;
   final int rtspPort;
   final String key;
+  // Как зайти на сервер по SSH (нужно, чтобы убрать с него установленное); пароль нигде не хранится.
+  final int sshPort;
+  final String user;
+  final String hostKey;
 
   String get id => '$host:$rtspPort';
 
@@ -18,15 +22,21 @@ class OwnServer {
   /// Ссылка для плеера в VRChat: стабильная, пока сервер на месте.
   String get viewLink => 'rtspt://$host:$rtspPort/phone';
 
+  /// Запасная ссылка (обычный HLS): для Quest и сетей, где RTSP не проходит. Сервер из install.sh отдаёт её на порту RTSP + 10.
+  String get hlsLink => 'http://$host:${rtspPort + 10}/phone/index.m3u8';
+
   String get basicAuth => 'Basic ${base64Encode(utf8.encode('vrcast:$key'))}';
 
-  Map<String, Object?> toJson() => {'name': name, 'host': host, 'rtspPort': rtspPort, 'key': key};
+  Map<String, Object?> toJson() => {'name': name, 'host': host, 'rtspPort': rtspPort, 'key': key, if (sshPort != 22) 'sshPort': sshPort, if (user != 'root') 'user': user, if (hostKey.isNotEmpty) 'hostKey': hostKey};
 
   factory OwnServer.fromJson(Map<String, dynamic> json) => OwnServer(
         name: '${json['name'] ?? json['host']}',
         host: '${json['host']}',
         rtspPort: (json['rtspPort'] as num?)?.toInt() ?? 8554,
         key: '${json['key'] ?? json['publishKey'] ?? ''}',
+        sshPort: (json['sshPort'] as num?)?.toInt() ?? 22,
+        user: '${json['user'] ?? 'root'}',
+        hostKey: '${json['hostKey'] ?? ''}',
       );
 
   /// Проверка того, что ввёл человек; возвращает текст ошибки или null.

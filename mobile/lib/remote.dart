@@ -358,6 +358,9 @@ class Prefs extends ChangeNotifier {
   // Как вещать файлы без ПК: на свой сервер ('server') или по бесплатной ссылке Cloudflare ('cloudflare').
   String fileDelivery = 'server'; // lan | tunnel | server
   int lanPort = 4718; // порт мгновенной ссылки по сети (как на ПК)
+  String tunnelProvider = 'auto'; // сервис бесплатной ссылки: auto | cloudflare | serveo
+  String tunnelKey = ''; // одноразовый SSH-ключ для Serveo, создаётся при первом запуске
+  bool transportTcp = true; // ссылка rtspt:// (поверх TCP) или rtsp:// (плеер выбирает сам, в том числе UDP)
   int shareRevision = 0;
   // Для проверки на эмуляторе, где адрес телефона не виден ПК: «адрес:порт», который назвать ПК, и порт сервера файлов.
   String mediaAddress = '';
@@ -379,6 +382,10 @@ class Prefs extends ChangeNotifier {
     final saved = p.getString('fileDelivery');
     fileDelivery = saved == 'cloudflare' || saved == 'tunnel' ? 'tunnel' : saved == 'lan' ? 'lan' : 'server';
     lanPort = p.getInt('lanPort') ?? 4718;
+    transportTcp = p.getBool('transportTcp') ?? true;
+    final provider = p.getString('tunnelProvider');
+    tunnelProvider = const ['cloudflare', 'serveo'].contains(provider) ? provider! : 'auto';
+    tunnelKey = p.getString('tunnelKey') ?? '';
     mediaAddress = p.getString('mediaAddress') ?? '';
     mediaPort = p.getInt('mediaPort') ?? 0;
     pendingLinks = p.getStringList('pendingLinks') ?? [];
@@ -403,6 +410,9 @@ class Prefs extends ChangeNotifier {
     await p.setStringList('templates', [for (final t in templates) jsonEncode(t.toJson())]);
     await p.setString('fileDelivery', fileDelivery);
     await p.setInt('lanPort', lanPort);
+    await p.setBool('transportTcp', transportTcp);
+    await p.setString('tunnelProvider', tunnelProvider);
+    await p.setString('tunnelKey', tunnelKey);
     await p.setStringList('pendingLinks', pendingLinks);
     await p.setString('deviceName', deviceName);
     await p.setStringList('aliases', [for (final e in aliases.entries) '${e.key}\n${e.value}']);
@@ -496,6 +506,15 @@ class Prefs extends ChangeNotifier {
         standaloneQuality = quality ?? standaloneQuality;
         standaloneFps = fps ?? standaloneFps;
       });
+
+  void setTransport(bool tcp) => update(() => transportTcp = tcp);
+
+  void setTunnelProvider(String value) => update(() => tunnelProvider = const ['cloudflare', 'serveo'].contains(value) ? value : 'auto');
+
+  void setTunnelKey(String pem) => update(() => tunnelKey = pem);
+
+  /// Ссылка RTSP с выбранным транспортом: rtspt:// — только TCP, rtsp:// — плеер может взять UDP.
+  String withTransport(String url) => url.replaceFirst(RegExp(r'^rtsp[t]?://'), transportTcp ? 'rtspt://' : 'rtsp://');
 
   void setFileDelivery(String value) => update(() => fileDelivery = const ['lan', 'tunnel', 'server'].contains(value) ? value : 'server');
 

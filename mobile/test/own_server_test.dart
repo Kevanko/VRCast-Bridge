@@ -115,6 +115,20 @@ void main() {
       expect(Prefs.instance.sharedFiles, hasLength(1));
     });
 
+    test('транспорт ссылки: rtspt:// (TCP) или rtsp://, запасная HLS-ссылка своего сервера', () async {
+      expect(Prefs.instance.transportTcp, isTrue);
+      expect(Prefs.instance.withTransport('rtspt://1.2.3.4:8554/phone'), 'rtspt://1.2.3.4:8554/phone');
+      Prefs.instance.setTransport(false);
+      expect(Prefs.instance.withTransport('rtspt://1.2.3.4:8554/phone'), 'rtsp://1.2.3.4:8554/phone');
+      expect(Prefs.instance.withTransport('rtsp://1.2.3.4:8554/phone'), 'rtsp://1.2.3.4:8554/phone');
+      expect(Prefs.instance.withTransport('https://x.trycloudflare.com/a'), 'https://x.trycloudflare.com/a', reason: 'чужие ссылки не трогаем');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await Prefs.instance.load();
+      expect(Prefs.instance.transportTcp, isFalse, reason: 'выбор запоминается');
+      final server = OwnServer(name: 'VPS', host: '203.0.113.7', rtspPort: 9554, key: 'k');
+      expect(server.hlsLink, 'http://203.0.113.7:9564/phone/index.m3u8');
+    });
+
     test('качество с ПК запоминается для работы без ПК', () async {
       expect(Prefs.instance.standaloneQuality, '720p');
       Prefs.instance.mirrorProfile('1080p', 60);

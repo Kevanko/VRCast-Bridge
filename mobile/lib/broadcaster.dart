@@ -8,23 +8,29 @@ import 'file_broadcast.dart';
 import 'hls.dart';
 import 'links.dart';
 import 'media_server.dart';
+import 'public_tunnel.dart';
 import 'remote.dart';
 import 'rtsp_server.dart';
+import 'ssh.dart';
+import 'ssh_tunnel.dart';
 
 /// Эфир с телефона: запуск своей очереди на выбранный способ (локально, бесплатная ссылка, свой сервер) и всё, что
 /// телефон для этого держит (RTSP-сервер в сети, HLS с туннелем). Живёт отдельно от связи с ПК: подключились к ПК или
 /// отключились — эфир идёт дальше, как музыка в Spotify при смене устройства.
 class Broadcaster extends ChangeNotifier {
-  Broadcaster({FileBroadcast? files, LinkResolver? resolver, Future<String?> Function()? cloudflared})
+  Broadcaster({FileBroadcast? files, LinkResolver? resolver, Future<String?> Function()? cloudflared, Future<PublicTunnel> Function(String provider, int localPort)? tunnelStarter})
       : resolver = resolver ?? DefaultLinkResolver(),
         files = files ?? FileBroadcast(resolver: resolver),
-        _cloudflared = cloudflared ?? bundledCloudflared {
+        _cloudflared = cloudflared ?? bundledCloudflared,
+        _tunnelStarter = tunnelStarter {
     this.files.addListener(_onFiles);
   }
 
   final FileBroadcast files;
   final LinkResolver resolver;
   final Future<String?> Function() _cloudflared;
+  final Future<PublicTunnel> Function(String provider, int localPort)? _tunnelStarter;
+  String tunnelName = ''; // каким сервисом поднята бесплатная ссылка сейчас
   bool starting = false; // поднимается раздача (сервер в сети или бесплатная ссылка)
   bool? serves; // бесплатная ссылка отвечает снаружи: null — ещё проверяем
   _Hosted? _hosted;
@@ -44,6 +50,7 @@ class Broadcaster extends ChangeNotifier {
     final list = prefs.sharedFiles;
     if (list.isEmpty) return 'Сначала добавьте файлы на вкладке «Очередь».';
     if (starting) return null;
+    debugPrint('Эфир своей очереди: способ «$delivery», роликов ${list.length}');
     try {
       final index = fromId == null ? 0 : list.indexWhere((f) => f.id == fromId);
       final from = index < 0 ? 0 : index;
@@ -60,6 +67,7 @@ class Broadcaster extends ChangeNotifier {
   }
 
   Future<void> stop() async {
+    if (files.active) debugPrint('Эфир своей очереди остановлен');
     await files.stop();
     await _stopHosted();
   }
@@ -96,30 +104,51 @@ class Broadcaster extends ChangeNotifier {
     }
   }
 
-  /// Бесплатная ссылка Cloudflare: телефон сам раздаёт HLS, а туннель выводит его в интернет. ПК и сервер не нужны.
+  /// Бесплатная ссылка для друзей: телефон сам раздаёт HLS, а туннель (Cloudflare или Serveo) выводит его в интернет.
+  /// ПК и свой сервер не нужны. «Авто» пробует Cloudflare, если он есть в сборке, и при неудаче переходит к Serveo.
   Future<String?> _startTunnel(List<SharedFile> list, int from) async {
-    final binary = await _cloudflared();
-    if (binary == null) return 'В этой сборке нет Cloudflare. Используйте свой сервер.';
+    final prefs = Prefs.instance;
     await files.stop();
     await _stopHosted();
     starting = true;
     serves = null;
+    tunnelName = '';
     notifyListeners();
     final sink = HlsSink();
     final server = HlsServer(sink);
-    CloudflareTunnel? tunnel;
+    final problems = <String>[];
     try {
       final port = await server.start();
-      tunnel = await CloudflareTunnel.start(binary: binary, localPort: port);
+      final providers = prefs.tunnelProvider == 'auto' ? ['cloudflare', 'serveo'] : [prefs.tunnelProvider];
+      PublicTunnel? tunnel;
+      for (final provider in providers) {
+        try {
+          tunnel = await _openTunnel(provider, port);
+          break;
+        } on CloudflareException catch (e) {
+          problems.add(e.message);
+        } on SshError catch (e) {
+          problems.add(e.message);
+        } catch (e) {
+          problems.add('$e');
+        }
+        debugPrint('Бесплатная ссылка: ${problems.last}');
+      }
+      if (tunnel == null) {
+        await server.stop();
+        return problems.length == 1 ? problems.single : 'Не удалось поднять ссылку.\n${problems.join('\n')}';
+      }
       final started = tunnel;
+      tunnelName = started.provider;
       _hosted = _Hosted(() async {
         await started.stop();
         await server.stop();
       }, tunnel: started);
       await files.startSink(sink, '${started.url}/stream/live.m3u8', list, from: from);
+      debugPrint('Бесплатная ссылка (${started.provider}): ${started.url}');
       // Туннель упал во время эфира — не делаем вид, что ссылка жива.
       unawaited(started.closed.then((_) {
-        if (_hosted?.tunnel == started && files.active) files.fail('Ссылка Cloudflare оборвалась. Запустите эфир снова.');
+        if (_hosted?.tunnel == started && files.active) files.fail('Ссылка ${started.provider} оборвалась. Запустите эфир снова.');
       }));
       unawaited(started.waitServes('/stream/live.m3u8', timeout: const Duration(seconds: 45)).then((ok) {
         if (_hosted?.tunnel != started) return;
@@ -127,11 +156,7 @@ class Broadcaster extends ChangeNotifier {
         notifyListeners();
       }));
       return null;
-    } on CloudflareException catch (e) {
-      await server.stop();
-      return e.message;
     } catch (e) {
-      await tunnel?.stop();
       await server.stop();
       _hosted = null;
       return '$e';
@@ -139,6 +164,22 @@ class Broadcaster extends ChangeNotifier {
       starting = false;
       notifyListeners();
     }
+  }
+
+  Future<PublicTunnel> _openTunnel(String provider, int localPort) async {
+    final custom = _tunnelStarter;
+    if (custom != null) return custom(provider, localPort);
+    if (provider == 'serveo') {
+      var key = Prefs.instance.tunnelKey;
+      if (key.isEmpty) {
+        key = generateTunnelKey();
+        Prefs.instance.setTunnelKey(key);
+      }
+      return SshTunnel.start(localPort: localPort, privateKey: key);
+    }
+    final binary = await _cloudflared();
+    if (binary == null) throw CloudflareException('В этой сборке нет Cloudflare.');
+    return CloudflareTunnel.start(binary: binary, localPort: localPort);
   }
 
   Future<void> _stopHosted() async {
@@ -161,5 +202,5 @@ class Broadcaster extends ChangeNotifier {
 class _Hosted {
   _Hosted(this.stop, {this.tunnel});
   final Future<void> Function() stop;
-  final CloudflareTunnel? tunnel;
+  final PublicTunnel? tunnel;
 }

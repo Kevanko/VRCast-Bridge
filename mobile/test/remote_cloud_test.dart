@@ -55,6 +55,7 @@ void main() {
     final binary = fake('echo \$\$ > $pidFile\necho "INF https://phone-demo.trycloudflare.com" >&2\necho "INF Registered tunnel connection connIndex=0" >&2\nexec sleep 60');
     Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: clip, title: 'Клип')]);
     Prefs.instance.setFileDelivery('tunnel');
+    Prefs.instance.setTunnelProvider('cloudflare'); // проверки с подставным cloudflared не должны уходить в настоящий Serveo
     final remote = remoteWith(() async => binary);
     addTearDown(remote.dispose);
 
@@ -76,6 +77,7 @@ void main() {
     final binary = fake('echo "INF https://short-lived.trycloudflare.com" >&2\necho "INF Registered tunnel connection" >&2\nsleep 2');
     Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: clip, title: 'Клип')]);
     Prefs.instance.setFileDelivery('tunnel');
+    Prefs.instance.setTunnelProvider('cloudflare'); // проверки с подставным cloudflared не должны уходить в настоящий Serveo
     final remote = remoteWith(() async => binary);
     addTearDown(remote.dispose);
     expect(await remote.startFileBroadcast(), isNull);
@@ -86,6 +88,7 @@ void main() {
   test('ошибки бесплатной ссылки возвращаются текстом, эфир не стартует', () async {
     Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: clip, title: 'Клип')]);
     Prefs.instance.setFileDelivery('tunnel');
+    Prefs.instance.setTunnelProvider('cloudflare'); // проверки с подставным cloudflared не должны уходить в настоящий Serveo
     final missing = remoteWith(() async => null);
     addTearDown(missing.dispose);
     expect(await missing.startFileBroadcast(), contains('нет Cloudflare'));
@@ -153,6 +156,7 @@ void main() {
   test('способ вещания запоминается и по умолчанию — свой сервер', () async {
     expect(Prefs.instance.fileDelivery, 'server');
     Prefs.instance.setFileDelivery('tunnel');
+    Prefs.instance.setTunnelProvider('cloudflare'); // проверки с подставным cloudflared не должны уходить в настоящий Serveo
     await Future<void>.delayed(const Duration(milliseconds: 50));
     await Prefs.instance.load();
     expect(Prefs.instance.fileDelivery, 'tunnel');

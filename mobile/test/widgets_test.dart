@@ -8,6 +8,7 @@ import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vrcast_remote/api.dart';
 import 'package:vrcast_remote/discovery.dart';
+import 'package:vrcast_remote/app_log.dart';
 import 'package:vrcast_remote/byte_source.dart';
 import 'package:vrcast_remote/file_broadcast.dart';
 import 'package:vrcast_remote/links.dart';
@@ -15,9 +16,11 @@ import 'package:vrcast_remote/media_server.dart';
 import 'package:vrcast_remote/main.dart';
 import 'package:vrcast_remote/models.dart';
 import 'package:vrcast_remote/own_server.dart';
+import 'package:vrcast_remote/ssh.dart';
 import 'package:vrcast_remote/phone_stream.dart';
 import 'package:vrcast_remote/remote.dart';
 import 'package:vrcast_remote/screens.dart';
+
 
 Map<String, dynamic> fixture() => (jsonDecode(File('test/fixtures/status.json').readAsStringSync()) as Map).cast<String, dynamic>();
 
@@ -480,6 +483,126 @@ void main() {
     expect(files.calls, isEmpty);
   });
 
+  testWidgets('развернуть сервер на VPS: пароль и адрес вводятся в окне, ошибки видно, сервер попадает в список', (tester) async {
+    tallScreen(tester);
+    final remote = Remote.local(phone: FakeStream());
+    await tester.pumpWidget(app(SettingsScreen(remote: remote)));
+    await tester.scrollUntilVisible(find.text('Развернуть сервер на VPS'), 300, scrollable: find.byType(Scrollable).first);
+    await tester.tap(find.text('Развернуть сервер на VPS'));
+    await tester.pumpAndSettle();
+    expect(find.text('Сервер на VPS'), findsOneWidget);
+    // Пустой адрес и кривой порт ловятся сразу, без обращения к сети.
+    await tester.tap(find.text('Развернуть и подключить'));
+    await tester.pump();
+    expect(find.text('Укажите адрес сервера'), findsOneWidget);
+    await tester.enterText(find.widgetWithText(TextField, 'Адрес SSH'), '203.0.113.7');
+    await tester.enterText(find.widgetWithText(TextField, 'Порт RTSP'), '99999');
+    await tester.tap(find.text('Развернуть и подключить'));
+    await tester.pump();
+    expect(find.textContaining('число от 1 до 65524'), findsOneWidget);
+    // Пароль скрыт, вход по ключу переключается.
+    final password = tester.widget<TextField>(find.widgetWithText(TextField, 'Пароль root'));
+    expect(password.obscureText, isTrue);
+    await tester.tap(find.byType(Switch).last);
+    await tester.pump();
+    expect(find.text('Закрытый ключ (PEM)'), findsOneWidget);
+    await tester.tap(find.text('Отмена'));
+    await tester.pumpAndSettle();
+    expect(Prefs.instance.ownServers, isEmpty);
+  });
+
+  testWidgets('развернуть сервер: окно передаёт установщику адрес, пользователя, пароль или ключ и порт, показывает ход и ошибки, закрывается готовым сервером', (tester) async {
+    tallScreen(tester);
+    final calls = <Map<String, Object?>>[];
+    var failNext = true;
+    Future<OwnServer> fake({required String host, required String script, String user = 'root', String? password, String? privateKey, int rtspPort = 8554, String name = '', String? knownHostKey}) async {
+      calls.add({'host': host, 'user': user, 'password': password, 'key': privateKey, 'port': rtspPort, 'name': name, 'script': script});
+      if (failNext) {
+        failNext = false;
+        throw SshError('Неверный пароль root.');
+      }
+      return OwnServer(name: name, host: '203.0.113.7', rtspPort: rtspPort, key: 'ключ-сервера', sshPort: 2222, hostKey: 'MD5:aa');
+    }
+
+    OwnServer? result;
+    await tester.pumpWidget(app(Builder(builder: (context) => TextButton(
+        onPressed: () async => result = await showDialog<OwnServer>(context: context, builder: (_) => DeployDialog(installer: () async => 'echo установка', deployer: fake)),
+        child: const Text('открыть')))));
+    await tester.tap(find.text('открыть'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextField, 'Название (необязательно)'), 'Мой VPS');
+    await tester.enterText(find.widgetWithText(TextField, 'Адрес SSH'), '203.0.113.7:2222');
+    await tester.enterText(find.widgetWithText(TextField, 'Пароль root'), 'неверный');
+    await tester.enterText(find.widgetWithText(TextField, 'Порт RTSP'), '9554');
+    await tester.tap(find.text('Развернуть и подключить'));
+    await tester.pumpAndSettle();
+    expect(find.text('Неверный пароль root.'), findsOneWidget, reason: 'ошибку установки видно в окне, окно не закрылось');
+    expect(result, isNull);
+    expect(calls.single, {'host': '203.0.113.7:2222', 'user': 'root', 'password': 'неверный', 'key': null, 'port': 9554, 'name': 'Мой VPS', 'script': 'echo установка'});
+    // Вторая попытка по ключу и под другим пользователем.
+    await tester.tap(find.byType(Switch).last);
+    await tester.pump();
+    await tester.enterText(find.widgetWithText(TextField, 'Пользователь SSH'), 'ubuntu');
+    await tester.enterText(find.widgetWithText(TextField, 'Закрытый ключ (PEM)'), '-----BEGIN KEY-----');
+    await tester.tap(find.text('Развернуть и подключить'));
+    await tester.pumpAndSettle();
+    expect(calls.last['key'], '-----BEGIN KEY-----');
+    expect(calls.last['password'], isNull, reason: 'по ключу пароль не отправляется');
+    expect(calls.last['user'], 'ubuntu');
+    expect(result, isNotNull);
+    expect(result!.key, 'ключ-сервера');
+    expect(result!.sshPort, 2222);
+  });
+
+  testWidgets('удаление сервера: можно только из списка или ещё и очистить сервер по паролю (пароль обязателен)', (tester) async {
+    tallScreen(tester);
+    final server = OwnServer(name: 'VPS', host: '203.0.113.7', key: 'k');
+    Prefs.instance.saveOwnServer(server);
+    await tester.pumpWidget(app(Builder(builder: (context) => TextButton(onPressed: () => removeServerFlow(context, server), child: const Text('удалить')))));
+    await tester.tap(find.text('удалить'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Убрать «VPS»?'), findsOneWidget);
+    await tester.tap(find.text('Убрать и очистить'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Убрать «VPS»?'), findsOneWidget, reason: 'без пароля очистка не запускается');
+    await tester.tap(find.text('Отмена'));
+    await tester.pumpAndSettle();
+    expect(Prefs.instance.ownServers, hasLength(1));
+    await tester.tap(find.text('удалить'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Только из списка'));
+    await tester.pumpAndSettle();
+    expect(Prefs.instance.ownServers, isEmpty);
+  });
+
+  testWidgets('ссылки: переключатель rtspt:// и rtsp:// меняет ссылки, у своего сервера есть запасная HLS-ссылка', (tester) async {
+    tallScreen(tester);
+    Prefs.instance.saveOwnServer(OwnServer(name: 'VPS', host: '203.0.113.7', rtspPort: 9554, key: 'k'));
+    final remote = Remote.local(phone: FakeStream());
+    await tester.pumpWidget(app(Scaffold(body: LinksPage(remote: remote))));
+    expect(find.text('rtspt://203.0.113.7:9554/phone'), findsOneWidget);
+    expect(find.text('http://203.0.113.7:9564/phone/index.m3u8'), findsOneWidget);
+    await tester.tap(find.text('rtsp:// (UDP)'));
+    await tester.pump();
+    expect(find.text('rtsp://203.0.113.7:9554/phone'), findsOneWidget);
+    expect(find.text('rtspt://203.0.113.7:9554/phone'), findsNothing);
+    expect(find.text('http://203.0.113.7:9564/phone/index.m3u8'), findsOneWidget, reason: 'HLS от транспорта не зависит');
+  });
+
+  testWidgets('журнал открывается из настроек и показывает записи', (tester) async {
+    tallScreen(tester);
+    AppLog.instance.clear();
+    AppLog.instance.add('Эфир своей очереди: способ «lan»');
+    final remote = Remote.local(phone: FakeStream());
+    await tester.pumpWidget(app(SettingsScreen(remote: remote)));
+    await tester.tap(find.text('Журнал'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Эфир своей очереди: способ «lan»'), findsOneWidget);
+    await tester.tap(find.byTooltip('Очистить'));
+    await tester.pump();
+    expect(find.text('Журнал пуст'), findsOneWidget);
+  });
+
   testWidgets('ссылки без ПК: показывается ссылка своего сервера', (tester) async {
     Prefs.instance.saveOwnServer(OwnServer(name: 'VPS', host: '203.0.113.7', rtspPort: 9554, key: 'k'));
     final remote = Remote.local(phone: FakeStream());
@@ -501,6 +624,8 @@ void main() {
     expect(find.text('203.0.113.7:8554'), findsOneWidget);
     expect(find.text('Эфир на ПК'), findsNothing, reason: 'настройки эфира ПК без ПК не показываются');
     await tester.tap(find.byTooltip('Удалить').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Только из списка'));
     await tester.pumpAndSettle();
     expect(Prefs.instance.ownServers, isEmpty);
   });

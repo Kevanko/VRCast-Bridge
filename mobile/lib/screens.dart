@@ -8,11 +8,13 @@ import 'package:share_plus/share_plus.dart';
 import 'package:video_player/video_player.dart';
 
 import 'api.dart';
+import 'app_log.dart';
 import 'discovery.dart';
 import 'links.dart';
 import 'local_probe.dart';
 import 'media_server.dart';
 import 'own_server.dart';
+import 'ssh.dart';
 import 'models.dart';
 import 'remote.dart';
 
@@ -340,9 +342,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       final saved = await showDialog<OwnServer>(context: context, builder: (_) => _ServerDialog(server: server));
                       if (saved != null) { if (saved.id != server.id) prefs.removeOwnServer(server); prefs.saveOwnServer(saved); }
                     }),
-                    IconButton(tooltip: 'Удалить', icon: const Icon(Icons.delete_outline), onPressed: () => prefs.removeOwnServer(server)),
+                    IconButton(tooltip: 'Удалить', icon: const Icon(Icons.delete_outline), onPressed: () => removeServerFlow(context, server)),
                   ]),
                 ),
+              ListTile(
+                leading: const Icon(Icons.rocket_launch_outlined),
+                title: const Text('Развернуть сервер на VPS'),
+                subtitle: const Text('Приложение само поставит медиасервер по SSH: нужен адрес и пароль root'),
+                onTap: () async {
+                  final saved = await showDialog<OwnServer>(context: context, builder: (_) => const DeployDialog());
+                  if (saved != null) prefs.saveOwnServer(saved);
+                },
+              ),
               ListTile(
                 leading: const Icon(Icons.add),
                 title: const Text('Добавить сервер'),
@@ -350,6 +361,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   final saved = await showDialog<OwnServer>(context: context, builder: (_) => const _ServerDialog());
                   if (saved != null) prefs.saveOwnServer(saved);
                 },
+              ),
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.receipt_long_outlined),
+                title: const Text('Журнал'),
+                subtitle: const Text('Что запускалось и какие были ошибки: для разбора проблем'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const LogScreen())),
               ),
               const Divider(),
               const Padding(padding: EdgeInsets.fromLTRB(16, 8, 16, 0), child: Text('Запомненные компьютеры', style: TextStyle(fontWeight: FontWeight.bold))),
@@ -563,10 +582,10 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     final cloud = delivery == 'tunnel';
     final liveStatus = !live ? 'Эфир остановлен'
         : delivery == 'lan' ? 'Идёт эфир по сети: ссылка ниже'
-        : cloud ? (remote.cloudServes == true ? 'Идёт эфир по ссылке Cloudflare' : remote.cloudServes == false ? 'Ссылка пока не открывается снаружи' : 'Проверяю ссылку…')
+        : cloud ? (remote.cloudServes == true ? 'Идёт эфир по ссылке ${remote.broadcaster.tunnelName}' : remote.cloudServes == false ? 'Ссылка пока не открывается снаружи' : 'Проверяю ссылку…')
         : 'Идёт эфир на сервер «${server?.name ?? ''}»';
     final status = remote.phone.live ? 'Идёт экран телефона ${remote.streamTarget}'
-        : remote.cloudStarting ? (delivery == 'lan' ? 'Запускаю сервер в сети…' : 'Поднимаю ссылку Cloudflare…')
+        : remote.cloudStarting ? (delivery == 'lan' ? 'Запускаю сервер в сети…' : 'Поднимаю бесплатную ссылку…')
         : files.connecting ? 'Подключаюсь к серверу…' : files.paused ? 'Пауза' : liveStatus;
     return [
       AspectRatio(aspectRatio: 16 / 9, child: ClipRRect(borderRadius: BorderRadius.circular(16), child: Stack(fit: StackFit.expand, children: [
@@ -621,10 +640,15 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
           selected: {Prefs.instance.fileDelivery},
           onSelectionChanged: (value) => Prefs.instance.setFileDelivery(value.first),
         )),
+      if (!live && !remote.cloudStarting && delivery == 'tunnel')
+        Padding(padding: const EdgeInsets.only(bottom: 8), child: Wrap(spacing: 8, alignment: WrapAlignment.center, children: [
+          for (final entry in const {'auto': 'Авто', 'cloudflare': 'Cloudflare', 'serveo': 'Serveo'}.entries)
+            ChoiceChip(label: Text(entry.value), selected: Prefs.instance.tunnelProvider == entry.key, onSelected: (_) => Prefs.instance.setTunnelProvider(entry.key)),
+        ])),
       if (live && delivery == 'lan' && files.viewLink.isNotEmpty)
-        _LinkCard(title: 'Ссылка для VRChat', hint: 'Мгновенная ссылка по сети Wi-Fi: компьютер и телефон должны быть в одной сети. Задержка около полусекунды', url: files.viewLink),
+        _LinkCard(title: 'Ссылка для VRChat', hint: 'Мгновенная ссылка по сети Wi-Fi: компьютер и телефон должны быть в одной сети. Задержка около полусекунды', url: Prefs.instance.withTransport(files.viewLink)),
       if (live && cloud && files.viewLink.isNotEmpty)
-        _LinkCard(title: 'Ссылка для VRChat', hint: 'Бесплатная ссылка Cloudflare. Работает, пока идёт эфир и приложение открыто', url: files.viewLink),
+        _LinkCard(title: 'Ссылка для VRChat', hint: 'Бесплатная ссылка (${remote.broadcaster.tunnelName}). Работает, пока идёт эфир и приложение открыто', url: files.viewLink),
       Wrap(spacing: 8, runSpacing: 8, alignment: WrapAlignment.center, children: [
         PopupMenuButton<String>(
           onSelected: files.setLoop,
@@ -992,7 +1016,18 @@ class LinksPage extends StatelessWidget {
   final Remote remote;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ListenableBuilder(listenable: Prefs.instance, builder: (context, _) => Column(children: [
+        // Как на ПК: rtspt:// держит поток по TCP, rtsp:// даёт плееру выбрать UDP. Какой лучше, зависит от мира.
+        Padding(padding: const EdgeInsets.fromLTRB(12, 8, 12, 0), child: SegmentedButton<bool>(
+          showSelectedIcon: false,
+          segments: const [ButtonSegment(value: true, label: Text('rtspt:// (TCP)')), ButtonSegment(value: false, label: Text('rtsp:// (UDP)'))],
+          selected: {Prefs.instance.transportTcp},
+          onSelectionChanged: (value) => Prefs.instance.setTransport(value.first),
+        )),
+        Expanded(child: _links(context)),
+      ]));
+
+  Widget _links(BuildContext context) {
     final s = remote.state!;
     final host = remote.api.base.host;
     final server = Prefs.instance.currentOwnServer;
@@ -1003,17 +1038,18 @@ class LinksPage extends StatelessWidget {
       return ListView(padding: const EdgeInsets.all(12), children: [
         if (cloudLink.isNotEmpty)
           _LinkCard(
-              title: Prefs.instance.fileDelivery == 'lan' ? 'Мгновенная ссылка по сети' : 'Бесплатная ссылка Cloudflare',
+              title: Prefs.instance.fileDelivery == 'lan' ? 'Мгновенная ссылка по сети' : 'Бесплатная ссылка (${remote.broadcaster.tunnelName})',
               hint: Prefs.instance.fileDelivery == 'lan' ? 'Для компьютера в одной сети с телефоном. Живёт, пока идёт эфир' : 'Файлы с телефона. Живёт, пока идёт эфир и приложение открыто',
-              url: cloudLink),
-        if (server != null) _LinkCard(title: 'Ссылка для плеера (свой сервер)', hint: 'Экран и файлы телефона на «${server.name}». Не меняется, пока сервер на месте', url: server.viewLink),
+              url: Prefs.instance.fileDelivery == 'lan' ? Prefs.instance.withTransport(cloudLink) : cloudLink),
+        if (server != null) _LinkCard(title: 'Ссылка для плеера (свой сервер)', hint: 'Экран и файлы телефона на «${server.name}». Не меняется, пока сервер на месте', url: Prefs.instance.withTransport(server.viewLink)),
+        if (server != null) _LinkCard(title: 'Запасная ссылка (HLS)', hint: 'Для Quest и сетей, где RTSP не проходит. Задержка около трёх секунд', url: server.hlsLink),
       ]);
     }
     // Сервер называет себя 127.0.0.1 — для телефона подставляем адрес ПК.
     final stream = s.playbackUrl.replaceFirst('127.0.0.1', host);
     final rows = <(String, String, String)>[
       if (stream.isNotEmpty) ('Ссылка для плеера', stream, 'Основная ссылка эфира: работает на ПК и в вашей сети'),
-      for (final url in s.rtspLanUrls) ('Быстрая ссылка (rtspt)', url, 'Для AVPro: нужна, если плеер в одной сети с ПК'),
+      for (final url in s.rtspLanUrls) ('Быстрая ссылка (rtspt)', Prefs.instance.withTransport(url), 'Для AVPro: нужна, если плеер в одной сети с ПК'),
       if (s.tunnelUrl.isNotEmpty) ('Публичная ссылка', s.tunnelUrl, 'Для друзей через интернет'),
     ];
     if (rows.isEmpty) return const Center(child: Text('Ссылок пока нет', style: TextStyle(color: Colors.white54)));
@@ -1284,7 +1320,7 @@ class _DirectSummary extends StatelessWidget {
                 const SizedBox(width: 12),
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   if (prefs.fileDelivery != 'server') ...[
-                    Text(prefs.fileDelivery == 'lan' ? 'Файлы: локально, по сети Wi-Fi' : 'Файлы: бесплатная ссылка Cloudflare', style: const TextStyle(fontWeight: FontWeight.w600)),
+                    Text(prefs.fileDelivery == 'lan' ? 'Файлы: локально, по сети Wi-Fi' : 'Файлы: бесплатная ссылка для друзей', style: const TextStyle(fontWeight: FontWeight.w600)),
                     const SizedBox(height: 2),
                     const Text('Ссылка появится, когда начнётся эфир. Экран телефона по-прежнему идёт на свой сервер.', style: TextStyle(color: Colors.white70, fontSize: 13)),
                   ] else ...[
@@ -1298,6 +1334,37 @@ class _DirectSummary extends StatelessWidget {
                 ])),
               ]),
             ),
+          );
+        },
+      );
+}
+
+/// Журнал приложения: скопировать, отправить, очистить.
+class LogScreen extends StatelessWidget {
+  const LogScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: AppLog.instance,
+        builder: (context, _) {
+          final lines = AppLog.instance.lines;
+          return Scaffold(
+            appBar: AppBar(title: const Text('Журнал'), actions: [
+              IconButton(tooltip: 'Копировать', icon: const Icon(Icons.copy), onPressed: () {
+                Clipboard.setData(ClipboardData(text: AppLog.instance.text));
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Скопировано')));
+              }),
+              IconButton(tooltip: 'Отправить', icon: const Icon(Icons.share), onPressed: lines.isEmpty ? null : () => SharePlus.instance.share(ShareParams(text: AppLog.instance.text))),
+              IconButton(tooltip: 'Очистить', icon: const Icon(Icons.delete_outline), onPressed: AppLog.instance.clear),
+            ]),
+            body: lines.isEmpty
+                ? const Center(child: Text('Журнал пуст', style: TextStyle(color: Colors.white54)))
+                : ListView.builder(
+                    reverse: true,
+                    padding: const EdgeInsets.all(12),
+                    itemCount: lines.length,
+                    itemBuilder: (context, i) => Text(lines[lines.length - 1 - i], style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+                  ),
           );
         },
       );
@@ -1322,6 +1389,132 @@ class _LinkCard extends StatelessWidget {
           TextButton.icon(onPressed: () => SharePlus.instance.share(ShareParams(text: url)), icon: const Icon(Icons.share, size: 18), label: const Text('Поделиться')),
         ]),
       ])));
+}
+
+/// Поставить сервер на VPS по SSH тем же скриптом, что и на ПК. Пароль нужен только на время установки и нигде не сохраняется.
+class DeployDialog extends StatefulWidget {
+  const DeployDialog({super.key, this.installer, this.deployer = deployServer});
+  /// Скрипт установки (в проверках подменяется); по умолчанию — тот, что в приложении.
+  final Future<String> Function()? installer;
+  /// Сама установка по SSH (в проверках подменяется).
+  final Future<OwnServer> Function({required String host, required String script, String user, String? password, String? privateKey, int rtspPort, String name, String? knownHostKey}) deployer;
+  @override
+  State<DeployDialog> createState() => _DeployDialogState();
+}
+
+class _DeployDialogState extends State<DeployDialog> {
+  final _name = TextEditingController();
+  final _host = TextEditingController();
+  final _password = TextEditingController();
+  final _keyText = TextEditingController();
+  final _port = TextEditingController(text: '8554');
+  final _user = TextEditingController(text: 'root');
+  bool _byKey = false;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    for (final c in [_name, _host, _password, _keyText, _port, _user]) { c.dispose(); }
+    super.dispose();
+  }
+
+  Future<void> _deploy() async {
+    final rtsp = int.tryParse(_port.text.trim());
+    if (_host.text.trim().isEmpty) return setState(() => _error = 'Укажите адрес сервера');
+    if (rtsp == null || rtsp < 1 || rtsp > 65524) return setState(() => _error = 'Порт RTSP — число от 1 до 65524');
+    setState(() { _busy = true; _error = null; });
+    try {
+      final script = await (widget.installer ?? () => rootBundle.loadString('assets/install.sh'))();
+      final server = await widget.deployer(
+        host: _host.text,
+        script: script,
+        user: _user.text.trim().isEmpty ? 'root' : _user.text.trim(),
+        password: _byKey ? null : _password.text,
+        privateKey: _byKey ? _keyText.text : null,
+        rtspPort: rtsp,
+        name: _name.text,
+      );
+      if (mounted) Navigator.pop(context, server);
+    } on SshError catch (e) {
+      if (mounted) setState(() { _busy = false; _error = e.message; });
+    } catch (e) {
+      if (mounted) setState(() { _busy = false; _error = '$e'; });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('Сервер на VPS'),
+        content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('Нужен любой VPS с белым IP и Linux. Приложение поставит медиасервер, откроет порты и покажет ссылку.', style: TextStyle(color: Colors.white70, fontSize: 13)),
+          TextField(controller: _name, enabled: !_busy, decoration: const InputDecoration(labelText: 'Название (необязательно)')),
+          TextField(controller: _host, enabled: !_busy, keyboardType: TextInputType.url, decoration: const InputDecoration(labelText: 'Адрес SSH', hintText: '203.0.113.7 или 203.0.113.7:2222')),
+          TextField(controller: _user, enabled: !_busy, decoration: const InputDecoration(labelText: 'Пользователь SSH')),
+          if (_byKey)
+            TextField(controller: _keyText, enabled: !_busy, minLines: 3, maxLines: 5, decoration: const InputDecoration(labelText: 'Закрытый ключ (PEM)'))
+          else
+            TextField(controller: _password, enabled: !_busy, obscureText: true, decoration: const InputDecoration(labelText: 'Пароль root')),
+          TextField(controller: _port, enabled: !_busy, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Порт RTSP')),
+          SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('Войти по ключу'), value: _byKey, onChanged: _busy ? null : (v) => setState(() => _byKey = v)),
+          if (_busy) const Padding(padding: EdgeInsets.only(top: 8), child: Column(children: [LinearProgressIndicator(), SizedBox(height: 6), Text('Устанавливаю… до двух минут', style: TextStyle(fontSize: 12, color: Colors.white70))])),
+          if (_error != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_error!, style: const TextStyle(color: Colors.redAccent))),
+        ])),
+        actions: [
+          TextButton(onPressed: _busy ? null : () => Navigator.pop(context), child: const Text('Отмена')),
+          FilledButton(onPressed: _busy ? null : _deploy, child: const Text('Развернуть и подключить')),
+        ],
+      );
+}
+
+/// Убрать сервер из списка. Если сервер ставило приложение, можно ещё и очистить его от установленного (нужен пароль).
+Future<void> removeServerFlow(BuildContext context, OwnServer server) async {
+  final answer = await showDialog<({bool clean, String password, bool byKey})>(context: context, builder: (_) => _RemoveServerDialog(server: server));
+  if (answer == null) return;
+  if (!answer.clean) return Prefs.instance.removeOwnServer(server);
+  String? failure;
+  try {
+    await removeFromServer(server, password: answer.byKey ? null : answer.password, privateKey: answer.byKey ? answer.password : null);
+  } on SshError catch (e) {
+    failure = e.message;
+  } catch (e) {
+    failure = '$e';
+  }
+  Prefs.instance.removeOwnServer(server);
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(failure == null ? 'Сервер очищен и удалён из списка' : 'Удалён из списка, но на сервере осталось: $failure')));
+  }
+}
+
+class _RemoveServerDialog extends StatefulWidget {
+  const _RemoveServerDialog({required this.server});
+  final OwnServer server;
+  @override
+  State<_RemoveServerDialog> createState() => _RemoveServerDialogState();
+}
+
+class _RemoveServerDialogState extends State<_RemoveServerDialog> {
+  final _password = TextEditingController();
+
+  @override
+  void dispose() {
+    _password.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: Text('Убрать «${widget.server.name}»?'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('Из списка сервер исчезнет сразу. Чтобы ещё и удалить с него установленное (службу и правила файрвола), введите пароль root: он нигде не сохраняется.', style: TextStyle(fontSize: 13)),
+          TextField(controller: _password, obscureText: true, decoration: const InputDecoration(labelText: 'Пароль root (необязательно)')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Отмена')),
+          TextButton(onPressed: () => Navigator.pop(context, (clean: false, password: '', byKey: false)), child: const Text('Только из списка')),
+          FilledButton(onPressed: () => _password.text.isEmpty ? null : Navigator.pop(context, (clean: true, password: _password.text, byKey: false)), child: const Text('Убрать и очистить')),
+        ],
+      );
 }
 
 class _ServerDialog extends StatefulWidget {
@@ -1349,7 +1542,8 @@ class _ServerDialogState extends State<_ServerDialog> {
     if (error != null) return setState(() => _error = error);
     Navigator.pop(context, OwnServer(
       name: _name.text.trim().isEmpty ? _host.text.trim() : _name.text.trim(),
-      host: _host.text.trim(), rtspPort: int.parse(_port.text.trim()), key: _key.text.trim()));
+      host: _host.text.trim(), rtspPort: int.parse(_port.text.trim()), key: _key.text.trim(),
+      sshPort: widget.server?.sshPort ?? 22, user: widget.server?.user ?? 'root', hostKey: widget.server?.hostKey ?? ''));
   }
 
   @override

@@ -85,7 +85,20 @@ class FileBroadcast extends ChangeNotifier {
   double _timeline = 0; // время потока: метки RTP не должны идти назад при смене файла и перемотке
   Timer? _ticker;
 
-  void _changed() => notifyListeners();
+  bool _disposed = false;
+
+  void _changed() {
+    // После dispose цикл эфира ещё может доработать последний шаг: слушателей уже нет, и сообщать некому.
+    if (!_disposed) notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _run++; // цикл эфира увидит смену поколения и остановится
+    _ticker?.cancel();
+    super.dispose();
+  }
 
   /// Эфир на свой сервер по RTSP.
   Future<void> start(OwnServer target, List<SharedFile> files, {int from = 0}) {

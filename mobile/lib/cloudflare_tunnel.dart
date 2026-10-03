@@ -5,23 +5,27 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'public_tunnel.dart';
+
 /// Бесплатная ссылка Cloudflare прямо с телефона: запускает `cloudflared` (быстрый туннель без аккаунта) и отдаёт адрес
 /// вида https://что-то.trycloudflare.com, который ведёт на HTTP-сервер телефона.
 ///
 /// В Android у программ нет /etc/resolv.conf, и cloudflared (Go) не может найти адрес api.trycloudflare.com. Поэтому запрос
 /// ссылки идёт не напрямую, а через маленький переходник на телефоне (флаг --quick-service): он пересылает его в настоящий
 /// API средствами системы. Адреса узлов Cloudflare подставляются сразу (флаг --edge), поиск по DNS им не нужен.
-class CloudflareTunnel {
+class CloudflareTunnel extends PublicTunnel {
   CloudflareTunnel._(this._process, this._gateway, this.url, this._lines);
 
   final Process _process;
   final QuickServiceGateway _gateway;
+  @override
   final String url;
+  @override
+  String get provider => 'Cloudflare';
   final List<String> _lines;
-  bool _stopped = false;
   final _closed = Completer<void>();
 
-  /// Завершается, когда cloudflared остановился (сам или после stop).
+  @override
   Future<void> get closed => _closed.future;
 
   static final _address = RegExp(r'https://[a-z0-9-]+\.trycloudflare\.com', caseSensitive: false);
@@ -116,28 +120,10 @@ class CloudflareTunnel {
     return out;
   }
 
-  /// Дождаться, пока адрес реально отдаёт ответ 200 по [path] (туннель появляется в сети не сразу).
-  Future<bool> waitServes(String path, {Duration timeout = const Duration(seconds: 30)}) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
-    final until = DateTime.now().add(timeout);
-    try {
-      while (!_stopped && DateTime.now().isBefore(until)) {
-        try {
-          final response = await (await client.getUrl(Uri.parse('$url$path'))).close().timeout(const Duration(seconds: 8));
-          await response.drain<void>();
-          if (response.statusCode == 200) return true;
-        } catch (_) {}
-        await Future<void>.delayed(const Duration(seconds: 1));
-      }
-    } finally {
-      client.close(force: true);
-    }
-    return false;
-  }
-
+  @override
   Future<void> stop() async {
-    if (_stopped) return;
-    _stopped = true;
+    if (stopped) return;
+    markStopped();
     _process.kill();
     await _gateway.stop();
     if (!_closed.isCompleted) _closed.complete();

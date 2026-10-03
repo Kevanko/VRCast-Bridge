@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
 
 import 'api.dart';
+import 'app_log.dart';
 import 'broadcaster.dart';
 import 'remote.dart';
 import 'screens.dart';
 
-void main() => runApp(const VrcastRemoteApp());
+void main() {
+  AppLog.capture();
+  runApp(const VrcastRemoteApp());
+}
 
 /// Без растяжения и «резинки» при перетягивании за край (Android 12+ тянет содержимое без предела).
 class NoStretchScrollBehavior extends MaterialScrollBehavior {
