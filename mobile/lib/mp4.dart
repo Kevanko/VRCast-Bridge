@@ -1,5 +1,6 @@
-import 'dart:io';
 import 'dart:typed_data';
+
+import 'byte_source.dart';
 
 /// Разбор mp4/mov: таблицы кадров и параметры H.264 и AAC. Видео не перекодируется: кадры уходят на сервер как есть,
 /// поэтому подходят файлы с H.264 и AAC (так снимают и сохраняют почти все телефоны).
@@ -62,41 +63,44 @@ class _Box {
   int get dataStart => start + headerLength;
 }
 
-/// Прочитать таблицы файла. Большие данные (сами кадры) не загружаются — только moov.
+/// Прочитать таблицы файла на телефоне. Большие данные (сами кадры) не загружаются — только moov.
 Future<Mp4Info> readMp4(String path) async {
-  final file = await File(path).open();
+  final source = FileSource(path);
   try {
-    final length = await file.length();
-    Uint8List? moov;
-    var position = 0;
-    while (position + 8 <= length) {
-      await file.setPosition(position);
-      final header = await file.read(16);
-      if (header.length < 8) break;
-      final data = ByteData.sublistView(header);
-      var size = data.getUint32(0);
-      final type = String.fromCharCodes(header.sublist(4, 8));
-      var headerLength = 8;
-      if (size == 1) {
-        if (header.length < 16) break;
-        size = data.getUint64(8);
-        headerLength = 16;
-      } else if (size == 0) {
-        size = length - position;
-      }
-      if (size < headerLength) break;
-      if (type == 'moov') {
-        await file.setPosition(position + headerLength);
-        moov = await file.read(size - headerLength);
-        break;
-      }
-      position += size;
-    }
-    if (moov == null) throw Mp4Unsupported('Это не mp4 или файл не дописан: нет таблиц кадров');
-    return parseMoov(moov);
+    return await readMp4From(source);
   } finally {
-    await file.close();
+    await source.close();
   }
+}
+
+/// То же для любого источника (файл или адрес в сети).
+Future<Mp4Info> readMp4From(ByteSource source) async {
+  final length = await source.length();
+  Uint8List? moov;
+  var position = 0;
+  while (position + 8 <= length) {
+    final header = await source.read(position, 16);
+    if (header.length < 8) break;
+    final data = ByteData.sublistView(header);
+    var size = data.getUint32(0);
+    final type = String.fromCharCodes(header.sublist(4, 8));
+    var headerLength = 8;
+    if (size == 1) {
+      if (header.length < 16) break;
+      size = data.getUint64(8);
+      headerLength = 16;
+    } else if (size == 0) {
+      size = length - position;
+    }
+    if (size < headerLength) break;
+    if (type == 'moov') {
+      moov = await source.read(position + headerLength, size - headerLength);
+      break;
+    }
+    position += size;
+  }
+  if (moov == null) throw Mp4Unsupported('Это не mp4 или файл не дописан: нет таблиц кадров');
+  return parseMoov(moov);
 }
 
 /// Разбор содержимого moov (без заголовка коробки).

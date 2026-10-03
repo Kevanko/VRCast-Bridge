@@ -8,6 +8,7 @@ import 'package:video_player/video_player.dart';
 
 import 'api.dart';
 import 'discovery.dart';
+import 'links.dart';
 import 'media_server.dart';
 import 'own_server.dart';
 import 'models.dart';
@@ -430,7 +431,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Row(children: [
                     Expanded(child: Text(remote.isLocal
                         ? 'ПК не подключён. Можно вещать свои файлы и экран на свой сервер; очередь ПК показана для справки.'
-                        : 'Нет связи с ПК. Подключаюсь снова…')),
+                        : remote.everConnected ? 'Нет связи с ПК. Подключаюсь снова…' : 'ПК не найден — приложение работает без него. Подключусь, когда он появится.')),
                     TextButton(onPressed: _openConnect, child: Text(remote.isLocal ? 'Подключиться' : 'Другой ПК')),
                   ])),
             Expanded(child: remote.state == null ? const Center(child: CircularProgressIndicator()) : pages[_tab]),
@@ -564,10 +565,12 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
         : remote.cloudStarting ? 'Поднимаю ссылку Cloudflare…'
         : files.connecting ? 'Подключаюсь к серверу…' : files.paused ? 'Пауза' : liveStatus;
     return [
-      AspectRatio(aspectRatio: 16 / 9, child: Container(
-        decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(16)),
-        child: Center(child: Icon(live ? Icons.cast_connected : Icons.cast, size: 56, color: Colors.white24)),
-      )),
+      AspectRatio(aspectRatio: 16 / 9, child: ClipRRect(borderRadius: BorderRadius.circular(16), child: Stack(fit: StackFit.expand, children: [
+        const ColoredBox(color: Colors.black),
+        // У ролика из YouTube есть обложка: её видно и в плеере.
+        if (files.current?.thumbnail.isNotEmpty == true) Image.network(files.current!.thumbnail, fit: BoxFit.cover, errorBuilder: (_, _, _) => const SizedBox.shrink()),
+        Center(child: Icon(live ? Icons.cast_connected : Icons.cast, size: 56, color: files.current?.thumbnail.isNotEmpty == true ? Colors.white54 : Colors.white24)),
+      ]))),
       const SizedBox(height: 16),
       Text(title, style: Theme.of(context).textTheme.titleLarge, maxLines: 2, overflow: TextOverflow.ellipsis),
       const SizedBox(height: 4),
@@ -738,10 +741,33 @@ class _QueuePageState extends State<QueuePage> {
     final url = _link.text.trim();
     if (url.isEmpty || _adding) return;
     if (!widget.remote.online) {
-      // Без связи ссылка ждёт у телефона и уйдёт в очередь ПК при подключении.
-      Prefs.instance.addPendingLink(url);
-      _link.clear();
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ссылка сохранена: уйдёт на ПК при подключении')));
+      // Без ПК телефон сам разбирает YouTube (видео и плейлисты) и прямые ссылки на mp4: название, длительность и обложка сразу.
+      // Остальное ждёт у телефона и уйдёт в очередь ПК при подключении.
+      setState(() => _adding = true);
+      try {
+        final found = await widget.remote.resolver.inspect(url);
+        if (found.length > 10 && mounted) {
+          final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
+            title: const Text('Большой плейлист'), content: Text('В плейлисте роликов: ${found.length}. Добавить все?'),
+            actions: [TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Отмена')), FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Добавить'))]));
+          if (ok != true) return;
+        }
+        Prefs.instance.addSharedFiles([for (final item in found) item.toItem()]);
+        _link.clear();
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(found.length == 1 ? 'Добавлено: ${found.first.title}' : 'Добавлено роликов: ${found.length}')));
+      } on UnsupportedLink catch (e) {
+        if (e.sendToPc) {
+          Prefs.instance.addPendingLink(url);
+          _link.clear();
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+        } else if (mounted) {
+          toastError(context, e.message);
+        }
+      } catch (e) {
+        if (mounted) toastError(context, '$e');
+      } finally {
+        if (mounted) setState(() => _adding = false);
+      }
       return;
     }
     setState(() => _adding = true);
@@ -760,6 +786,54 @@ class _QueuePageState extends State<QueuePage> {
       if (mounted) setState(() => _adding = false);
     }
   }
+
+  /// Своя очередь без ПК: файлы и ссылки (YouTube, плейлисты, mp4) с обложками, перетаскиванием и удалением.
+  /// Последняя копия очереди ПК лежит отдельно: играть её без ПК нечем.
+  Widget _localQueue(Remote remote, List<QueueItem> pcCopy) => ListenableBuilder(
+        listenable: Prefs.instance,
+        builder: (context, _) {
+          final items = Prefs.instance.sharedFiles;
+          return Column(children: [
+            Expanded(child: items.isEmpty
+                ? const Center(child: Padding(padding: EdgeInsets.all(24), child: Text('Своя очередь пуста.\nДобавьте ссылку на YouTube или файлы с телефона', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54))))
+                : ReorderableListView.builder(
+                    itemCount: items.length,
+                    onReorderItem: Prefs.instance.moveSharedFile,
+                    itemBuilder: (context, i) {
+                      final item = items[i];
+                      final playing = remote.files.current?.id == item.id;
+                      return Dismissible(
+                        key: ValueKey('l${item.id}'),
+                        direction: DismissDirection.endToStart,
+                        background: Container(color: Colors.red.shade900, alignment: Alignment.centerRight, padding: const EdgeInsets.only(right: 20), child: const Icon(Icons.delete)),
+                        onDismissed: (_) => Prefs.instance.removeSharedFile(item.id),
+                        child: ListTile(
+                          key: ValueKey('lt${item.id}'),
+                          leading: SizedBox(width: 72, height: 40, child: ClipRRect(borderRadius: BorderRadius.circular(6), child: item.thumbnail.isEmpty
+                              ? const ColoredBox(color: Colors.black26, child: Icon(Icons.phone_android, size: 20, color: Colors.white38))
+                              : Image.network(item.thumbnail, fit: BoxFit.cover, errorBuilder: (_, _, _) => const ColoredBox(color: Colors.black26)))),
+                          title: Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: playing ? FontWeight.bold : null)),
+                          subtitle: Text([
+                            if (item.duration > 0) formatTime(item.duration),
+                            item.kind == 'youtube' ? 'YouTube' : item.kind == 'direct' ? 'ссылка на mp4' : 'файл на телефоне',
+                            if (playing) 'в эфире',
+                          ].join(' · ')),
+                          trailing: playing ? const Icon(Icons.equalizer, color: accent) : null,
+                          onTap: () async { final e = await remote.startFileBroadcast(fromId: item.id); if (context.mounted) toastError(context, e); },
+                        ),
+                      );
+                    })),
+            if (pcCopy.isNotEmpty)
+              ExpansionTile(
+                title: Text('Очередь ПК (последняя копия): ${pcCopy.length}', style: const TextStyle(color: Colors.white70, fontSize: 14)),
+                children: [
+                  for (final q in pcCopy.take(30))
+                    ListTile(dense: true, title: Text(q.title, maxLines: 1, overflow: TextOverflow.ellipsis), subtitle: Text(q.duration > 0 ? formatTime(q.duration) : '')),
+                ],
+              ),
+          ]);
+        },
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -788,19 +862,19 @@ class _QueuePageState extends State<QueuePage> {
               trailing: IconButton(tooltip: 'Убрать', icon: const Icon(Icons.close), onPressed: () => Prefs.instance.removePendingLink(pending)),
             ),
           // Свои файлы, которых ещё нет в общей очереди (нет связи с ПК или ещё не дошли).
-          for (final file in Prefs.instance.sharedFiles.where((f) => !remote.online || !s.queue.any((q) => q.member == remote.myId && q.ownerItemId == f.id)))
-            ListTile(
-              dense: true,
-              leading: Icon(remote.files.current?.id == file.id ? Icons.equalizer : Icons.phone_android, color: remote.files.current?.id == file.id ? accent : null),
-              title: Text(file.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: remote.files.current?.id == file.id ? FontWeight.bold : null)),
-              subtitle: Text(remote.online
-                  ? 'Добавляется в общую очередь…'
-                  : remote.files.current?.id == file.id ? 'Идёт эфир на ваш сервер' : 'Нажмите, чтобы вещать на свой сервер. В общую очередь встанет при подключении к ПК'),
-              onTap: remote.online ? null : () async { final e = await remote.startFileBroadcast(fromId: file.id); if (context.mounted) toastError(context, e); },
-              trailing: IconButton(tooltip: 'Убрать', icon: const Icon(Icons.close), onPressed: () => Prefs.instance.removeSharedFile(file.id)),
-            ),
+          // Свои файлы, которых ещё нет в общей очереди (ещё не дошли). Без ПК они показаны в своей очереди ниже.
+          if (remote.online)
+            for (final file in Prefs.instance.sharedFiles.where((f) => !f.isLink && !s.queue.any((q) => q.member == remote.myId && q.ownerItemId == f.id)))
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.phone_android),
+                title: Text(file.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: const Text('Добавляется в общую очередь…'),
+                trailing: IconButton(tooltip: 'Убрать', icon: const Icon(Icons.close), onPressed: () => Prefs.instance.removeSharedFile(file.id)),
+              ),
         ]),
       ),
+      if (!remote.online) Expanded(child: _localQueue(remote, queue)) else
       Expanded(child: queue.isEmpty
           ? const Center(child: Text('Очередь пуста', style: TextStyle(color: Colors.white54)))
           : ReorderableListView.builder(

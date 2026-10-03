@@ -6,15 +6,32 @@ import 'dart:math';
 /// Файл, который телефон отдаёт в общую очередь. Лежит на телефоне, ПК играет его по сети,
 /// пока телефон подключён.
 class SharedFile {
-  SharedFile({required this.id, required this.path, required this.title});
+  SharedFile({required this.id, required this.path, required this.title, this.url = '', this.duration = 0, this.thumbnail = '', this.kind = 'file', this.sourceId = ''});
 
   final String id; // короткий, из букв и цифр: он идёт в адрес
-  final String path;
+  final String path; // файл на телефоне (у ссылки пусто)
   final String title;
+  // Ссылка (YouTube или прямая): её телефон разобрал сам, поток берётся при запуске.
+  final String url;
+  final double duration;
+  final String thumbnail;
+  final String kind; // 'file' | 'youtube' | 'direct'
+  final String sourceId;
 
-  Map<String, Object?> toJson() => {'id': id, 'path': path, 'title': title};
+  bool get isLink => url.isNotEmpty;
 
-  factory SharedFile.fromJson(Map<String, dynamic> json) => SharedFile(id: '${json['id']}', path: '${json['path']}', title: '${json['title']}');
+  Map<String, Object?> toJson() => {'id': id, 'path': path, 'title': title, if (isLink) ...{'url': url, 'duration': duration, 'thumbnail': thumbnail, 'kind': kind, 'sourceId': sourceId}};
+
+  factory SharedFile.fromJson(Map<String, dynamic> json) => SharedFile(
+        id: '${json['id']}',
+        path: '${json['path'] ?? ''}',
+        title: '${json['title']}',
+        url: '${json['url'] ?? ''}',
+        duration: (json['duration'] as num?)?.toDouble() ?? 0,
+        thumbnail: '${json['thumbnail'] ?? ''}',
+        kind: '${json['kind'] ?? 'file'}',
+        sourceId: '${json['sourceId'] ?? ''}',
+      );
 
   static String newId() {
     const letters = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -66,7 +83,7 @@ class MediaServer {
       // Ключ сравниваем целиком: слишком короткий или чужой — сразу отказ.
       SharedFile? file;
       for (final candidate in files()) {
-        if (candidate.id == id) file = candidate;
+        if (candidate.id == id && !candidate.isLink) file = candidate;
       }
       final allowed = file != null && given.length == key.length && _sameSecret(given, key) && (request.method == 'GET' || request.method == 'HEAD');
       final disk = allowed ? File(file.path) : null;

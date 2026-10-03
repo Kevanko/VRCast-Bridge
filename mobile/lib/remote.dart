@@ -9,6 +9,7 @@ import 'api.dart';
 import 'cloudflare_tunnel.dart';
 import 'file_broadcast.dart';
 import 'hls.dart';
+import 'links.dart';
 import 'media_server.dart';
 import 'models.dart';
 import 'own_server.dart';
@@ -18,9 +19,10 @@ enum Link { idle, connecting, online, offline }
 
 /// Соединение с одним ПК: живое состояние по SSE и команды.
 class Remote extends ChangeNotifier {
-  Remote(this.api, {this.pcName = '', PhoneStream? phone, MediaServer? media, FileBroadcast? files, Future<String?> Function()? cloudflared})
+  Remote(this.api, {this.pcName = '', PhoneStream? phone, MediaServer? media, FileBroadcast? files, Future<String?> Function()? cloudflared, LinkResolver? resolver})
       : isLocal = false,
         _cloudflared = cloudflared ?? bundledCloudflared,
+        resolver = resolver ?? DefaultLinkResolver(),
         phone = phone ?? PhoneStream(),
         files = files ?? FileBroadcast(),
         media = media ?? MediaServer(files: () => Prefs.instance.sharedFiles) {
@@ -31,11 +33,12 @@ class Remote extends ChangeNotifier {
 
   /// Без ПК: приложение работает от своих данных (последняя копия очереди и настроек ПК, свои серверы).
   /// Подключение к ПК потом ничего не ломает: данные синхронизируются в обе стороны.
-  Remote.local({PhoneStream? phone, FileBroadcast? files, Future<String?> Function()? cloudflared})
+  Remote.local({PhoneStream? phone, FileBroadcast? files, Future<String?> Function()? cloudflared, LinkResolver? resolver})
       : api = Api(Uri.parse('http://127.0.0.1:1')),
         pcName = '',
         isLocal = true,
         _cloudflared = cloudflared ?? bundledCloudflared,
+        resolver = resolver ?? DefaultLinkResolver(),
         files = files ?? FileBroadcast(),
         media = MediaServer(files: () => Prefs.instance.sharedFiles),
         phone = phone ?? PhoneStream() {
@@ -59,6 +62,8 @@ class Remote extends ChangeNotifier {
   final MediaServer media; // отдаёт файлы этого телефона в общую очередь
   final FileBroadcast files; // эфир файлов прямо с телефона на свой сервер или по бесплатной ссылке, без ПК
   final Future<String?> Function() _cloudflared;
+  final LinkResolver resolver; // как телефон сам разбирает ссылки без ПК (YouTube, прямые mp4)
+  bool get everConnected => _hadConnection; // с ПК хоть раз была связь в этом запуске
   bool cloudStarting = false; // поднимается бесплатная ссылка
   bool? cloudServes; // ссылка отвечает снаружи: null — ещё проверяем
   _Cloud? _cloud;
@@ -190,7 +195,7 @@ class Remote extends ChangeNotifier {
       final removed = await api.contribute(
         mediaBase: base,
         mediaKey: media.key,
-        files: [for (final file in prefs.sharedFiles) {'id': file.id, 'title': file.title}],
+        files: [for (final file in prefs.sharedFiles.where((f) => !f.isLink)) {'id': file.id, 'title': file.title}],
         servers: prefs.ownServers,
       );
       _seenRevision = revision;
@@ -208,6 +213,16 @@ class Remote extends ChangeNotifier {
   /// Ссылки, добавленные без связи, отправляем в очередь ПК; что не ушло, остаётся ждать.
   Future<int> pushPendingLinks() async {
     var sent = 0;
+    // Ссылки из своей очереди (YouTube и т. п.) тоже уходят в очередь ПК: она постоянная и играет их сама.
+    for (final item in Prefs.instance.sharedFiles.where((f) => f.isLink).toList()) {
+      try {
+        await api.addLink(item.url, confirm: true);
+        Prefs.instance.removeSharedFile(item.id);
+        sent++;
+      } catch (_) {
+        break;
+      }
+    }
     for (final url in [...Prefs.instance.pendingLinks]) {
       try {
         await api.addLink(url, confirm: true);
@@ -547,6 +562,15 @@ class Prefs extends ChangeNotifier {
       });
 
   void removeSharedFile(String id) => dropSharedFiles([id]);
+
+  /// Перетаскивание в своей очереди.
+  void moveSharedFile(int from, int to) => update(() {
+        if (from < 0 || from >= sharedFiles.length) return;
+        final list = [...sharedFiles];
+        final item = list.removeAt(from);
+        list.insert(to.clamp(0, list.length), item);
+        sharedFiles = list;
+      });
 
   /// Убрать файлы из общей очереди (сам убрал, либо их убрало другое устройство).
   void dropSharedFiles(List<String> ids) => update(() {

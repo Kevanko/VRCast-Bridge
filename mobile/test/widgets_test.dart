@@ -8,7 +8,9 @@ import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vrcast_remote/api.dart';
 import 'package:vrcast_remote/discovery.dart';
+import 'package:vrcast_remote/byte_source.dart';
 import 'package:vrcast_remote/file_broadcast.dart';
+import 'package:vrcast_remote/links.dart';
 import 'package:vrcast_remote/media_server.dart';
 import 'package:vrcast_remote/main.dart';
 import 'package:vrcast_remote/models.dart';
@@ -40,6 +42,24 @@ Remote makeRemote(MockClient client, {Link link = Link.online, Map<String, dynam
 }
 
 Widget app(Widget home) => MaterialApp(scrollBehavior: const NoStretchScrollBehavior(), home: home);
+
+/// Разбор ссылок без интернета: что вернуть, задаёт тест.
+class FakeLinks implements LinkResolver {
+  FakeLinks(this.answer);
+  final List<LinkInfo> Function(String url) answer;
+  final asked = <String>[];
+  @override
+  Future<List<LinkInfo>> inspect(String url) async {
+    asked.add(url);
+    return answer(url);
+  }
+
+  @override
+  Future<ByteSource> open(SharedFile item) => throw UnimplementedError();
+}
+
+LinkInfo youtubeInfo(String id, String title, double seconds) =>
+    LinkInfo(url: 'https://www.youtube.com/watch?v=$id', title: title, duration: seconds, thumbnail: 'https://i.ytimg.com/vi/$id/hqdefault.jpg', kind: 'youtube', sourceId: id);
 
 /// Эфир файлов без сети и ffmpeg: запоминает команды и показывает то же состояние, что настоящий.
 class FakeFiles extends FileBroadcast {
@@ -174,11 +194,15 @@ void main() {
     tallScreen(tester);
     final remote = makeRemote(MockClient((_) async => json({})), link: Link.offline);
     await tester.pumpWidget(app(HomeScreen(remote: remote, onConnect: (_, __) {}, onDisconnect: () {})));
-    expect(find.textContaining('Нет связи с ПК'), findsOneWidget);
+    expect(find.textContaining('ПК не найден'), findsOneWidget, reason: 'связи с ПК ещё не было — не пугаем «нет связи», а говорим, что приложение работает без него');
+    expect(find.textContaining('Нет связи с ПК'), findsNothing);
     expect(find.text('Без ПК'), findsNothing, reason: 'отдельного режима «Без ПК» больше нет');
     await tester.tap(find.text('Очередь'));
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('demo.mp4'), findsWidgets, reason: 'последняя очередь остаётся на экране');
+    expect(find.textContaining('Своя очередь пуста'), findsOneWidget);
+    await tester.tap(find.textContaining('Очередь ПК (последняя копия)'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('demo.mp4'), findsWidgets, reason: 'последняя очередь ПК лежит отдельно, для справки');
   });
 
   testWidgets('без ПК главный экран тот же: копия очереди с ПК, баннер, подключение по кнопке', (tester) async {
@@ -193,7 +217,9 @@ void main() {
     expect(find.text('Подключиться'), findsOneWidget);
     await tester.tap(find.text('Очередь'));
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('из копии.mp4'), findsOneWidget, reason: 'очередь взята с последнего подключения к ПК');
+    await tester.tap(find.textContaining('Очередь ПК (последняя копия)'));
+    await tester.pumpAndSettle();
+    expect(find.text('из копии.mp4'), findsOneWidget, reason: 'очередь ПК взята с последнего подключения и лежит отдельно');
     await tester.tap(find.text('Подключиться'));
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
@@ -203,18 +229,99 @@ void main() {
 
   testWidgets('без ПК ссылка в очередь не теряется: ждёт у телефона и видна в списке', (tester) async {
     tallScreen(tester);
-    final remote = Remote.local(phone: FakeStream());
+    final remote = Remote.local(phone: FakeStream(), resolver: FakeLinks((url) => throw UnsupportedLink('Эту ссылку без ПК не разобрать: она уйдёт на ПК при подключении.', sendToPc: true)));
     await tester.pumpWidget(app(Scaffold(body: QueuePage(remote: remote))));
-    await tester.enterText(find.byType(TextField), 'https://example.com/video.mp4');
+    await tester.enterText(find.byType(TextField), 'https://vk.com/video-1_2');
     await tester.tap(find.text('Добавить'));
     await tester.pumpAndSettle();
-    expect(Prefs.instance.pendingLinks, ['https://example.com/video.mp4']);
+    expect(Prefs.instance.pendingLinks, ['https://vk.com/video-1_2']);
     expect(find.text('Ждёт подключения к ПК'), findsOneWidget);
-    await tester.pump(const Duration(seconds: 6)); // первое сообщение уходит, показывается следующее
+    tester.state<ScaffoldMessengerState>(find.byType(ScaffoldMessenger)).clearSnackBars();
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Убрать'));
     await tester.pump();
     expect(Prefs.instance.pendingLinks, isEmpty);
+  });
+
+  testWidgets('без ПК ссылка на YouTube сразу в своей очереди: название, длительность, обложка; плейлист добавляется целиком', (tester) async {
+    tallScreen(tester);
+    final links = FakeLinks((url) => url.contains('list=')
+        ? [for (var i = 1; i <= 12; i++) youtubeInfo('v$i', 'Ролик $i', 60.0 * i)]
+        : [youtubeInfo('abc', 'Мой клип', 185)]);
+    final remote = Remote.local(phone: FakeStream(), files: FakeFiles(), resolver: links);
+    await tester.pumpWidget(app(Scaffold(body: ListenableBuilder(listenable: remote, builder: (_, __) => QueuePage(remote: remote)))));
+    await tester.enterText(find.byType(TextField), 'https://youtu.be/abc');
+    await tester.tap(find.text('Добавить'));
+    await tester.pumpAndSettle();
+    expect(links.asked, ['https://youtu.be/abc']);
+    expect(Prefs.instance.sharedFiles.single.title, 'Мой клип');
+    expect(Prefs.instance.sharedFiles.single.isLink, isTrue);
+    expect(find.text('Мой клип'), findsOneWidget);
+    expect(find.text('3:05 · YouTube'), findsOneWidget);
+    expect(Prefs.instance.pendingLinks, isEmpty, reason: 'ссылку телефон разобрал сам — ПК ждать не нужно');
+
+    // Большой плейлист: переспрашивает, как и на ПК.
+    tester.state<ScaffoldMessengerState>(find.byType(ScaffoldMessenger)).clearSnackBars();
+    await tester.enterText(find.byType(TextField), 'https://www.youtube.com/playlist?list=PL1');
+    await tester.tap(find.text('Добавить'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Большой плейлист'), findsOneWidget);
+    expect(find.textContaining('роликов: 12'), findsOneWidget);
+    await tester.tap(find.text('Отмена'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(Prefs.instance.sharedFiles, hasLength(1), reason: 'отказались — ничего не добавилось');
+    await tester.tap(find.text('Добавить'));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Добавить').last);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(Prefs.instance.sharedFiles, hasLength(13));
+    expect(Prefs.instance.sharedFiles.where((f) => f.kind == 'youtube').length, 13);
+  });
+
+  testWidgets('своя очередь без ПК: перетаскивание меняет порядок, смахивание убирает, нажатие запускает с этого ролика', (tester) async {
+    tallScreen(tester);
+    Prefs.instance.saveOwnServer(OwnServer(name: 'VPS', host: 'vps.example.com', key: 'k'));
+    Prefs.instance.addSharedFiles([
+      SharedFile(id: 'a', path: '', title: 'Первый', url: 'https://youtu.be/1', duration: 61, thumbnail: 'https://i.ytimg.com/vi/1/hqdefault.jpg', kind: 'youtube', sourceId: '1'),
+      SharedFile(id: 'b', path: '/tmp/b.mp4', title: 'Второй файл'),
+      SharedFile(id: 'c', path: '', title: 'Третий', url: 'https://example.com/c.mp4', duration: 30, kind: 'direct'),
+    ]);
+    final files = FakeFiles();
+    final remote = Remote.local(phone: FakeStream(), files: files);
+    await tester.pumpWidget(app(Scaffold(body: ListenableBuilder(listenable: remote, builder: (_, __) => QueuePage(remote: remote)))));
+    expect(find.text('1:01 · YouTube'), findsOneWidget);
+    expect(find.text('файл на телефоне'), findsOneWidget);
+    expect(find.text('0:30 · ссылка на mp4'), findsOneWidget);
+    Prefs.instance.moveSharedFile(0, 2);
+    expect(Prefs.instance.sharedFiles.map((f) => f.id), ['b', 'c', 'a']);
+    Prefs.instance.moveSharedFile(5, 0);
+    expect(Prefs.instance.sharedFiles.map((f) => f.id), ['b', 'c', 'a'], reason: 'неверный индекс ничего не ломает');
+    await tester.pump();
+    await tester.tap(find.text('Третий'));
+    await tester.pump();
+    expect(files.calls.last, 'start vps.example.com from=1 of=3', reason: 'запуск с выбранного ролика');
+    await tester.drag(find.text('Второй файл'), const Offset(-600, 0));
+    await tester.pumpAndSettle();
+    expect(Prefs.instance.sharedFiles.map((f) => f.id), ['c', 'a']);
+  });
+
+  testWidgets('подключение к ПК: ссылки из своей очереди уходят в очередь ПК и убираются у телефона', (tester) async {
+    Prefs.instance.addSharedFiles([
+      SharedFile(id: 'a', path: '', title: 'Клип', url: 'https://www.youtube.com/watch?v=abc', duration: 60, kind: 'youtube', sourceId: 'abc'),
+      SharedFile(id: 'f', path: '/tmp/f.mp4', title: 'Файл'),
+    ]);
+    final calls = <String>[];
+    final remote = makeRemote(MockClient((request) async {
+      calls.add('${request.method} ${request.url.path} ${request.body}');
+      if (request.url.path == '/api/pair/check') return json({'paired': true, 'id': 'm1'});
+      return json({'removed': []});
+    }), token: 'tok');
+    await tester.runAsync(() => remote.syncAll());
+    expect(calls.first, 'POST /api/queue {"url":"https://www.youtube.com/watch?v=abc","confirm":true}');
+    expect(Prefs.instance.sharedFiles.map((f) => f.id), ['f'], reason: 'ссылка ушла на ПК, файл остаётся на телефоне и идёт в группу');
+    final contribution = calls.firstWhere((c) => c.startsWith('POST /api/group/contribute'));
+    expect(contribution, contains('"id":"f"'));
+    expect(contribution, isNot(contains('youtube')), reason: 'ссылки в общий список файлов не попадают');
   });
 
   testWidgets('без ПК одна кнопка вещает прямо на свой сервер, с ПК — через ПК', (tester) async {
@@ -291,11 +398,11 @@ void main() {
     await tester.pumpWidget(app(HomeScreen(remote: remote, onConnect: (_, __) {}, onDisconnect: () {})));
     await tester.tap(find.text('Очередь'));
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.textContaining('Нажмите, чтобы вещать на свой сервер'), findsNWidgets(2));
+    expect(find.text('файл на телефоне'), findsNWidgets(2));
     await tester.tap(find.text('Второй.mp4'));
     await tester.pump();
     expect(files.calls, ['start vps.example.com from=1 of=2']);
-    expect(find.text('Идёт эфир на ваш сервер'), findsOneWidget);
+    expect(find.text('файл на телефоне · в эфире'), findsOneWidget);
 
     await tester.tap(find.text('Сейчас'));
     await tester.pump(const Duration(milliseconds: 400));

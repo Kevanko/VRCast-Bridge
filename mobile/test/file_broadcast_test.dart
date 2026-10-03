@@ -254,6 +254,26 @@ void main() {
       await eventually(() async => (await probe()).isEmpty ? true : null, 'после остановки поток пропадает');
     }, timeout: const Timeout(Duration(minutes: 3)));
 
+    test('долгая пауза (дольше 10 с) не рвёт публикацию на сервере', () async {
+      final broadcast = FileBroadcast(hold: null);
+      addTearDown(() async => broadcast.stop());
+      await broadcast.start(server, [SharedFile(id: 'a', path: clip, title: 'Клип А')]);
+      await eventually(() async => broadcast.position > 1 ? true : null, 'эфир идёт');
+      broadcast.pause();
+      final held = broadcast.position;
+      // MediaMTX закрывает публикацию, если от неё 10 с нет данных.
+      await Future<void>.delayed(const Duration(seconds: 13));
+      // Зрителю на паузе картинки нет, но путь на сервере должен остаться: DESCRIBE отвечает 200, а не 404.
+      final socket = await Socket.connect('127.0.0.1', port);
+      socket.add(utf8.encode('DESCRIBE rtsp://127.0.0.1:$port/phone RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n'));
+      final answer = utf8.decode(await socket.first.timeout(const Duration(seconds: 5)));
+      socket.destroy();
+      expect(answer, startsWith('RTSP/1.0 200'), reason: 'публикация должна пережить паузу дольше 10 с: $answer');
+      broadcast.resume();
+      await eventually(() async => broadcast.position > held ? true : null, 'после паузы эфир идёт дальше');
+      expect(broadcast.error, isNull);
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
     test('смена формата идёт новым сеансом; ролик без звука; неподдерживаемый файл пропускается; неверный ключ — понятная ошибка', () async {
       final broadcast = FileBroadcast(speedUp: 6);
       addTearDown(() async => broadcast.stop());

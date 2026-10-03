@@ -70,7 +70,10 @@ class RtspSession implements RtspOut {
     if (_closed) return;
     _closed = true;
     for (final waiting in _pending.values) {
-      if (!waiting.isCompleted) waiting.completeError(RtspException('Сервер закрыл соединение'));
+      if (!waiting.isCompleted) {
+        waiting.future.ignore(); // ждущий мог уже уйти по таймауту: ошибку никто не ждёт, и она не должна всплыть наверх
+        waiting.completeError(RtspException('Сервер закрыл соединение'));
+      }
     }
     _pending.clear();
     if (!_done.isCompleted) _done.complete();

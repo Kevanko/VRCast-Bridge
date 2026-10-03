@@ -42,6 +42,7 @@ dependencies:
   share_plus: ^13.3.1
   file_picker: ^13.1.0
   flutter_webrtc: ^1.6.2+hotfix.3
+  youtube_explode_dart: ^3.1.0
 
 dev_dependencies:
   flutter_test:
