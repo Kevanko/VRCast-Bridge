@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'api.dart';
 import 'app_log.dart';
 import 'broadcaster.dart';
+import 'discovery.dart';
 import 'remote.dart';
 import 'screens.dart';
 
@@ -44,10 +46,37 @@ class _RootState extends State<Root> {
   Remote? _remote;
   // Эфир не зависит от связи с ПК: он общий для всех подключений и не прерывается при смене.
   final Broadcaster _broadcaster = Broadcaster();
+  Timer? _follow;
+  bool _following = false;
+
+  /// Устройство поменяло порт (в настройках): связь пропала, а оно по-прежнему в сети по тому же адресу. Находим его и переходим.
+  Future<void> _followPort() async {
+    final remote = _remote;
+    if (_following || remote == null || remote.isLocal || remote.link != Link.offline) return;
+    _following = true;
+    final found = <FoundPc>[];
+    final probe = Discovery(found.addAll);
+    try {
+      await probe.start();
+      await Future<void>.delayed(const Duration(seconds: 4));
+      final base = remote.api.base;
+      final same = found.where((pc) => pc.host == base.host && pc.port != base.port).firstOrNull;
+      if (same != null && mounted && identical(_remote, remote)) {
+        final token = Prefs.instance.tokens[base.toString()];
+        if (token != null) Prefs.instance.tokens[same.base.toString()] = token;
+        _connect(remote.pcName.isEmpty ? same.name : remote.pcName, same.base);
+      }
+    } catch (_) {
+    } finally {
+      await probe.stop();
+      _following = false;
+    }
+  }
 
   @override
   void initState() {
     super.initState();
+    _follow = Timer.periodic(const Duration(seconds: 12), (_) => _followPort());
     Prefs.instance.load().then((_) {
       final last = Prefs.instance.last;
       if (!mounted) return;
@@ -76,6 +105,7 @@ class _RootState extends State<Root> {
 
   @override
   void dispose() {
+    _follow?.cancel();
     _remote?.dispose();
     _broadcaster.dispose();
     super.dispose();

@@ -79,8 +79,8 @@ void main() {
   });
 
   test('ошибка сервера превращается в понятное сообщение', () async {
-    final api = Api(Uri.parse('http://pc:4717'), client: MockClient((_) async => http.Response.bytes(utf8.encode('{"error":"Пульт для телефона выключен."}'), 403, headers: {'content-type': 'application/json; charset=utf-8'})));
-    expect(() => api.playback('pause'), throwsA(isA<ApiException>().having((e) => e.message, 'message', 'Пульт для телефона выключен.')));
+    final api = Api(Uri.parse('http://pc:4717'), client: MockClient((_) async => http.Response.bytes(utf8.encode('{"error":"Доступ с других устройств выключен."}'), 403, headers: {'content-type': 'application/json; charset=utf-8'})));
+    expect(() => api.playback('pause'), throwsA(isA<ApiException>().having((e) => e.message, 'message', 'Доступ с других устройств выключен.')));
   });
 
   test('адреса картинок строятся от адреса ПК', () {

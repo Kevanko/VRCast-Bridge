@@ -57,10 +57,11 @@ const DETAIL_LOG_FILE = join(DATA_DIR, 'vrcast-errors.log');
 const PORT_MIN = 1024, PORT_MAX = 65400;
 const validPort = value => Number.isInteger(Number(value)) && Number(value) >= PORT_MIN && Number(value) <= PORT_MAX;
 const savedPort = () => { try { const value = JSON.parse(readFileSync(join(DATA_DIR, 'config.json'), 'utf8')).port; return validPort(value) ? Number(value) : 0; } catch { return 0; } };
-const PORT = Number(process.env.VRCAST_PORT) || savedPort() || 4717;
-const RTSP_PORT = Number(process.env.VRCAST_RTSP_PORT || PORT + 1);
+// Порт можно сменить на ходу (applyPortChange), поэтому let.
+let PORT = Number(process.env.VRCAST_PORT) || savedPort() || 4717;
+let RTSP_PORT = Number(process.env.VRCAST_RTSP_PORT || PORT + 1);
 // Порт WebRTC для предпросмотра: рядом с RTSP, чтобы два экземпляра не спорили.
-const WEBRTC_PORT = RTSP_PORT + 100;
+let WEBRTC_PORT = RTSP_PORT + 100;
 const HOST = '127.0.0.1';
 // Прямая ссылка на файл или плейлист: разбирать её через yt-dlp незачем.
 const DIRECT_LIVE = /[.](m3u8|mpd)([?#]|$)/i;
@@ -1439,7 +1440,7 @@ function importServers(list) {
       channel: 'live', publicIp: host, rtspPort: port, hlsPort: 0, publishKey: key, permanentLink: true, addedAt: new Date().toISOString() });
     added++;
   }
-  if (added || updated) { saveConfig({ servers: known.slice(0, 20) }); log(`Серверы с телефона: добавлено ${added}, обновлено ${updated}`); }
+  if (added || updated) { saveConfig({ servers: known.slice(0, 20) }); log(`Серверы с устройства: добавлено ${added}, обновлено ${updated}`); }
   return { added, updated };
 }
 
@@ -3046,7 +3047,7 @@ function runScreenProcess(args, audioHelperArgs = null, windowHelperArgs = null)
     if (wasCurrent) activeProcess = null;
     if (wasCurrent && phoneSource && !stopping && !shuttingDown) {
       phoneSource = false;
-      log('Телефон перестал передавать экран — эфир остановлен');
+      log('Устройство перестало передавать экран — эфир остановлен');
       stopActive();
       return;
     }
@@ -3340,6 +3341,8 @@ async function startScreenInner() {
 // чтение открыто (этот ПК + локальная сеть). HLS остаётся для туннеля и Quest.
 function startMediaMtx() {
   if (!tools.mediamtx || mediaMtxProcess) return;
+  // Порты RTSP и WebRTC считаются от порта программы: после его смены новые берутся при запуске.
+  if (!process.env.VRCAST_RTSP_PORT) { RTSP_PORT = PORT + 1; WEBRTC_PORT = RTSP_PORT + 100; }
   // Имя файла настроек привязано к порту. Раньше он был один на всех, и две
   // запущенные копии программы (например, обычная и запасная на другом порту)
   // переписывали его друг за другом: вторая поднимала RTSP-сервер с чужими
@@ -6420,7 +6423,7 @@ async function receiveUpload(req, rawName) {
     if (size && statSync(partial).size !== size) throw new Error('Файл пришёл не полностью, попробуйте ещё раз.');
     renameSync(partial, target);
   } catch (error) { rmSync(partial, { force: true }); throw error; }
-  log(`Файл с телефона: ${name} (${Math.round(statSync(target).size / 1048576)} МБ)`);
+  log(`Файл с устройства: ${name} (${Math.round(statSync(target).size / 1048576)} МБ)`);
   return target;
 }
 
@@ -6473,7 +6476,7 @@ function pairPhone(req, body) {
     throw Object.assign(new Error(accessPinSet() ? 'Неверный PIN.' : 'Неверный код. Он показан в настройках программы на ПК.'), { status: 403 });
   }
   const token = crypto.randomBytes(24).toString('base64url');
-  const phone = { id: crypto.randomUUID().slice(0, 8), name: String(body.name || 'Телефон').slice(0, 40), kind: body.kind === 'pc' ? 'pc' : 'phone', hash: hashToken(token), at: new Date().toISOString() };
+  const phone = { id: crypto.randomUUID().slice(0, 8), name: String(body.name || 'Устройство').slice(0, 40), kind: body.kind === 'pc' ? 'pc' : 'phone', hash: hashToken(token), at: new Date().toISOString() };
   saveConfig({ pairedPhones: [phone, ...(config.pairedPhones || [])].slice(0, 10) });
   rotatePin();
   pairFailures.delete(ip);
@@ -6635,6 +6638,34 @@ function остановитьСобытия() {
 // Включили или выключили пульт: меняем адрес прослушивания и объявление в сети.
 // Выключено — слушаем только свой компьютер (и системе не за что просить файрвол).
 let слушаемАдрес = HOST;
+// Порт свободен? Проверка перед сменой: занятый порт уронил бы программу.
+function portIsFree(port) {
+  return new Promise(resolve => {
+    const probe = netCreateServer();
+    probe.once('error', () => resolve(false));
+    probe.listen(port, '0.0.0.0', () => probe.close(() => resolve(true)));
+  });
+}
+// Новый порт из настроек вступает в силу сразу, без перезапуска программы. Окно и телефоны переходят сами.
+function applyPortChange() {
+  if (process.env.VRCAST_PORT) return;
+  const wanted = validPort(config.port) ? Number(config.port) : 4717;
+  if (wanted === PORT) return;
+  const old = PORT;
+  PORT = wanted;
+  log(`Порт программы: ${old} → ${PORT}`);
+  server.close();
+  server.closeAllConnections?.();
+  server.listen(PORT, слушаемАдрес);
+  if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log, name: deviceName() });
+  // Публичная ссылка ведёт на порт программы: переподнимаем туннель.
+  if (tunnelProcess) { stopPublicTunnel(); if (config.outputMode === 'tunnel') setTimeout(startPublicTunnel, 500); }
+  // MediaMTX считает порты от нашего. Идущий эфир не прерываем: он пересядет на новые порты при следующем запуске.
+  if (mediaMtxProcess) {
+    if (activeKind) log('Быстрые ссылки RTSP сменят порт после остановки эфира');
+    else restartMediaMtx();
+  }
+}
 function applyLanAccess() {
   const wanted = config.lanAccess === true ? '0.0.0.0' : HOST;
   if (wanted !== слушаемАдрес) {
@@ -6647,12 +6678,12 @@ function applyLanAccess() {
   else unpublishService();
   // MediaMTX читает правила публикации из своего файла: перезапускаем с новыми.
   if (mediaMtxProcess) restartMediaMtx();
-  log(config.lanAccess === true ? 'Пульт для телефона включён' : 'Пульт для телефона выключен');
+  log(config.lanAccess === true ? 'Доступ с других устройств включён' : 'Доступ с других устройств выключен');
 }
 
 // Свои адреса: только они имеют право на пульт управления.
-const LOCAL_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`]);
-const OWN_ORIGIN = `http://127.0.0.1:${PORT}`;
+const localHosts = () => new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`]);
+const ownOrigin = () => `http://127.0.0.1:${PORT}`;
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -6680,7 +6711,7 @@ const server = http.createServer(async (req, res) => {
       // Устройство из своей сети (телефон): только при включённом «пульте для
       // телефона» и только к разрешённым маршрутам — без ключей, настроек и выхода.
       if (!config.lanAccess || !isPrivateAddress(req.socket.remoteAddress) || !lanHostAllowed(hostHeader, PORT)) {
-        return json(res, 403, { error: 'Пульт для телефона выключен.' });
+        return json(res, 403, { error: 'Доступ с других устройств выключен.' });
       }
       res.forNetwork = true;
       res.paired = isPairedRequest(req);
@@ -6695,11 +6726,11 @@ const server = http.createServer(async (req, res) => {
       const origin = String(req.headers.origin || '');
       if (origin && origin !== `http://${hostHeader}`) return json(res, 403, { error: 'Запрос со стороннего сайта.' });
     } else {
-      if (!publicTunnelHost && !LOCAL_HOSTS.has(hostHeader)) {
+      if (!publicTunnelHost && !localHosts().has(hostHeader)) {
         return json(res, 403, { error: 'Обращение с чужого адреса.' });
       }
       const origin = String(req.headers.origin || '');
-      if (origin && origin !== OWN_ORIGIN && !publicTunnelHost) {
+      if (origin && origin !== ownOrigin() && !publicTunnelHost) {
         return json(res, 403, { error: 'Запрос со стороннего сайта.' });
       }
     }
@@ -7107,7 +7138,9 @@ const server = http.createServer(async (req, res) => {
           writeFileSync(probe, 'ok'); rmSync(probe, { force: true });
         } catch { return json(res, 400, { error: `Не удаётся писать в ${target}. Выберите другой диск.` }); }
       }
+      if (!process.env.VRCAST_PORT && next.port !== PORT && !(await portIsFree(next.port))) return json(res, 400, { error: `Порт ${next.port} занят другой программой` });
       saveConfig(next);
+      if (next.port !== previousConfig.port || next.port !== PORT) res.once('finish', () => setTimeout(applyPortChange, 80));
       if (Boolean(previousConfig.lanAccess) !== config.lanAccess || (config.lanAccess && (previousConfig.deviceName || '') !== config.deviceName)) res.once('finish', () => setTimeout(applyLanAccess, 50));
       // Сниженный под затор битрейт относится к конкретному каналу до сервера.
       if (previousOutput !== config.outputMode || previousConfig.activeServerId !== config.activeServerId
@@ -7210,9 +7243,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/start/phone') {
       requireReadyOutput();
       const info = await probePhoneStream();
-      if (!info.video) throw new Error('Телефон ещё не передаёт экран. Нажмите «Транслировать экран» в приложении.');
+      if (!info.video) throw new Error('Устройство ещё не передаёт экран. Нажмите «Транслировать экран» в приложении.');
       phoneSource = true; phoneHasAudio = info.audio;
-      log(`Эфир с экрана телефона${info.audio ? ' со звуком' : ' без звука'}`);
+      log(`Эфир с экрана устройства${info.audio ? ' со звуком' : ' без звука'}`);
       try { await startScreen(); } catch (error) { phoneSource = false; throw error; }
       takeLead(req);
       return json(res, 200, status());

@@ -2128,11 +2128,11 @@ async function paintPhonePin(){
   try{
     const info=await api('/api/pair/pin');
     setText($('#phonePin'),`${info.pin.slice(0,3)} ${info.pin.slice(3)}`);
-    setText($('#phonePairNote'),info.phones?`Привязано телефонов: ${info.phones}. Код меняется после каждой привязки`:'Введите этот код в приложении на телефоне: Настройки → Эфир на ПК');
+    setText($('#phonePairNote'),info.phones?`Привязано устройств: ${info.phones}. Код меняется после каждой привязки`:'Введите этот код на другом устройстве: Настройки → Настройки эфира');
   }catch{}
 }
 $('#deviceNameInput').addEventListener('change',async()=>{
-  try{ render(await api('/api/config',{method:'POST',body:JSON.stringify({deviceName:$('#deviceNameInput').value})})); toast('Имя ПК сохранено'); }
+  try{ render(await api('/api/config',{method:'POST',body:JSON.stringify({deviceName:$('#deviceNameInput').value})})); toast('Имя устройства сохранено'); }
   catch(error){ toast(error.message,true); }
 });
 $('#accessPinInput').addEventListener('change',async()=>{
@@ -2142,34 +2142,34 @@ $('#accessPinInput').addEventListener('change',async()=>{
   catch(error){ toast(error.message,true); }
 });
 $('#phonePinNew').addEventListener('click',async()=>{ try{ await api('/api/pair/pin/rotate',{method:'POST',body:'{}'}); paintPhonePin(); }catch(error){ toast(error.message,true); } });
-$('#phoneUnpair').addEventListener('click',async()=>{ try{ await api('/api/pair/clear',{method:'POST',body:'{}'}); paintPhonePin(); toast('Все телефоны отвязаны'); }catch(error){ toast(error.message,true); } });
+$('#phoneUnpair').addEventListener('click',async()=>{ try{ await api('/api/pair/clear',{method:'POST',body:'{}'}); paintPhonePin(); toast('Все устройства отвязаны'); }catch(error){ toast(error.message,true); } });
 
 async function paintPhoneNote(){
   const on=$('#phoneAccess').value==='on';
   paintPhonePin();
-  if(!on){ setText($('#phoneAccessNote'),'Выключен — телефон в сети не увидит программу'); return; }
+  if(!on){ setText($('#phoneAccessNote'),'Выключен — другие устройства в сети не увидят программу'); return; }
   try{
     const info=await api('/api/lan-info');
-    setText($('#phoneAccessNote'),`Включён. Приложение найдёт ПК само, а вручную: ${info.addresses.join(', ')||'адрес не найден'}`);
+    setText($('#phoneAccessNote'),`Включён. Другие устройства найдут это само, а вручную: ${info.addresses.join(', ')||'адрес не найден'}`);
   }catch{ setText($('#phoneAccessNote'),'Включён'); }
 }
 $('#phoneAccess').addEventListener('change',async()=>{
   ui.configEditUntil=Date.now()+2500;
-  try{ render(await saveConfig(false)); toast($('#phoneAccess').value==='on'?'Пульт для телефона включён':'Пульт для телефона выключен'); setTimeout(paintPhoneNote,600); }
+  try{ render(await saveConfig(false)); toast($('#phoneAccess').value==='on'?'Доступ с других устройств включён':'Доступ с других устройств выключен'); setTimeout(paintPhoneNote,600); }
   catch(error){ ui.configEditUntil=0; toast(error.message,true); }
 });
 
 function paintPortNote(state){
   const running=state?.port||ui.status?.port, chosen=Number($('#portInput').value);
   setText($('#portNote'),running&&chosen&&chosen!==running
-    ?`Сейчас ${running}. Новый порт ${chosen} заработает после перезапуска программы`
+    ?`Сейчас ${running}. Переключаюсь на ${chosen}…`
     :`Сейчас ${running||4717}. Менять нужно редко: от порта считаются и быстрые ссылки`);
 }
 $('#portInput').addEventListener('change',async()=>{
   const value=Number($('#portInput').value);
   if(!Number.isInteger(value)||value<1024||value>65400){ toast('Порт — число от 1024 до 65400',true); $('#portInput').value=ui.status?.config?.port||ui.status?.port||4717; return; }
   ui.configEditUntil=Date.now()+2500;
-  try{ render(await saveConfig(false)); paintPortNote(ui.status); toast('Порт сохранён. Перезапустите программу'); }
+  try{ render(await saveConfig(false)); paintPortNote(ui.status); toast('Порт изменён'); setTimeout(()=>{ location.href=`${location.protocol}//${location.hostname}:${value}/`; },900); }
   catch(error){ ui.configEditUntil=0; toast(error.message,true); }
 });
 

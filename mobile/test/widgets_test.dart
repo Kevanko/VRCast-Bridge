@@ -203,8 +203,8 @@ void main() {
     tallScreen(tester);
     final remote = makeRemote(MockClient((_) async => json({})), link: Link.offline);
     await tester.pumpWidget(app(HomeScreen(remote: remote, onConnect: (_, __) {}, onDisconnect: () {})));
-    expect(find.textContaining('ПК не найден'), findsOneWidget, reason: 'связи с ПК ещё не было — не пугаем «нет связи», а говорим, что приложение работает без него');
-    expect(find.textContaining('Нет связи с ПК'), findsNothing);
+    expect(find.textContaining('Устройство не найдено'), findsOneWidget, reason: 'связи с ПК ещё не было — не пугаем «нет связи», а говорим, что приложение работает без него');
+    expect(find.textContaining('Нет связи с устройством'), findsNothing);
     expect(find.text('Без ПК'), findsNothing, reason: 'отдельного режима «Без ПК» больше нет');
     await tester.tap(find.text('Очередь'));
     await tester.pump(const Duration(milliseconds: 400));
@@ -222,7 +222,7 @@ void main() {
     final remote = Remote.local(phone: FakeStream());
     expect(remote.state!.running, isFalse, reason: 'про эфир без связи ничего не известно');
     await tester.pumpWidget(app(HomeScreen(remote: remote, onConnect: (_, __) {}, onDisconnect: () {})));
-    expect(find.textContaining('ПК не подключён'), findsOneWidget);
+    expect(find.textContaining('Нет подключённых устройств. Можно вещать'), findsOneWidget);
     expect(find.text('Подключиться'), findsOneWidget);
     await tester.tap(find.text('Очередь'));
     await tester.pump(const Duration(milliseconds: 400));
@@ -232,8 +232,8 @@ void main() {
     await tester.tap(find.text('Подключиться'));
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
-    expect(find.text('Подключение к ПК'), findsOneWidget);
-    expect(find.text('Отключиться от ПК'), findsNothing, reason: 'отключаться не от чего');
+    expect(find.text('Подключение к устройству'), findsOneWidget);
+    expect(find.text('Отключиться от устройства'), findsNothing, reason: 'отключаться не от чего');
   });
 
   testWidgets('без ПК ссылка в очередь не теряется: ждёт у телефона и видна в списке', (tester) async {
@@ -401,7 +401,7 @@ void main() {
     tallScreen(tester);
     final remote = Remote.local(phone: FakeStream());
     await tester.pumpWidget(app(Scaffold(body: NowPlayingPage(remote: remote))));
-    expect(find.text('Нет ПК и нет своего сервера'), findsOneWidget);
+    expect(find.text('Нет подключённых устройств и своего сервера'), findsOneWidget);
     await tester.tap(find.textContaining('Транслировать экран телефона'));
     await tester.pump();
     expect(find.textContaining('своего сервера нет'), findsOneWidget);
@@ -775,7 +775,7 @@ void main() {
       expect(find.text('Рабочий ПК'), findsOneWidget);
       expect(find.byIcon(Icons.lock_outline), findsOneWidget, reason: 'замок только у ПК с PIN');
       expect(find.text('192.168.1.9:4717 · нужен PIN'), findsOneWidget);
-      expect(find.text('Отключиться от ПК'), findsNothing);
+      expect(find.text('Отключиться от устройства'), findsNothing);
     });
 
     testWidgets('устройство можно назвать по-своему, имя запоминается', (tester) async {
@@ -818,7 +818,7 @@ void main() {
       // Ключ привязки выдаёт настоящий Api: подменяем сеть для проверки сценария через тестовый клиент ниже.
       await tester.tap(find.text('Рабочий ПК'));
       await tester.pumpAndSettle();
-      expect(find.text('Этот ПК защищён PIN-кодом. Введите его один раз — телефон запомнит.'), findsOneWidget);
+      expect(find.text('Это устройство защищено PIN-кодом. Введите его один раз — приложение запомнит.'), findsOneWidget);
       expect(pickedHost, isEmpty, reason: 'пока PIN не введён, подключения нет');
       await tester.tap(find.text('Отмена'));
       await tester.pumpAndSettle();
@@ -837,7 +837,7 @@ void main() {
       var disconnected = false;
       await tester.pumpWidget(app(screen((_, __) {}, onDisconnect: () => disconnected = true)));
       await tester.pump(const Duration(milliseconds: 100));
-      await tester.tap(find.text('Отключиться от ПК'));
+      await tester.tap(find.text('Отключиться от устройства'));
       expect(disconnected, isTrue);
     });
   });
@@ -883,7 +883,7 @@ void main() {
     }), link: Link.offline);
     remote.needsPin = true;
     await tester.pumpWidget(app(HomeScreen(remote: remote, onConnect: (_, __) {}, onDisconnect: () {})));
-    expect(find.text('Этот ПК защищён PIN-кодом.'), findsOneWidget);
+    expect(find.text('Это устройство защищено PIN-кодом.'), findsOneWidget);
     expect(find.textContaining('Подключаюсь снова'), findsNothing, reason: 'вместо бесконечного «подключаюсь» — просьба ввести PIN');
     await tester.tap(find.text('Ввести PIN'));
     await tester.pump(const Duration(milliseconds: 500)); // на экране бегает индикатор переподключения — settle не наступит
@@ -899,8 +899,8 @@ void main() {
     tallScreen(tester);
     final remote = Remote.local(phone: FakeStream());
     await tester.pumpWidget(app(SettingsScreen(remote: remote)));
-    expect(find.textContaining('Телефон — так он виден ПК'), findsOneWidget);
-    await tester.tap(find.text('Имя этого телефона'));
+    expect(find.textContaining('Телефон — так оно видно другим устройствам'), findsOneWidget);
+    await tester.tap(find.text('Имя этого устройства'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField).last, 'Телефон Ани');
     await tester.tap(find.text('Сохранить'));

@@ -13,8 +13,9 @@ const ROOT = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(process.env.XDG_DATA_HOME || path.join(app.getPath('home'), '.local', 'share'), 'VRCastBridge');
 // Тот же порядок, что у сервера: переменная окружения, порт из настроек, 4717.
 const savedPort = () => { try { const v = Number(JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'config.json'), 'utf8')).port); return v >= 1024 && v <= 65400 ? v : 0; } catch { return 0; } };
-const PORT = Number(process.env.VRCAST_PORT) || savedPort() || 4717;
-const URL_BASE = `http://127.0.0.1:${PORT}/`;
+// Порт могут сменить в настройках на ходу, поэтому адрес считаем каждый раз.
+const currentPort = () => Number(process.env.VRCAST_PORT) || savedPort() || 4717;
+const urlBase = () => `http://127.0.0.1:${currentPort()}/`;
 const GEOMETRY_FILE = path.join(DATA_DIR, 'window.txt');
 const ICON = path.join(ROOT, 'launcher', 'assets', 'vrcast-icon.png');
 const MEDIA_EXTENSIONS = ['mp4', 'mkv', 'webm', 'mov', 'avi', 'm4v', 'ts', 'mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus'];
@@ -26,7 +27,7 @@ if (!app.requestSingleInstanceLock()) app.quit();
 app.on('second-instance', () => showWindow());
 
 async function api(route, options = {}) {
-  const response = await fetch(`${URL_BASE}${route}`, { signal: AbortSignal.timeout(2500), ...options });
+  const response = await fetch(`${urlBase()}${route}`, { signal: AbortSignal.timeout(2500), ...options });
   return response.json();
 }
 const serverUp = () => api('api/status?logs=0').then(() => true, () => false);
@@ -94,7 +95,7 @@ function createWindow() {
     return { action: 'deny' };
   });
   webContents.on('will-navigate', (event, url) => {
-    if (url.startsWith(URL_BASE) || url.startsWith('data:')) return;
+    if (url.startsWith(urlBase()) || url.startsWith('data:')) return;
     event.preventDefault();
     if (url.startsWith('vrcast://select-region')) selectRegion();
     else if (url.startsWith('vrcast://pick-media')) pickMedia();
@@ -154,7 +155,7 @@ async function quitAll() {
   saveGeometry();
   win?.hide();
   // Сервер штатно сворачивает захват и сам выходит; подстраховываемся сигналом.
-  await fetch(`${URL_BASE}api/shutdown`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(3000) }).catch(() => {});
+  await fetch(`${urlBase()}api/shutdown`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(3000) }).catch(() => {});
   for (let i = 0; i < 20 && await serverUp(); i++) await new Promise(resolve => setTimeout(resolve, 200));
   try { serverChild?.kill('SIGTERM'); } catch {}
   app.exit(0);
@@ -238,7 +239,7 @@ app.whenReady().then(async () => {
   createWindow();
   try { setupTray(); } catch {}
   await ensureServer();
-  if (win && await serverUp()) win.loadURL(URL_BASE);
+  if (win && await serverUp()) win.loadURL(urlBase());
   else if (win) win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
     '<meta charset="utf-8"><body style="background:#0e0c18;color:#f0a0a0;font:15px system-ui;display:grid;place-items:center;height:100%;margin:0">'
     + 'Сервер не запустился. Журнал: ~/.local/share/VRCastBridge/vrcast.log.stdout'));

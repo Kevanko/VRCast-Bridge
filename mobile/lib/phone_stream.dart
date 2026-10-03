@@ -52,7 +52,7 @@ class PhoneStream {
   /// Экран телефона → ПК. [pc] — адрес ПК (http://хост:порт), [webrtcPort] — порт WebRTC на нём.
   Future<void> start(Uri pc, int webrtcPort, {String quality = '720p', int fps = 30, int bitrateKbps = 0}) =>
       _publish(pc.replace(port: webrtcPort, path: '/phone/whip'), const {},
-          quality: quality, fps: fps, bitrateKbps: bitrateKbps, h264: false, hint: 'ПК не принял поток. Включён ли «Пульт для телефона»?');
+          quality: quality, fps: fps, bitrateKbps: bitrateKbps, h264: false, hint: 'Устройство не приняло поток. Включён ли «Доступ с других устройств»?');
 
   /// Экран телефона → свой сервер напрямую, без ПК. Видео H.264: его понимает плеер в VRChat.
   Future<void> startDirect(OwnServer server, {String quality = '720p', int fps = 30}) =>

@@ -80,7 +80,7 @@ export async function publishService({ port, version, log, name = hostname() }) 
     // Имя в сети уже занято (два ПК с одним названием) — не падаем, просто сообщаем.
     service.on('error', error => log?.(`mDNS: ${error.message}. Дайте ПК другое имя в настройках.`));
     published = { bonjour, service };
-    log?.(`Пульт для телефона: ПК виден в сети как «${name}»`);
+    log?.(`Доступ с других устройств: видно в сети как «${name}»`);
   } catch (error) { log?.(`Не удалось объявить ПК в сети (mDNS): ${error.message}`); }
 }
 

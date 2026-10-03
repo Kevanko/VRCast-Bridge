@@ -433,17 +433,17 @@
         <div class="setting-row"><span><b>Крестик окна</b><small id="closeActionNote">Эфир продолжится, значок будет у часов</small></span>
           <div class="seg" data-for="closeAction" role="radiogroup" aria-label="Крестик окна"></div>
           <select id="closeAction" hidden><option value="tray" data-short="Прячет в трей">Прячет в трей</option><option value="exit" data-short="Закрывает">Закрывает программу</option></select></div>
-        <div class="setting-row"><span><b>Пульт для телефона</b><small id="phoneAccessNote">Выключен — телефон в сети не увидит программу</small></span>
-          <div class="seg" data-for="phoneAccess" role="radiogroup" aria-label="Пульт для телефона"></div>
+        <div class="setting-row"><span><b>Доступ с других устройств</b><small id="phoneAccessNote">Выключен — другие устройства в сети не увидят программу</small></span>
+          <div class="seg" data-for="phoneAccess" role="radiogroup" aria-label="Доступ с других устройств"></div>
           <select id="phoneAccess" hidden><option value="off" data-short="Выкл">Выключен</option><option value="on" data-short="Вкл">Включён</option></select></div>
-        <div class="setting-row" id="phonePairRow" hidden><span><b>Код привязки телефона</b><small id="phonePairNote">Нужен один раз, чтобы менять настройки эфира с телефона</small></span>
+        <div class="setting-row" id="phonePairRow" hidden><span><b>Код привязки устройства</b><small id="phonePairNote">Нужен один раз, чтобы менять настройки эфира с другого устройства</small></span>
           <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end"><code id="phonePin" style="font-size:18px;letter-spacing:2px;white-space:nowrap">------</code>
           <button class="btn" id="phonePinNew" type="button">Новый</button><button class="btn" id="phoneUnpair" type="button">Отвязать все</button></span></div>
-        <div class="setting-row"><span><b>Имя этого ПК в сети</b><small>Так ПК увидят телефоны. Пусто — имя компьютера</small></span>
-          <input id="deviceNameInput" type="text" maxlength="40" style="width:170px" aria-label="Имя этого ПК в сети"></div>
-        <div class="setting-row"><span><b>PIN для подключения</b><small id="accessPinNote">Необязательно. Если задан, телефон спросит его один раз. Поток в сети остаётся открытым</small></span>
+        <div class="setting-row"><span><b>Имя этого устройства в сети</b><small>Так его увидят другие устройства. Пусто — имя компьютера</small></span>
+          <input id="deviceNameInput" type="text" maxlength="40" style="width:170px" aria-label="Имя этого устройства в сети"></div>
+        <div class="setting-row"><span><b>PIN для подключения</b><small id="accessPinNote">Необязательно. Если задан, другое устройство спросит его один раз. Поток в сети остаётся открытым</small></span>
           <input id="accessPinInput" type="text" inputmode="numeric" maxlength="8" placeholder="нет" autocomplete="off" style="width:110px" aria-label="PIN для подключения"></div>
-        <div class="setting-row" id="pairedListRow" hidden><span><b>Привязанные устройства</b><small id="pairedListNote">Телефоны, которые вошли по коду или PIN</small></span><div id="pairedList" style="display:flex;flex-direction:column;gap:6px;align-items:flex-end"></div></div>
+        <div class="setting-row" id="pairedListRow" hidden><span><b>Привязанные устройства</b><small id="pairedListNote">Устройства, которые вошли по коду или PIN</small></span><div id="pairedList" style="display:flex;flex-direction:column;gap:6px;align-items:flex-end"></div></div>
         <div class="setting-row"><span><b>Порт программы</b><small id="portNote">По умолчанию 4717</small></span>
           <input id="portInput" type="number" min="1024" max="65400" step="1" inputmode="numeric" style="width:92px" aria-label="Порт программы"></div>
         <div class="setting-row"><span><b>Обновления</b><small id="updateNote">Проверяю…</small></span><button class="btn" id="checkUpdate" type="button"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg>Проверить</button></div>

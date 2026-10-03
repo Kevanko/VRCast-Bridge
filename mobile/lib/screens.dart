@@ -72,7 +72,7 @@ class _PinDialogState extends State<_PinDialog> {
   Widget build(BuildContext context) => AlertDialog(
         title: Text(widget.title),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Text('Этот ПК защищён PIN-кодом. Введите его один раз — телефон запомнит.'),
+          const Text('Это устройство защищено PIN-кодом. Введите его один раз — приложение запомнит.'),
           const SizedBox(height: 12),
           TextField(controller: _pin, autofocus: true, keyboardType: TextInputType.number, obscureText: true, maxLength: 8, onSubmitted: (_) => _submit(),
               decoration: const InputDecoration(labelText: 'PIN', border: OutlineInputBorder())),
@@ -222,7 +222,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Подключение к ПК'), actions: [
+        appBar: AppBar(title: const Text('Подключение к устройству'), actions: [
           IconButton(tooltip: 'Искать заново', icon: const Icon(Icons.refresh), onPressed: _rescan),
           settingsButton(context),
         ]),
@@ -230,19 +230,19 @@ class _ConnectScreenState extends State<ConnectScreen> {
           if (widget.onDisconnect != null) ...[
             Card(child: ListTile(
               leading: const Icon(Icons.link_off),
-              title: const Text('Отключиться от ПК'),
-              subtitle: const Text('Приложение продолжит работать само: очередь и серверы останутся на телефоне'),
+              title: const Text('Отключиться от устройства'),
+              subtitle: const Text('Приложение продолжит работать само: очередь и серверы останутся на этом устройстве'),
               onTap: widget.onDisconnect,
             )),
             const SizedBox(height: 16),
           ],
           Text('Устройства в сети', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
-          const Text('Имя можно поменять карандашом — оно останется на этом телефоне', style: TextStyle(color: Colors.white54, fontSize: 12)),
+          const Text('Имя можно поменять карандашом — оно останется на этом устройстве', style: TextStyle(color: Colors.white54, fontSize: 12)),
           const SizedBox(height: 8),
           if (_found.isEmpty)
             const ListTile(leading: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)), title: Text('Ищу…'),
-                subtitle: Text('На ПК включите «Пульт для телефона» в настройках')),
+                subtitle: Text('На другом устройстве включите «Доступ с других устройств» в настройках')),
           for (final pc in _found) _device(Icons.desktop_windows_outlined, pc.name, pc.base),
           if (Prefs.instance.pcs.any((pc) => !_found.any((f) => f.base.authority == pc.base.authority))) ...[
             const SizedBox(height: 16),
@@ -299,29 +299,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
             body: ListView(children: [
               ListTile(
                 leading: const Icon(Icons.smartphone),
-                title: const Text('Имя этого телефона'),
-                subtitle: Text('${prefs.deviceName} — так он виден ПК в списке привязанных устройств'),
+                title: const Text('Имя этого устройства'),
+                subtitle: Text('${prefs.deviceName} — так оно видно другим устройствам'),
                 trailing: const Icon(Icons.edit_outlined),
                 onTap: () async {
-                  final name = await renameDialog(context, prefs.deviceName, title: 'Имя этого телефона');
+                  final name = await renameDialog(context, prefs.deviceName, title: 'Имя этого устройства');
                   if (name != null) prefs.setDeviceName(name);
                 },
               ),
               if (widget.remote != null && !widget.remote!.isLocal)
                 ListTile(
                   leading: const Icon(Icons.podcasts),
-                  title: const Text('Эфир на ПК'),
+                  title: const Text('Настройки эфира'),
                   subtitle: const Text('Публичная ссылка, свой сервер, качество'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => StreamSettingsScreen(remote: widget.remote!))),
                 ),
-              SwitchListTile(title: const Text('Подключаться к последнему ПК сам'), subtitle: const Text('Иначе при запуске откроется выбор компьютера'),
+              SwitchListTile(title: const Text('Подключаться к последнему устройству сам'), subtitle: const Text('Иначе при запуске откроется выбор устройства'),
                   value: prefs.autoConnect, onChanged: (v) => prefs.update(() => prefs.autoConnect = v)),
               SwitchListTile(title: const Text('Видео-превью'), subtitle: const Text('Выключите, чтобы не расходовать трафик Wi-Fi: останется картинка трека'),
                   value: prefs.preview, onChanged: (v) => prefs.update(() => prefs.preview = v)),
               ListTile(
                 title: const Text('Порт по умолчанию'),
-                subtitle: const Text('Подставляется, если адрес введён без порта. Должен совпадать с портом на ПК'),
+                subtitle: const Text('Подставляется, если адрес введён без порта. Должен совпадать с портом другого устройства'),
                 trailing: SizedBox(width: 90, child: TextField(controller: _port, keyboardType: TextInputType.number, textAlign: TextAlign.center,
                     decoration: const InputDecoration(isDense: true, border: OutlineInputBorder()),
                     onChanged: (text) {
@@ -331,7 +331,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               const Divider(),
               const Padding(padding: EdgeInsets.fromLTRB(16, 8, 16, 0), child: Text('Свои серверы', style: TextStyle(fontWeight: FontWeight.bold))),
-              const Padding(padding: EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text('Нужны, чтобы вещать экран телефона без ПК. Пока телефон подключён к ПК, их видит и может использовать вся группа; после отключения они снова только ваши.', style: TextStyle(color: Colors.white54, fontSize: 12))),
+              const Padding(padding: EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text('Нужны, чтобы вещать экран и файлы с этого устройства самому. Пока оно подключено к другому устройству, их видит и может использовать вся группа; после отключения они снова только ваши.', style: TextStyle(color: Colors.white54, fontSize: 12))),
               for (final server in prefs.ownServers)
                 ListTile(
                   leading: Icon(server.id == prefs.currentOwnServer?.id ? Icons.radio_button_checked : Icons.radio_button_off),
@@ -372,7 +372,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const LogScreen())),
               ),
               const Divider(),
-              const Padding(padding: EdgeInsets.fromLTRB(16, 8, 16, 0), child: Text('Запомненные компьютеры', style: TextStyle(fontWeight: FontWeight.bold))),
+              const Padding(padding: EdgeInsets.fromLTRB(16, 8, 16, 0), child: Text('Запомненные устройства', style: TextStyle(fontWeight: FontWeight.bold))),
               if (prefs.pcs.isEmpty) const ListTile(title: Text('Пока пусто', style: TextStyle(color: Colors.white54))),
               for (final pc in prefs.pcs)
                 ListTile(leading: const Icon(Icons.desktop_windows_outlined), title: Text(prefs.nameFor(pc.base.authority, pc.name)), subtitle: Text(pc.base.authority),
@@ -384,7 +384,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       IconButton(tooltip: 'Забыть', icon: const Icon(Icons.delete_outline), onPressed: () => prefs.forget(pc)),
                     ])),
               const Divider(),
-              const ListTile(title: Text('Включить доступ на ПК'), subtitle: Text('Настройки → Программа → Пульт для телефона. Порт на ПК тоже меняется там')),
+              const ListTile(title: Text('Включить доступ на другом устройстве'), subtitle: Text('Настройки → Программа → Доступ с других устройств. Порт тоже меняется там')),
             ]),
           );
         },
@@ -431,7 +431,7 @@ class _HomeScreenState extends State<HomeScreen> {
         return Scaffold(
           appBar: AppBar(
             title: Text(remote.isLocal ? 'VRCast Bridge' : Prefs.instance.nameFor(remote.api.base.authority, remote.pcName.isEmpty ? 'VRCast Bridge' : remote.pcName)),
-            actions: [settingsButton(context, remote), IconButton(tooltip: remote.isLocal ? 'Подключиться к ПК' : 'Другой компьютер', icon: Icon(remote.isLocal ? Icons.computer : Icons.swap_horiz), onPressed: _openConnect)],
+            actions: [settingsButton(context, remote), IconButton(tooltip: remote.isLocal ? 'Подключиться к устройству' : 'Другое устройство', icon: Icon(remote.isLocal ? Icons.computer : Icons.swap_horiz), onPressed: _openConnect)],
             bottom: remote.link == Link.online || remote.isLocal ? null : PreferredSize(
               preferredSize: const Size.fromHeight(3), child: LinearProgressIndicator(color: remote.link == Link.offline ? Colors.orange : accent)),
           ),
@@ -439,7 +439,7 @@ class _HomeScreenState extends State<HomeScreen> {
             if (remote.needsPin)
               Container(width: double.infinity, color: Colors.deepPurple.shade900, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                   child: Row(children: [
-                    const Expanded(child: Text('Этот ПК защищён PIN-кодом.')),
+                    const Expanded(child: Text('Это устройство защищено PIN-кодом.')),
                     TextButton(
                       onPressed: () async {
                         final token = await pinDialog(context, remote.api, title: Prefs.instance.nameFor(remote.api.base.authority, remote.pcName));
@@ -452,9 +452,9 @@ class _HomeScreenState extends State<HomeScreen> {
               Container(width: double.infinity, color: remote.isLocal ? Colors.blueGrey.shade800 : Colors.orange.shade900, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                   child: Row(children: [
                     Expanded(child: Text(remote.isLocal
-                        ? 'ПК не подключён. Можно вещать свои файлы и экран на свой сервер; очередь ПК показана для справки.'
-                        : remote.everConnected ? 'Нет связи с ПК. Подключаюсь снова…' : 'ПК не найден — приложение работает без него. Подключусь, когда он появится.')),
-                    TextButton(onPressed: _openConnect, child: Text(remote.isLocal ? 'Подключиться' : 'Другой ПК')),
+                        ? 'Нет подключённых устройств. Можно вещать свои файлы и экран на свой сервер; очередь другого устройства показана для справки.'
+                        : remote.everConnected ? 'Нет связи с устройством. Подключаюсь снова…' : 'Устройство не найдено — приложение работает само. Подключусь, когда оно появится.')),
+                    TextButton(onPressed: _openConnect, child: Text(remote.isLocal ? 'Подключиться' : 'Другое устройство')),
                   ])),
             Expanded(child: remote.state == null ? const Center(child: CircularProgressIndicator()) : pages[_tab]),
           ]),
@@ -647,7 +647,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
             ChoiceChip(label: Text(entry.value), selected: Prefs.instance.tunnelProvider == entry.key, onSelected: (_) => Prefs.instance.setTunnelProvider(entry.key)),
         ])),
       if (live && delivery == 'lan' && files.viewLink.isNotEmpty)
-        _LinkCard(title: 'Ссылка для VRChat', hint: 'Мгновенная ссылка по сети Wi-Fi: компьютер и телефон должны быть в одной сети. Задержка около полусекунды', url: Prefs.instance.withTransport(files.viewLink)),
+        _LinkCard(title: 'Ссылка для VRChat', hint: 'Мгновенная ссылка по сети Wi-Fi: устройства должны быть в одной сети. Задержка около полусекунды', url: Prefs.instance.withTransport(files.viewLink)),
       if (live && cloud && files.viewLink.isNotEmpty)
         _LinkCard(title: 'Ссылка для VRChat', hint: 'Бесплатная ссылка (${remote.broadcaster.tunnelName}). Работает, пока идёт эфир и приложение открыто', url: files.viewLink),
       // Громкость, скорость и качество, как на ПК. Любое из них отличное от обычного включает перекодирование на телефоне.
@@ -1058,22 +1058,22 @@ class LinksPage extends StatelessWidget {
     if (!remote.online) {
       // Без ПК остаётся ссылка на свой сервер: она не меняется, пока сервер на месте.
       final cloudLink = remote.files.active && Prefs.instance.fileDelivery != 'server' ? remote.files.viewLink : '';
-      if (server == null && cloudLink.isEmpty) return const Center(child: Padding(padding: EdgeInsets.all(24), child: Text('Ссылки появятся, когда подключитесь к ПК, добавите свой сервер в настройках или запустите эфир по бесплатной ссылке', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54))));
+      if (server == null && cloudLink.isEmpty) return const Center(child: Padding(padding: EdgeInsets.all(24), child: Text('Ссылки появятся, когда подключитесь к устройству, добавите свой сервер в настройках или запустите эфир по бесплатной ссылке', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54))));
       return ListView(padding: const EdgeInsets.all(12), children: [
         if (cloudLink.isNotEmpty)
           _LinkCard(
               title: Prefs.instance.fileDelivery == 'lan' ? 'Мгновенная ссылка по сети' : 'Бесплатная ссылка (${remote.broadcaster.tunnelName})',
-              hint: Prefs.instance.fileDelivery == 'lan' ? 'Для компьютера в одной сети с телефоном. Живёт, пока идёт эфир' : 'Файлы с телефона. Живёт, пока идёт эфир и приложение открыто',
+              hint: Prefs.instance.fileDelivery == 'lan' ? 'Для устройства в одной сети. Живёт, пока идёт эфир' : 'Файлы этого устройства. Живёт, пока идёт эфир и приложение открыто',
               url: Prefs.instance.fileDelivery == 'lan' ? Prefs.instance.withTransport(cloudLink) : cloudLink),
-        if (server != null) _LinkCard(title: 'Ссылка для плеера (свой сервер)', hint: 'Экран и файлы телефона на «${server.name}». Не меняется, пока сервер на месте', url: Prefs.instance.withTransport(server.viewLink)),
+        if (server != null) _LinkCard(title: 'Ссылка для плеера (свой сервер)', hint: 'Экран и файлы этого устройства на «${server.name}». Не меняется, пока сервер на месте', url: Prefs.instance.withTransport(server.viewLink)),
         if (server != null) _LinkCard(title: 'Запасная ссылка (HLS)', hint: 'Для Quest и сетей, где RTSP не проходит. Задержка около трёх секунд', url: server.hlsLink),
       ]);
     }
     // Сервер называет себя 127.0.0.1 — для телефона подставляем адрес ПК.
     final stream = s.playbackUrl.replaceFirst('127.0.0.1', host);
     final rows = <(String, String, String)>[
-      if (stream.isNotEmpty) ('Ссылка для плеера', stream, 'Основная ссылка эфира: работает на ПК и в вашей сети'),
-      for (final url in s.rtspLanUrls) ('Быстрая ссылка (rtspt)', Prefs.instance.withTransport(url), 'Для AVPro: нужна, если плеер в одной сети с ПК'),
+      if (stream.isNotEmpty) ('Ссылка для плеера', stream, 'Основная ссылка эфира: работает и в вашей сети'),
+      for (final url in s.rtspLanUrls) ('Быстрая ссылка (rtspt)', Prefs.instance.withTransport(url), 'Для AVPro: нужна, если плеер в одной сети с устройством'),
       if (s.tunnelUrl.isNotEmpty) ('Публичная ссылка', s.tunnelUrl, 'Для друзей через интернет'),
     ];
     if (rows.isEmpty) return const Center(child: Text('Ссылок пока нет', style: TextStyle(color: Colors.white54)));
@@ -1152,7 +1152,7 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Эфир на ПК')),
+        appBar: AppBar(title: const Text('Настройки эфира')),
         body: _paired == null
             ? const Center(child: CircularProgressIndicator())
             : ListenableBuilder(listenable: widget.remote, builder: (context, _) => _settings(widget.remote.state)),
@@ -1161,10 +1161,10 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
   Widget _pairingBanner() => Card(margin: const EdgeInsets.all(16), child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [const Icon(Icons.phonelink_lock), const SizedBox(width: 8), Expanded(child: Text('Настройки с ПК видны, менять их нельзя', style: Theme.of(context).textTheme.titleMedium))]),
         const SizedBox(height: 8),
-        const Text('Чтобы менять эфир с телефона, введите код с ПК: Настройки → Программа → «Код привязки телефона». Один раз.'),
+        const Text('Чтобы менять эфир подключённого устройства, введите его код: Настройки → Программа → «Код привязки устройства». Один раз.'),
         const SizedBox(height: 12),
         TextField(controller: _code, keyboardType: TextInputType.number, maxLength: 7, onSubmitted: (_) => _pair(),
-            decoration: const InputDecoration(labelText: 'Код с ПК', hintText: '123 456', border: OutlineInputBorder())),
+            decoration: const InputDecoration(labelText: 'Код привязки', hintText: '123 456', border: OutlineInputBorder())),
         const SizedBox(height: 8),
         FilledButton(onPressed: _busy ? null : _pair, child: _busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Привязать')),
       ])));
@@ -1206,7 +1206,7 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
       if (s.outputMode == 'remote') ...[
         title('Свой сервер'),
         if (s.servers.isEmpty)
-          const ListTile(title: Text('Серверов пока нет'), subtitle: Text('Добавить сервер можно в программе на ПК: Настройки → Сеть и серверы'))
+          const ListTile(title: Text('Серверов пока нет'), subtitle: Text('Добавить сервер можно в настройках этого или другого устройства: Настройки → Сеть и серверы'))
         else
           for (final server in s.servers)
             RadioListTile<String>(
@@ -1217,7 +1217,7 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
               onChanged: editable ? (v) => v == null ? null : _set({'activeServerId': v}) : null,
             ),
       ],
-      title('Прямой адрес (белый IP или домен ПК)'),
+      title('Прямой адрес (белый IP или домен)'),
       Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: TextField(
         controller: _ip,
         focusNode: _ipFocus,
@@ -1241,7 +1241,7 @@ class _StreamSettingsScreenState extends State<StreamSettingsScreen> {
         onSelectionChanged: editable ? (v) => _set({'encoderMode': v.first}) : null,
       )),
       const SizedBox(height: 24),
-      const Padding(padding: EdgeInsets.symmetric(horizontal: 16), child: Text('Порт, папка кеша, доступ из сети и добавление серверов меняются только на самом ПК.', style: TextStyle(color: Colors.white54))),
+      const Padding(padding: EdgeInsets.symmetric(horizontal: 16), child: Text('Порт, папка кеша, доступ из сети и добавление серверов меняются только на самом устройстве.', style: TextStyle(color: Colors.white54))),
       const SizedBox(height: 24),
     ]);
   }
@@ -1346,14 +1346,14 @@ class _DirectSummary extends StatelessWidget {
                   if (prefs.fileDelivery != 'server') ...[
                     Text(prefs.fileDelivery == 'lan' ? 'Файлы: локально, по сети Wi-Fi' : 'Файлы: бесплатная ссылка для друзей', style: const TextStyle(fontWeight: FontWeight.w600)),
                     const SizedBox(height: 2),
-                    const Text('Ссылка появится, когда начнётся эфир. Экран телефона по-прежнему идёт на свой сервер.', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                    const Text('Ссылка появится, когда начнётся эфир. Экран по-прежнему идёт на свой сервер.', style: TextStyle(color: Colors.white70, fontSize: 13)),
                   ] else ...[
-                  Text(server == null ? 'Нет ПК и нет своего сервера' : 'Свой сервер: ${server.name}', style: const TextStyle(fontWeight: FontWeight.w600)),
+                  Text(server == null ? 'Нет подключённых устройств и своего сервера' : 'Свой сервер: ${server.name}', style: const TextStyle(fontWeight: FontWeight.w600)),
                   const SizedBox(height: 2),
-                  Text(server == null ? 'Подключитесь к ПК или добавьте сервер в настройках' : '${prefs.standaloneQuality} · ${prefs.standaloneFps} к/с · ${server.viewLink}',
+                  Text(server == null ? 'Подключитесь к устройству или добавьте сервер в настройках' : '${prefs.standaloneQuality} · ${prefs.standaloneFps} к/с · ${server.viewLink}',
                       style: const TextStyle(color: Colors.white70, fontSize: 13)),
                   if (remote.phone.live && remote.phone.lacksH264)
-                    const Text('У телефона нет H.264: VRChat такой поток не воспроизведёт. Вещайте через ПК.', style: TextStyle(color: Colors.amber, fontSize: 12)),
+                    const Text('У этого устройства нет H.264: VRChat такой поток не воспроизведёт. Вещайте с другого устройства.', style: TextStyle(color: Colors.amber, fontSize: 12)),
                   ],
                 ])),
               ]),
@@ -1373,7 +1373,7 @@ Future<void> showQualitySheet(BuildContext context, Remote remote) => showModalB
           return SafeArea(child: Padding(padding: const EdgeInsets.all(16), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text('Качество эфира', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 4),
-            const Text('«Как в файле» отправляет видео без перекодирования: телефон не греется. Любое другое качество, скорость или громкость включают перекодирование.', style: TextStyle(color: Colors.white54, fontSize: 12)),
+            const Text('«Как в файле» отправляет видео без перекодирования: устройство не греется. Любое другое качество, скорость или громкость включают перекодирование.', style: TextStyle(color: Colors.white54, fontSize: 12)),
             const SizedBox(height: 12),
             SegmentedButton<String>(
               showSelectedIcon: false,
