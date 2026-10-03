@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 import 'byte_source.dart';
+import 'hls_source.dart';
 import 'media_server.dart';
 import 'mp4.dart';
 
@@ -52,8 +53,12 @@ abstract class EngineLinkResolver {
 }
 
 class DefaultLinkResolver implements LinkResolver, EngineLinkResolver {
-  static final _direct = RegExp(r'\.(mp4|m4v|mov|m4a)$', caseSensitive: false);
+  static final _m3u8 = RegExp(r'\.m3u8$', caseSensitive: false);
+  static final _mp4 = RegExp(r'\.(mp4|m4v|mov|m4a)$', caseSensitive: false);
+  // Остальное телефон перекодирует сам (MediaExtractor читает эти контейнеры и HLS), длительность узнаёт движок.
+  static final _direct = RegExp(r'\.(mp4|m4v|mov|m4a|mkv|webm|mp3|aac|ogg|opus|flac|wav|ts|m3u8)$', caseSensitive: false);
   static const maxPlaylist = 200;
+  HlsConcatServer? _hls; // сервер склейки HLS текущего ролика
 
   static bool isDirect(Uri uri) => _direct.hasMatch(uri.path);
 
@@ -65,7 +70,7 @@ class DefaultLinkResolver implements LinkResolver, EngineLinkResolver {
     final host = uri.host.toLowerCase();
     if (host.contains('youtube.com') || host.contains('youtu.be')) return _youtube(text, uri);
     if (isDirect(uri)) return [await _directInfo(uri)];
-    throw UnsupportedLink('Эту ссылку без ПК не разобрать: она уйдёт на ПК при подключении. Сами по себе работают YouTube и прямые ссылки на mp4.', sendToPc: true);
+    throw UnsupportedLink('Эту ссылку без ПК не разобрать: она уйдёт на ПК при подключении. Сами по себе работают YouTube и прямые ссылки на видео и звук (mp4, mkv, webm, mp3, m3u8).', sendToPc: true);
   }
 
   Future<List<LinkInfo>> _youtube(String text, Uri uri) async {
@@ -173,13 +178,25 @@ class DefaultLinkResolver implements LinkResolver, EngineLinkResolver {
       );
 
   Future<LinkInfo> _directInfo(Uri uri) async {
+    final name = uri.pathSegments.isEmpty || uri.pathSegments.last.isEmpty ? uri.host : uri.pathSegments.last; // сегменты уже раскодированы
+    if (_m3u8.hasMatch(uri.path)) {
+      try {
+        final playlist = await loadHls(uri);
+        return LinkInfo(url: uri.toString(), title: name, duration: playlist.duration, thumbnail: '', kind: 'direct');
+      } on HlsUnsupported catch (e) {
+        throw UnsupportedLink('${e.message}. Ссылка уйдёт на ПК при подключении', sendToPc: true);
+      } catch (e) {
+        throw UnsupportedLink('Не удалось открыть ссылку: $e');
+      }
+    }
+    if (!_mp4.hasMatch(uri.path)) return LinkInfo(url: uri.toString(), title: name, duration: 0, thumbnail: '', kind: 'direct');
     final source = HttpSource(uri);
     try {
       final info = await readMp4From(source);
-      final name = uri.pathSegments.isEmpty || uri.pathSegments.last.isEmpty ? uri.host : uri.pathSegments.last; // сегменты уже раскодированы
       return LinkInfo(url: uri.toString(), title: name, duration: info.duration, thumbnail: '', kind: 'direct');
-    } on Mp4Unsupported catch (e) {
-      throw UnsupportedLink('${e.message}. Ссылка уйдёт на ПК при подключении', sendToPc: true);
+    } on Mp4Unsupported {
+      // Кодеки не для отправки как есть (например HEVC): эфир перекодирует телефон.
+      return LinkInfo(url: uri.toString(), title: name, duration: 0, thumbnail: '', kind: 'direct');
     } catch (e) {
       throw UnsupportedLink('Не удалось открыть ссылку: $e');
     } finally {
@@ -190,7 +207,19 @@ class DefaultLinkResolver implements LinkResolver, EngineLinkResolver {
   /// Картинка и звук отдельно, до [maxHeight]: H.264 предпочтительнее (его телефоны декодируют аппаратно), VP9 — до 720p.
   @override
   Future<EngineSource> engineSource(SharedFile item, {required int maxHeight}) async {
-    if (item.kind != 'youtube') return EngineSource(video: item.url);
+    if (item.kind != 'youtube') {
+      final uri = Uri.tryParse(item.url);
+      if (uri == null || !_m3u8.hasMatch(uri.path)) return EngineSource(video: item.url);
+      // MediaExtractor плейлисты не читает: склеиваем сегменты в один поток на локальном адресе.
+      try {
+        final server = await HlsConcatServer.start(await loadHls(uri, maxHeight: maxHeight));
+        await _hls?.close();
+        _hls = server;
+        return EngineSource(video: server.url.toString());
+      } on HlsUnsupported catch (e) {
+        throw UnsupportedLink(e.message);
+      }
+    }
     final yt = YoutubeExplode();
     try {
       final manifest = await yt.videos.streamsClient.getManifest(VideoId(item.sourceId));

@@ -136,6 +136,7 @@ class TranscodeEngine(private val emit: (Map<String, Any?>) -> Unit) {
         if (hasVideo) {
             videoExtractor!!.selectTrack(videoTrack)
             videoFormat = videoExtractor.getTrackFormat(videoTrack)
+            if (videoFormat.containsKey(MediaFormat.KEY_DURATION)) emit(mapOf("type" to "dur", "seconds" to videoFormat.getLong(MediaFormat.KEY_DURATION) / 1e6))
             videoExtractor.seekTo(p.startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
         }
 
@@ -347,6 +348,7 @@ class TranscodeEngine(private val emit: (Map<String, Any?>) -> Unit) {
             if (extractor != null && track >= 0) {
                 extractor.selectTrack(track)
                 val format = extractor.getTrackFormat(track)
+            if (format.containsKey(MediaFormat.KEY_DURATION)) emit(mapOf("type" to "dur", "seconds" to format.getLong(MediaFormat.KEY_DURATION) / 1e6))
                 extractor.seekTo(p.startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
                 decoder = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME)!!)
                 decoder.configure(format, null, null, 0)

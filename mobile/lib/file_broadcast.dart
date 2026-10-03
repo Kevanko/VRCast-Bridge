@@ -272,6 +272,7 @@ class FileBroadcast extends ChangeNotifier {
         _changed();
         return true;
       }
+      if (current != null && !current.closed) debugPrint('эфир: формат другой, переподключаюсь: ${info.configKey}');
       await current?.close();
       _pub = null;
       connecting = true;
@@ -309,6 +310,11 @@ class FileBroadcast extends ChangeNotifier {
       return true;
     }
 
+    // Между роликами (разбор ссылки, запуск движка) цикл может молчать дольше 10 с: сервер за это время закрыл бы публикацию.
+    final keepAlive = Timer.periodic(const Duration(seconds: 4), (_) {
+      final pub = _pub;
+      if (pub != null && !pub.closed) unawaited(pub.keepAlive());
+    });
     try {
       while (_alive(run)) {
         final file = playlist[index];
@@ -353,7 +359,7 @@ class FileBroadcast extends ChangeNotifier {
             engine = await _startEngine(file, startAt);
             _engine = engine;
             final info = await engine.configured(const Duration(seconds: 25));
-            duration = file.duration > 0 ? file.duration : 0;
+            duration = file.duration > 0 ? file.duration : engine.sourceSeconds;
             final ok = await ensureSink(info);
             if (ok == null) return;
             if (ok == false) continue;
@@ -436,6 +442,7 @@ class FileBroadcast extends ChangeNotifier {
         _changed();
       }
     } finally {
+      keepAlive.cancel();
       await _pub?.close();
       _pub = null;
     }
@@ -778,6 +785,7 @@ class _EngineRun {
   Map<String, dynamic>? _video;
   Map<String, dynamic>? _audio;
   bool ended = false;
+  double sourceSeconds = 0; // длительность источника, если движок её узнал
 
   void _onEvent(Map<String, dynamic> event) {
     switch (event['type']) {
@@ -785,6 +793,8 @@ class _EngineRun {
         _video = event;
       case 'acfg':
         _audio = event;
+      case 'dur':
+        sourceSeconds = (event['seconds'] as num).toDouble();
       default:
         _queue.add(event);
     }
