@@ -8,6 +8,7 @@ import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vrcast_remote/api.dart';
 import 'package:vrcast_remote/discovery.dart';
+import 'package:vrcast_remote/file_broadcast.dart';
 import 'package:vrcast_remote/media_server.dart';
 import 'package:vrcast_remote/main.dart';
 import 'package:vrcast_remote/models.dart';
@@ -39,6 +40,39 @@ Remote makeRemote(MockClient client, {Link link = Link.online, Map<String, dynam
 }
 
 Widget app(Widget home) => MaterialApp(scrollBehavior: const NoStretchScrollBehavior(), home: home);
+
+/// Эфир файлов без сети и ffmpeg: запоминает команды и показывает то же состояние, что настоящий.
+class FakeFiles extends FileBroadcast {
+  final calls = <String>[];
+  @override
+  Future<void> start(OwnServer target, List<SharedFile> files, {int from = 0}) async {
+    calls.add('start ${target.host} from=$from of=${files.length}');
+    server = target;
+    playlist = files;
+    index = from;
+    active = true;
+    paused = false;
+    connecting = false;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> stop() async {
+    if (!active) return;
+    calls.add('stop');
+    active = false;
+    notifyListeners();
+  }
+
+  @override
+  void pause() { calls.add('pause'); paused = true; notifyListeners(); }
+  @override
+  void resume() { calls.add('resume'); paused = false; notifyListeners(); }
+  @override
+  void next() => calls.add('next');
+  @override
+  void previous() => calls.add('previous');
+}
 
 /// Заглушка отправки экрана: без записи экрана и WebRTC, только запоминает вызовы.
 class FakeStream extends PhoneStream {
@@ -142,6 +176,8 @@ void main() {
     await tester.pumpWidget(app(HomeScreen(remote: remote, onConnect: (_, __) {}, onDisconnect: () {})));
     expect(find.textContaining('Нет связи с ПК'), findsOneWidget);
     expect(find.text('Без ПК'), findsNothing, reason: 'отдельного режима «Без ПК» больше нет');
+    await tester.tap(find.text('Очередь'));
+    await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('demo.mp4'), findsWidgets, reason: 'последняя очередь остаётся на экране');
   });
 
@@ -213,15 +249,86 @@ void main() {
     expect(find.textContaining('своего сервера нет'), findsOneWidget);
   });
 
-  testWidgets('без ПК управление эфиром объясняет, что нужен ПК', (tester) async {
+  testWidgets('ПК недоступен при запуске: вместо вечной загрузки сразу рабочий экран, свои файлы доступны', (tester) async {
     tallScreen(tester);
-    final calls = <String>[];
-    final remote = Remote.local(phone: FakeStream());
+    Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: '/tmp/a.mp4', title: 'Мой ролик.mp4')]);
+    // Подключение к ПК ещё не началось (или не удаётся): состояния с ПК нет, но экран не должен ждать его вечно.
+    final remote = Remote(Api(Uri.parse('http://192.168.1.5:4717'), client: MockClient((_) async => throw const SocketException('нет сети'))), pcName: 'Дом', files: FakeFiles());
+    expect(remote.state, isNotNull);
+    await tester.pumpWidget(app(HomeScreen(remote: remote, onConnect: (_, __) {}, onDisconnect: () {})));
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('Эфир остановлен'), findsOneWidget);
+    await tester.tap(find.text('Очередь'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Мой ролик.mp4'), findsOneWidget);
+  });
+
+  testWidgets('без ПК: плеер своих файлов — без файлов и без сервера объясняет, что нужно', (tester) async {
+    tallScreen(tester);
+    final files = FakeFiles();
+    final remote = Remote.local(phone: FakeStream(), files: files);
     await tester.pumpWidget(app(Scaffold(body: NowPlayingPage(remote: remote))));
+    expect(find.text('Нет файлов'), findsOneWidget);
+    expect(find.text('Эфир остановлен'), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.play_arrow));
+    await tester.pump();
+    expect(find.textContaining('Нет своего сервера'), findsOneWidget);
+    Prefs.instance.saveOwnServer(OwnServer(name: 'VPS', host: 'vps.example.com', key: 'k'));
+    tester.state<ScaffoldMessengerState>(find.byType(ScaffoldMessenger)).clearSnackBars(); // первое сообщение убираем
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.play_arrow));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Сначала добавьте файлы'), findsOneWidget);
+    expect(files.calls, isEmpty);
+  });
+
+  testWidgets('без ПК файл из очереди уходит в эфир на свой сервер; пауза, следующий и остановка работают', (tester) async {
+    tallScreen(tester);
+    Prefs.instance.saveOwnServer(OwnServer(name: 'VPS', host: 'vps.example.com', key: 'k'));
+    Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: '/tmp/a.mp4', title: 'Первый.mp4'), SharedFile(id: 'b', path: '/tmp/b.mp4', title: 'Второй.mp4')]);
+    final files = FakeFiles();
+    final remote = Remote.local(phone: FakeStream(), files: files);
+    await tester.pumpWidget(app(HomeScreen(remote: remote, onConnect: (_, __) {}, onDisconnect: () {})));
+    await tester.tap(find.text('Очередь'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.textContaining('Нажмите, чтобы вещать на свой сервер'), findsNWidgets(2));
+    await tester.tap(find.text('Второй.mp4'));
+    await tester.pump();
+    expect(files.calls, ['start vps.example.com from=1 of=2']);
+    expect(find.text('Идёт эфир на ваш сервер'), findsOneWidget);
+
+    await tester.tap(find.text('Сейчас'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Второй.mp4'), findsOneWidget);
+    expect(find.text('Идёт эфир на сервер «VPS»'), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.pause));
+    await tester.pump();
+    expect(files.calls.last, 'pause');
+    expect(find.text('Пауза'), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.play_arrow));
+    await tester.pump();
+    expect(files.calls.last, 'resume');
     await tester.tap(find.byIcon(Icons.skip_next));
     await tester.pump();
-    expect(find.textContaining('Нет связи с ПК'), findsOneWidget);
-    expect(calls, isEmpty);
+    expect(files.calls.last, 'next');
+    await tester.tap(find.text('Остановить эфир файлов'));
+    await tester.pump();
+    expect(files.calls.last, 'stop');
+    expect(find.text('Эфир остановлен'), findsOneWidget);
+  });
+
+  testWidgets('когда ПК на связи, свои файлы не запускаются сами по себе, а ждут общей очереди', (tester) async {
+    tallScreen(tester);
+    Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: '/tmp/a.mp4', title: 'Первый.mp4')]);
+    final files = FakeFiles();
+    final remote = makeRemote(MockClient((_) async => json({})), token: 'tok');
+    remote.myId = 'm1';
+    expect(remote.files, isNot(same(files)));
+    await tester.pumpWidget(app(Scaffold(body: ListenableBuilder(listenable: remote, builder: (_, __) => QueuePage(remote: remote)))));
+    expect(find.text('Добавляется в общую очередь…'), findsOneWidget);
+    await tester.tap(find.text('Первый.mp4'));
+    await tester.pump();
+    expect(files.calls, isEmpty);
   });
 
   testWidgets('ссылки без ПК: показывается ссылка своего сервера', (tester) async {

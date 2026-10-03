@@ -429,7 +429,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Container(width: double.infinity, color: remote.isLocal ? Colors.blueGrey.shade800 : Colors.orange.shade900, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                   child: Row(children: [
                     Expanded(child: Text(remote.isLocal
-                        ? 'ПК не подключён. Показана последняя копия; что добавите, уйдёт на ПК при подключении.'
+                        ? 'ПК не подключён. Можно вещать свои файлы и экран на свой сервер; очередь ПК показана для справки.'
                         : 'Нет связи с ПК. Подключаюсь снова…')),
                     TextButton(onPressed: _openConnect, child: Text(remote.isLocal ? 'Подключиться' : 'Другой ПК')),
                   ])),
@@ -548,6 +548,82 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
 
   Future<void> _do(Future<String?> action) async { final e = await action; if (mounted) toastError(context, e); }
 
+  /// Без ПК: плеер своих файлов. Вещание идёт прямо с телефона на свой сервер.
+  List<Widget> _localControls(Remote remote) {
+    final files = remote.files;
+    final live = files.active;
+    final seekable = live && !files.connecting && files.duration > 0;
+    final position = _drag ?? files.position;
+    final server = Prefs.instance.currentOwnServer;
+    final title = remote.phone.live ? 'Экран телефона' : (files.current?.title ?? (Prefs.instance.sharedFiles.isEmpty ? 'Нет файлов' : 'Ничего не играет'));
+    final cloud = Prefs.instance.fileDelivery == 'cloudflare';
+    final liveStatus = !live ? 'Эфир остановлен'
+        : cloud ? (remote.cloudServes == true ? 'Идёт эфир по ссылке Cloudflare' : remote.cloudServes == false ? 'Ссылка пока не открывается снаружи' : 'Проверяю ссылку…')
+        : 'Идёт эфир на сервер «${server?.name ?? ''}»';
+    final status = remote.phone.live ? 'Идёт экран телефона ${remote.streamTarget}'
+        : remote.cloudStarting ? 'Поднимаю ссылку Cloudflare…'
+        : files.connecting ? 'Подключаюсь к серверу…' : files.paused ? 'Пауза' : liveStatus;
+    return [
+      AspectRatio(aspectRatio: 16 / 9, child: Container(
+        decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(16)),
+        child: Center(child: Icon(live ? Icons.cast_connected : Icons.cast, size: 56, color: Colors.white24)),
+      )),
+      const SizedBox(height: 16),
+      Text(title, style: Theme.of(context).textTheme.titleLarge, maxLines: 2, overflow: TextOverflow.ellipsis),
+      const SizedBox(height: 4),
+      Row(children: [
+        Icon(Icons.circle, size: 10, color: remote.phone.live ? Colors.greenAccent : remote.cloudStarting ? Colors.amber : live ? (files.paused || files.connecting || (cloud && remote.cloudServes != true) ? Colors.amber : Colors.greenAccent) : Colors.grey),
+        const SizedBox(width: 6),
+        Expanded(child: Text(status, style: const TextStyle(color: Colors.white70))),
+      ]),
+      if (files.error != null) Padding(padding: const EdgeInsets.only(top: 4), child: Text(files.error!, style: const TextStyle(color: Colors.redAccent, fontSize: 13))),
+      if (files.warning != null && live) Padding(padding: const EdgeInsets.only(top: 4), child: Text('Пропущен: ${files.warning}', style: const TextStyle(color: Colors.amber, fontSize: 12))),
+      if (Prefs.instance.sharedFiles.isEmpty)
+        const Padding(padding: EdgeInsets.only(top: 4), child: Text('Добавьте файлы на вкладке «Очередь»: они остаются на телефоне. Подходят mp4, mov и m4a с H.264 и AAC.', style: TextStyle(color: Colors.white54, fontSize: 12))),
+      const SizedBox(height: 8),
+      Slider(
+        value: seekable ? position.clamp(0, files.duration).toDouble() : 0,
+        max: seekable ? files.duration : 1,
+        onChanged: seekable ? (v) => setState(() => _drag = v) : null,
+        onChangeEnd: seekable ? (v) {
+          setState(() => _drag = null);
+          files.seek(v);
+        } : null,
+      ),
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [Text(formatTime(position)), Text(seekable ? formatTime(files.duration) : '')])),
+      const SizedBox(height: 8),
+      Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+        IconButton(iconSize: 36, tooltip: 'Назад', icon: const Icon(Icons.skip_previous), onPressed: live ? files.previous : null),
+        const SizedBox(width: 8),
+        IconButton.filled(iconSize: 44, tooltip: files.paused || !live ? 'Продолжить' : 'Пауза', icon: Icon(live && !files.paused ? Icons.pause : Icons.play_arrow),
+            onPressed: () => !live ? _do(remote.startFileBroadcast()) : files.paused ? files.resume() : files.pause()),
+        const SizedBox(width: 8),
+        IconButton(iconSize: 36, tooltip: 'Далее', icon: const Icon(Icons.skip_next), onPressed: live ? files.next : null),
+      ]),
+      const SizedBox(height: 8),
+      if (!live && !remote.cloudStarting)
+        Padding(padding: const EdgeInsets.only(bottom: 8), child: SegmentedButton<String>(
+          showSelectedIcon: false,
+          segments: const [
+            ButtonSegment(value: 'server', icon: Icon(Icons.cloud_upload_outlined), label: Text('Свой сервер')),
+            ButtonSegment(value: 'cloudflare', icon: Icon(Icons.link), label: Text('Ссылка Cloudflare')),
+          ],
+          selected: {Prefs.instance.fileDelivery},
+          onSelectionChanged: (value) => Prefs.instance.setFileDelivery(value.first),
+        )),
+      if (live && cloud && files.viewLink.isNotEmpty)
+        _LinkCard(title: 'Ссылка для VRChat', hint: 'Бесплатная ссылка Cloudflare. Работает, пока идёт эфир и приложение открыто', url: files.viewLink),
+      Wrap(spacing: 8, runSpacing: 8, alignment: WrapAlignment.center, children: [
+        PopupMenuButton<String>(
+          onSelected: files.setLoop,
+          itemBuilder: (_) => [for (final e in _loops.entries) CheckedPopupMenuItem(value: e.key, checked: e.key == files.loopMode, child: Text(e.value))],
+          child: Chip(avatar: const Icon(Icons.repeat, size: 18), label: Text(_loops[files.loopMode] ?? files.loopMode)),
+        ),
+      ]),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final remote = widget.remote;
@@ -557,6 +633,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     final title = s.phoneSource || direct ? 'Экран телефона' : s.isScreen ? 'Захват экрана' : (s.current?.title ?? (s.queue.isEmpty ? 'Очередь пуста' : 'Ничего не играет'));
     final seekable = s.canSeek && s.duration > 0;
     return ListView(padding: const EdgeInsets.all(16), children: [
+      if (!remote.online) ..._localControls(remote) else ...[
       Preview(remote: remote),
       const SizedBox(height: 16),
       Text(title, style: Theme.of(context).textTheme.titleLarge, maxLines: 2, overflow: TextOverflow.ellipsis),
@@ -606,6 +683,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
           child: Chip(avatar: const Icon(Icons.repeat, size: 18), label: Text(_loops[s.loopMode] ?? s.loopMode)),
         ),
       ]),
+      ],
       const SizedBox(height: 12),
       if (remote.online)
         _StreamSummary(state: s, onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => StreamSettingsScreen(remote: remote)))),
@@ -615,9 +693,14 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
           ? FilledButton.tonalIcon(onPressed: () => _do(remote.stopPhoneBroadcast()), icon: const Icon(Icons.stop_screen_share), label: const Text('Остановить трансляцию экрана'))
           : OutlinedButton.icon(onPressed: () => _do(remote.startPhoneBroadcast()), icon: const Icon(Icons.screen_share), label: Text(remote.streamTarget.isEmpty ? 'Транслировать экран телефона' : 'Транслировать экран телефона ${remote.streamTarget}')),
       const SizedBox(height: 8),
-      s.running && !s.phoneSource
-          ? OutlinedButton.icon(onPressed: () => _do(remote.run(remote.api.stop)), icon: const Icon(Icons.stop_circle_outlined), label: const Text('Остановить эфир'))
-          : FilledButton.icon(onPressed: () => _do(remote.run(() => remote.api.startQueue())), icon: const Icon(Icons.podcasts), label: const Text('Начать эфир')),
+      if (!remote.online)
+        remote.files.active || remote.cloudStarting
+            ? OutlinedButton.icon(onPressed: remote.files.stop, icon: const Icon(Icons.stop_circle_outlined), label: const Text('Остановить эфир файлов'))
+            : FilledButton.icon(onPressed: () => _do(remote.startFileBroadcast()), icon: const Icon(Icons.podcasts), label: const Text('Начать эфир файлов с телефона'))
+      else
+        s.running && !s.phoneSource
+            ? OutlinedButton.icon(onPressed: () => _do(remote.run(remote.api.stop)), icon: const Icon(Icons.stop_circle_outlined), label: const Text('Остановить эфир'))
+            : FilledButton.icon(onPressed: () => _do(remote.run(() => remote.api.startQueue())), icon: const Icon(Icons.podcasts), label: const Text('Начать эфир')),
     ]);
   }
 }
@@ -682,6 +765,8 @@ class _QueuePageState extends State<QueuePage> {
   Widget build(BuildContext context) {
     final remote = widget.remote;
     final s = remote.state!;
+    // Без связи файлы других устройств из старой копии очереди не показываем: играть их нечем.
+    final queue = remote.online ? s.queue : s.queue.where((q) => q.member.isEmpty).toList();
     return Column(children: [
       Padding(padding: const EdgeInsets.all(12), child: Row(children: [
         Expanded(child: TextField(controller: _link, keyboardType: TextInputType.url, onSubmitted: (_) => _add(),
@@ -703,25 +788,28 @@ class _QueuePageState extends State<QueuePage> {
               trailing: IconButton(tooltip: 'Убрать', icon: const Icon(Icons.close), onPressed: () => Prefs.instance.removePendingLink(pending)),
             ),
           // Свои файлы, которых ещё нет в общей очереди (нет связи с ПК или ещё не дошли).
-          for (final file in Prefs.instance.sharedFiles.where((f) => !s.queue.any((q) => q.member == remote.myId && q.ownerItemId == f.id)))
+          for (final file in Prefs.instance.sharedFiles.where((f) => !remote.online || !s.queue.any((q) => q.member == remote.myId && q.ownerItemId == f.id)))
             ListTile(
               dense: true,
-              leading: const Icon(Icons.phone_android),
-              title: Text(file.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-              subtitle: Text(remote.online ? 'Добавляется в общую очередь…' : 'Появится в общей очереди при подключении к ПК'),
+              leading: Icon(remote.files.current?.id == file.id ? Icons.equalizer : Icons.phone_android, color: remote.files.current?.id == file.id ? accent : null),
+              title: Text(file.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: remote.files.current?.id == file.id ? FontWeight.bold : null)),
+              subtitle: Text(remote.online
+                  ? 'Добавляется в общую очередь…'
+                  : remote.files.current?.id == file.id ? 'Идёт эфир на ваш сервер' : 'Нажмите, чтобы вещать на свой сервер. В общую очередь встанет при подключении к ПК'),
+              onTap: remote.online ? null : () async { final e = await remote.startFileBroadcast(fromId: file.id); if (context.mounted) toastError(context, e); },
               trailing: IconButton(tooltip: 'Убрать', icon: const Icon(Icons.close), onPressed: () => Prefs.instance.removeSharedFile(file.id)),
             ),
         ]),
       ),
-      Expanded(child: s.queue.isEmpty
+      Expanded(child: queue.isEmpty
           ? const Center(child: Text('Очередь пуста', style: TextStyle(color: Colors.white54)))
           : ReorderableListView.builder(
-              itemCount: s.queue.length,
+              itemCount: queue.length,
               onReorderItem: (from, to) {
-                remote.run(() => remote.api.moveInQueue(s.queue[from].id, to)).then((e) { if (mounted) toastError(context, e); });
+                remote.run(() => remote.api.moveInQueue(queue[from].id, to)).then((e) { if (mounted) toastError(context, e); });
               },
               itemBuilder: (context, i) {
-                final item = s.queue[i];
+                final item = queue[i];
                 final playing = item.id == s.currentId && s.running;
                 return Dismissible(
                   key: ValueKey(item.id),
@@ -762,8 +850,12 @@ class LinksPage extends StatelessWidget {
     final server = Prefs.instance.currentOwnServer;
     if (!remote.online) {
       // Без ПК остаётся ссылка на свой сервер: она не меняется, пока сервер на месте.
-      if (server == null) return const Center(child: Padding(padding: EdgeInsets.all(24), child: Text('Ссылки появятся, когда подключитесь к ПК или добавите свой сервер в настройках', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54))));
-      return ListView(padding: const EdgeInsets.all(12), children: [_LinkCard(title: 'Ссылка для плеера (свой сервер)', hint: 'Экран телефона на «${server.name}». Не меняется, пока сервер на месте', url: server.viewLink)]);
+      final cloudLink = remote.files.active && Prefs.instance.fileDelivery == 'cloudflare' ? remote.files.viewLink : '';
+      if (server == null && cloudLink.isEmpty) return const Center(child: Padding(padding: EdgeInsets.all(24), child: Text('Ссылки появятся, когда подключитесь к ПК, добавите свой сервер в настройках или запустите эфир по бесплатной ссылке', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54))));
+      return ListView(padding: const EdgeInsets.all(12), children: [
+        if (cloudLink.isNotEmpty) _LinkCard(title: 'Бесплатная ссылка Cloudflare', hint: 'Файлы с телефона. Живёт, пока идёт эфир и приложение открыто', url: cloudLink),
+        if (server != null) _LinkCard(title: 'Ссылка для плеера (свой сервер)', hint: 'Экран и файлы телефона на «${server.name}». Не меняется, пока сервер на месте', url: server.viewLink),
+      ]);
     }
     // Сервер называет себя 127.0.0.1 — для телефона подставляем адрес ПК.
     final stream = s.playbackUrl.replaceFirst('127.0.0.1', host);
@@ -1039,12 +1131,18 @@ class _DirectSummary extends StatelessWidget {
                 Icon(Icons.cloud_upload_outlined, color: server == null ? Colors.amber : Colors.greenAccent),
                 const SizedBox(width: 12),
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  if (prefs.fileDelivery == 'cloudflare') ...[
+                    const Text('Файлы: бесплатная ссылка Cloudflare', style: TextStyle(fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 2),
+                    const Text('Ссылка появится, когда начнётся эфир. Экран телефона по-прежнему идёт на свой сервер.', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                  ] else ...[
                   Text(server == null ? 'Нет ПК и нет своего сервера' : 'Свой сервер: ${server.name}', style: const TextStyle(fontWeight: FontWeight.w600)),
                   const SizedBox(height: 2),
                   Text(server == null ? 'Подключитесь к ПК или добавьте сервер в настройках' : '${prefs.standaloneQuality} · ${prefs.standaloneFps} к/с · ${server.viewLink}',
                       style: const TextStyle(color: Colors.white70, fontSize: 13)),
                   if (remote.phone.live && remote.phone.lacksH264)
                     const Text('У телефона нет H.264: VRChat такой поток не воспроизведёт. Вещайте через ПК.', style: TextStyle(color: Colors.amber, fontSize: 12)),
+                  ],
                 ])),
               ]),
             ),

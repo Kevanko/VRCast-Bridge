@@ -46,3 +46,6 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# cloudflared скачивается скриптом tool/fetch_cloudflared.sh и в репозиторий не кладётся
+android/app/src/*/jniLibs/

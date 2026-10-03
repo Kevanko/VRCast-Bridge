@@ -26,6 +26,10 @@ class MainActivity : FlutterActivity() {
                     })
                 }
                 "stop" -> { stopService(Intent(this, ScreenShareService::class.java)); result.success(null) }
+                // Эфир файлов: служба держит приложение живым при погашенном экране.
+                "broadcastStart" -> { ContextCompat.startForegroundService(this, Intent(this, BroadcastService::class.java)); result.success(null) }
+                "broadcastStop" -> { stopService(Intent(this, BroadcastService::class.java)); result.success(null) }
+                "nativeLibraryDir" -> result.success(applicationInfo.nativeLibraryDir)
                 else -> result.notImplemented()
             }
         }

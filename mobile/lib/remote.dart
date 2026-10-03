@@ -6,6 +6,9 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
+import 'cloudflare_tunnel.dart';
+import 'file_broadcast.dart';
+import 'hls.dart';
 import 'media_server.dart';
 import 'models.dart';
 import 'own_server.dart';
@@ -15,48 +18,73 @@ enum Link { idle, connecting, online, offline }
 
 /// Соединение с одним ПК: живое состояние по SSE и команды.
 class Remote extends ChangeNotifier {
-  Remote(this.api, {this.pcName = '', PhoneStream? phone, MediaServer? media})
+  Remote(this.api, {this.pcName = '', PhoneStream? phone, MediaServer? media, FileBroadcast? files, Future<String?> Function()? cloudflared})
       : isLocal = false,
+        _cloudflared = cloudflared ?? bundledCloudflared,
         phone = phone ?? PhoneStream(),
+        files = files ?? FileBroadcast(),
         media = media ?? MediaServer(files: () => Prefs.instance.sharedFiles) {
     _listenPhone();
+    // До первой связи показываем последнюю копию: если ПК недоступен, приложение всё равно работает со своими файлами.
+    state = _cachedState();
   }
 
   /// Без ПК: приложение работает от своих данных (последняя копия очереди и настроек ПК, свои серверы).
   /// Подключение к ПК потом ничего не ломает: данные синхронизируются в обе стороны.
-  Remote.local({PhoneStream? phone})
+  Remote.local({PhoneStream? phone, FileBroadcast? files, Future<String?> Function()? cloudflared})
       : api = Api(Uri.parse('http://127.0.0.1:1')),
         pcName = '',
         isLocal = true,
+        _cloudflared = cloudflared ?? bundledCloudflared,
+        files = files ?? FileBroadcast(),
         media = MediaServer(files: () => Prefs.instance.sharedFiles),
         phone = phone ?? PhoneStream() {
     _listenPhone();
+    state = _cachedState();
+    link = Link.offline;
+  }
+
+  static BridgeState _cachedState() {
     final cached = Prefs.instance.cachedState;
     try {
-      state = BridgeState.offlineFrom(cached == null ? <String, dynamic>{} : (jsonDecode(cached) as Map).cast<String, dynamic>());
+      return BridgeState.offlineFrom(cached == null ? <String, dynamic>{} : (jsonDecode(cached) as Map).cast<String, dynamic>());
     } catch (_) {
-      state = BridgeState.offlineFrom(const {});
+      return BridgeState.offlineFrom(const {});
     }
-    link = Link.offline;
   }
 
   final Api api;
   final String pcName;
   final bool isLocal;
   final MediaServer media; // отдаёт файлы этого телефона в общую очередь
+  final FileBroadcast files; // эфир файлов прямо с телефона на свой сервер или по бесплатной ссылке, без ПК
+  final Future<String?> Function() _cloudflared;
+  bool cloudStarting = false; // поднимается бесплатная ссылка
+  bool? cloudServes; // ссылка отвечает снаружи: null — ещё проверяем
+  _Cloud? _cloud;
   bool _phoneViaPc = false;
   bool needsPin = false; // ПК закрыт PIN-кодом, ключа у телефона нет
   String myId = ''; // номер этого телефона в группе на ПК
 
   bool get online => link == Link.online;
 
-  void _listenPhone() => _phoneSub = phone.changes.listen((_) => notifyListeners());
+  void _listenPhone() {
+    _phoneSub = phone.changes.listen((_) => notifyListeners());
+    files.addListener(_onFiles);
+  }
+
+  void _onFiles() {
+    // Эфир кончился — бесплатная ссылка больше не нужна.
+    if (!files.active && _cloud != null) _stopCloud();
+    notifyListeners();
+  }
   BridgeState? state;
   Link link = Link.idle;
   String? error;
   bool _closed = false;
   Timer? _tick;
   final PhoneStream phone;
+  bool _hadConnection = false;
   bool _synced = false;
   bool _contributing = false;
   int _seenRevision = 0;
@@ -76,14 +104,14 @@ class Remote extends ChangeNotifier {
   Future<void> _loop() async {
     var delay = 1;
     while (!_closed) {
-      link = state == null ? Link.connecting : Link.offline;
+      link = _hadConnection ? Link.offline : Link.connecting;
       notifyListeners();
       try {
         var first = true; // новое соединение приняли — значит ключ верный; на лету просьбу о PIN события не сбрасывают
         await for (final next in api.events()) {
           if (_closed) return;
           if (first) { needsPin = false; first = false; }
-          state = next; link = Link.online; error = null; delay = 1;
+          state = next; link = Link.online; error = null; delay = 1; _hadConnection = true;
           // ПК остановил эфир с телефона (или он оборвался) — выключаем и запись экрана.
           final since = phone.startedAt;
           if (phone.live && !next.phoneSource && since != null && DateTime.now().difference(since).inSeconds > 8) phone.stop();
@@ -202,6 +230,80 @@ class Remote extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Файлы телефона в эфир прямо на свой сервер (без ПК): mp4 с H.264 и AAC уходят как есть, без перекодирования.
+  Future<String?> startFileBroadcast({String? fromId}) async {
+    final prefs = Prefs.instance;
+    final cloud = prefs.fileDelivery == 'cloudflare';
+    final server = prefs.currentOwnServer;
+    if (!cloud && server == null) return 'Нет своего сервера. Добавьте его в настройках или выберите бесплатную ссылку.';
+    final list = prefs.sharedFiles;
+    if (list.isEmpty) return 'Сначала добавьте файлы на вкладке «Очередь».';
+    if (cloudStarting) return null;
+    try {
+      // Экран и файлы идут на один путь сервера — одновременно нельзя.
+      if (phone.live && !_phoneViaPc) await phone.stop();
+      final index = fromId == null ? 0 : list.indexWhere((f) => f.id == fromId);
+      final from = index < 0 ? 0 : index;
+      if (!cloud) {
+        await files.start(server!, list, from: from);
+        return null;
+      }
+      return await _startCloud(list, from);
+    } catch (e) {
+      return '$e';
+    }
+  }
+
+  /// Бесплатная ссылка Cloudflare: телефон сам раздаёт HLS, а туннель выводит его в интернет. ПК и сервер не нужны.
+  Future<String?> _startCloud(List<SharedFile> list, int from) async {
+    final binary = await _cloudflared();
+    if (binary == null) return 'В этой сборке нет Cloudflare. Используйте свой сервер.';
+    await files.stop();
+    await _stopCloud();
+    cloudStarting = true;
+    cloudServes = null;
+    notifyListeners();
+    final sink = HlsSink();
+    final server = HlsServer(sink);
+    CloudflareTunnel? tunnel;
+    try {
+      final port = await server.start();
+      tunnel = await CloudflareTunnel.start(binary: binary, localPort: port);
+      final started = tunnel;
+      _cloud = _Cloud(server, started);
+      await files.startSink(sink, '${started.url}/stream/live.m3u8', list, from: from);
+      // Туннель упал во время эфира — не делаем вид, что ссылка жива.
+      unawaited(started.closed.then((_) {
+        if (_cloud?.tunnel == started && files.active) files.fail('Ссылка Cloudflare оборвалась. Запустите эфир снова.');
+      }));
+      unawaited(started.waitServes('/stream/live.m3u8', timeout: const Duration(seconds: 45)).then((ok) {
+        if (_cloud?.tunnel != started) return;
+        cloudServes = ok;
+        notifyListeners();
+      }));
+      return null;
+    } on CloudflareException catch (e) {
+      await server.stop();
+      return e.message;
+    } catch (e) {
+      await tunnel?.stop();
+      await server.stop();
+      _cloud = null;
+      return '$e';
+    } finally {
+      cloudStarting = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _stopCloud() async {
+    final cloud = _cloud;
+    _cloud = null;
+    cloudServes = null;
+    await cloud?.tunnel.stop();
+    await cloud?.server.stop();
+  }
+
   /// Куда пойдёт экран телефона: через ПК (он есть и на связи) или напрямую на свой сервер.
   String get streamTarget {
     if (online) return 'через ПК';
@@ -216,6 +318,7 @@ class Remote extends ChangeNotifier {
       if (server == null) return 'ПК не на связи, и своего сервера нет. Добавьте сервер в настройках или подключитесь к ПК.';
       try {
         _phoneViaPc = false;
+        await files.stop();
         await phone.startDirect(server, quality: Prefs.instance.standaloneQuality, fps: Prefs.instance.standaloneFps);
         notifyListeners();
         return null;
@@ -247,6 +350,10 @@ class Remote extends ChangeNotifier {
   @override
   void dispose() {
     Prefs.instance.removeListener(_prefsChanged);
+    files.removeListener(_onFiles);
+    files.stop();
+    _stopCloud();
+    files.dispose();
     _shareTimer?.cancel();
     media.stop();
     phone.stop();
@@ -256,6 +363,12 @@ class Remote extends ChangeNotifier {
     api.close();
     super.dispose();
   }
+}
+
+class _Cloud {
+  _Cloud(this.server, this.tunnel);
+  final HlsServer server;
+  final CloudflareTunnel tunnel;
 }
 
 class SavedPc {
@@ -290,6 +403,8 @@ class Prefs extends ChangeNotifier {
   String? ownServerId;
   // Файлы этого телефона, которые он отдаёт в общую очередь, пока подключён. shareRevision растёт при любой правке файлов и серверов.
   List<SharedFile> sharedFiles = [];
+  // Как вещать файлы без ПК: на свой сервер ('server') или по бесплатной ссылке Cloudflare ('cloudflare').
+  String fileDelivery = 'server';
   int shareRevision = 0;
   // Для проверки на эмуляторе, где адрес телефона не виден ПК: «адрес:порт», который назвать ПК, и порт сервера файлов.
   String mediaAddress = '';
@@ -307,6 +422,7 @@ class Prefs extends ChangeNotifier {
     ownServers = [for (final raw in p.getStringList('ownServers') ?? const []) OwnServer.fromJson((jsonDecode(raw) as Map).cast<String, dynamic>())];
     ownServerId = p.getString('ownServerId');
     sharedFiles = [for (final raw in p.getStringList('sharedFiles') ?? const []) SharedFile.fromJson((jsonDecode(raw) as Map).cast<String, dynamic>())];
+    fileDelivery = p.getString('fileDelivery') == 'cloudflare' ? 'cloudflare' : 'server';
     mediaAddress = p.getString('mediaAddress') ?? '';
     mediaPort = p.getInt('mediaPort') ?? 0;
     pendingLinks = p.getStringList('pendingLinks') ?? [];
@@ -328,6 +444,7 @@ class Prefs extends ChangeNotifier {
     await p.setStringList('ownServers', [for (final s in ownServers) jsonEncode(s.toJson())]);
     ownServerId == null ? await p.remove('ownServerId') : await p.setString('ownServerId', ownServerId!);
     await p.setStringList('sharedFiles', [for (final f in sharedFiles) jsonEncode(f.toJson())]);
+    await p.setString('fileDelivery', fileDelivery);
     await p.setStringList('pendingLinks', pendingLinks);
     await p.setString('deviceName', deviceName);
     await p.setStringList('aliases', [for (final e in aliases.entries) '${e.key}\n${e.value}']);
@@ -421,6 +538,8 @@ class Prefs extends ChangeNotifier {
         standaloneQuality = quality ?? standaloneQuality;
         standaloneFps = fps ?? standaloneFps;
       });
+
+  void setFileDelivery(String value) => update(() => fileDelivery = value == 'cloudflare' ? 'cloudflare' : 'server');
 
   void addSharedFiles(List<SharedFile> files) => update(() {
         sharedFiles = [...sharedFiles, ...files];
