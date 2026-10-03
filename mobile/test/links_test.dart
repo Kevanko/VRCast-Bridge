@@ -324,7 +324,14 @@ void main() {
         mtx.kill();
         await mtx.exitCode;
       });
-      await Future<void>.delayed(const Duration(seconds: 1));
+      for (var i = 0; i < 50; i++) {
+        try {
+          (await Socket.connect('127.0.0.1', port, timeout: const Duration(milliseconds: 200))).destroy();
+          break;
+        } catch (_) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+      }
       final found = await DefaultLinkResolver().inspect('https://www.youtube.com/watch?v=jNQXAC9IVRw');
       final broadcast = FileBroadcast(hold: null)..setLoop('one'); // ролик короткий: пусть повторяется, пока идёт проверка
       addTearDown(broadcast.stop);
@@ -354,7 +361,14 @@ void main() {
         mtx.kill();
         await mtx.exitCode;
       });
-      await Future<void>.delayed(const Duration(seconds: 1));
+      for (var i = 0; i < 50; i++) {
+        try {
+          (await Socket.connect('127.0.0.1', port, timeout: const Duration(milliseconds: 200))).destroy();
+          break;
+        } catch (_) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+      }
       var opens = 0;
       final broadcast = FileBroadcast(hold: null, resolver: FakeResolver((item) async {
         opens++;

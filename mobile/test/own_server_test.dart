@@ -74,6 +74,47 @@ void main() {
       expect(Prefs.instance.shareRevision, start + 4);
     });
 
+    test('списки очереди: сохраняются вместе с повтором, загружаются вместо очереди или к ней, переживают перезапуск', () async {
+      Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: '/tmp/a.mp4', title: 'А'), SharedFile(id: 'b', path: '', title: 'Б', url: 'https://youtu.be/b', duration: 70, kind: 'youtube', sourceId: 'b')]);
+      expect(Prefs.instance.saveTemplate('   ', loop: 'all'), isNull, reason: 'без названия не сохраняем');
+      final id = Prefs.instance.saveTemplate('Вечер', loop: 'all')!;
+      Prefs.instance.clearSharedFiles();
+      expect(Prefs.instance.sharedFiles, isEmpty);
+      expect(Prefs.instance.saveTemplate('Пустой'), isNull, reason: 'пустую очередь не сохраняем');
+      final loaded = Prefs.instance.loadTemplate(id)!;
+      expect(loaded.loop, 'all');
+      expect(Prefs.instance.sharedFiles.map((f) => f.title), ['А', 'Б']);
+      expect(Prefs.instance.sharedFiles.map((f) => f.id), isNot(contains('a')), reason: 'у загруженных новые номера: не пересекаются с прежними');
+      expect(Prefs.instance.sharedFiles.last.isLink, isTrue);
+      expect(Prefs.instance.sharedFiles.last.duration, 70);
+      Prefs.instance.loadTemplate(id, append: true);
+      expect(Prefs.instance.sharedFiles, hasLength(4));
+      expect(Prefs.instance.sharedFiles.map((f) => f.id).toSet(), hasLength(4));
+      // Тот же номер обновляет список, а не плодит копии.
+      Prefs.instance.saveTemplate('Вечер 2', id: id);
+      expect(Prefs.instance.templates, hasLength(1));
+      expect(Prefs.instance.templates.single.items, hasLength(4));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await Prefs.instance.load();
+      expect(Prefs.instance.templates.single.name, 'Вечер 2');
+      expect(Prefs.instance.templates.single.items.last.kind, anyOf('youtube', 'file'));
+      Prefs.instance.deleteTemplate(id);
+      expect(Prefs.instance.templates, isEmpty);
+      expect(Prefs.instance.loadTemplate('нет-такого'), isNull);
+    });
+
+    test('обложка и длительность файла, узнанные позже, дописываются в очередь и сохраняются', () async {
+      Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: '/tmp/a.mp4', title: 'А')]);
+      Prefs.instance.updateSharedFile('a', thumbnail: '/cache/a.jpg', duration: 61.5);
+      expect(Prefs.instance.sharedFiles.single.thumbnail, '/cache/a.jpg');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await Prefs.instance.load();
+      expect(Prefs.instance.sharedFiles.single.duration, 61.5);
+      expect(Prefs.instance.sharedFiles.single.thumbnail, '/cache/a.jpg');
+      Prefs.instance.updateSharedFile('нет-такого', duration: 5);
+      expect(Prefs.instance.sharedFiles, hasLength(1));
+    });
+
     test('качество с ПК запоминается для работы без ПК', () async {
       expect(Prefs.instance.standaloneQuality, '720p');
       Prefs.instance.mirrorProfile('1080p', 60);

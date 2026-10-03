@@ -5,6 +5,8 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
+import 'socket_writer.dart';
+
 class RtspException implements Exception {
   RtspException(this.message);
   final String message;
@@ -24,9 +26,12 @@ abstract class RtspOut {
 }
 
 class RtspSession implements RtspOut {
-  RtspSession._(this._socket, this.url, this._user, this._pass);
+  RtspSession._(this._socket, this.url, this._user, this._pass) {
+    _writer = SocketWriter(_socket, onFailure: _finish);
+  }
 
   final Socket _socket;
+  late final SocketWriter _writer;
   final Uri url;
   final String _user, _pass;
   int _cseq = 0;
@@ -149,8 +154,8 @@ class RtspSession implements RtspOut {
     final bytes = body == null ? null : utf8.encode(body);
     if (bytes != null) lines.add('Content-Length: ${bytes.length}');
     final waiting = _pending[cseq] = Completer<_Response>();
-    _socket.add(latin1.encode('${lines.join('\r\n')}\r\n\r\n'));
-    if (bytes != null) _socket.add(bytes);
+    _writer.add(latin1.encode('${lines.join('\r\n')}\r\n\r\n'));
+    if (bytes != null) _writer.add(bytes);
     final reply = await waiting.future.timeout(const Duration(seconds: 8), onTimeout: () => throw RtspException('Сервер не отвечает'));
     if (reply.status == 401 && retry) {
       final challenge = reply.authenticate;
@@ -189,21 +194,13 @@ class RtspSession implements RtspOut {
     frame[2] = packet.length >> 8;
     frame[3] = packet.length & 0xFF;
     frame.setRange(4, frame.length, packet);
-    try {
-      _socket.add(frame);
-    } catch (_) {
-      _finish();
-    }
+    _writer.add(frame);
   }
 
   @override
   Future<void> flush() async {
     if (_closed) return;
-    try {
-      await _socket.flush();
-    } catch (_) {
-      _finish();
-    }
+    await _writer.flush();
   }
 
   /// Пока эфир на паузе, сервер должен слышать нас: иначе через 10 с он закроет публикацию.
@@ -219,8 +216,8 @@ class RtspSession implements RtspOut {
   Future<void> close() async {
     if (!_closed) {
       try {
-        _socket.add(latin1.encode('TEARDOWN ${url.replace(userInfo: '')} RTSP/1.0\r\nCSeq: ${++_cseq}\r\n${_session != null ? 'Session: $_session\r\n' : ''}\r\n'));
-        await _socket.flush().timeout(const Duration(seconds: 1));
+        _writer.add(latin1.encode('TEARDOWN ${url.replace(userInfo: '')} RTSP/1.0\r\nCSeq: ${++_cseq}\r\n${_session != null ? 'Session: $_session\r\n' : ''}\r\n'));
+        await _writer.flush().timeout(const Duration(seconds: 1));
       } catch (_) {}
     }
     _closed = true;

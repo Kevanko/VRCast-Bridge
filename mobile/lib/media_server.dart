@@ -20,7 +20,13 @@ class SharedFile {
 
   bool get isLink => url.isNotEmpty;
 
-  Map<String, Object?> toJson() => {'id': id, 'path': path, 'title': title, if (isLink) ...{'url': url, 'duration': duration, 'thumbnail': thumbnail, 'kind': kind, 'sourceId': sourceId}};
+  /// Тот же ролик под другим номером.
+  SharedFile withId(String newId) => SharedFile(id: newId, path: path, title: title, url: url, duration: duration, thumbnail: thumbnail, kind: kind, sourceId: sourceId);
+
+  SharedFile copyWith({String? thumbnail, double? duration}) => SharedFile(
+      id: id, path: path, title: title, url: url, duration: duration ?? this.duration, thumbnail: thumbnail ?? this.thumbnail, kind: kind, sourceId: sourceId);
+
+  Map<String, Object?> toJson() => {'id': id, 'path': path, 'title': title, if (isLink || duration > 0 || thumbnail.isNotEmpty) ...{'url': url, 'duration': duration, 'thumbnail': thumbnail, 'kind': kind, 'sourceId': sourceId}};
 
   factory SharedFile.fromJson(Map<String, dynamic> json) => SharedFile(
         id: '${json['id']}',
@@ -132,6 +138,13 @@ class MediaServer {
     }
     return diff == 0;
   }
+}
+
+/// Адреса телефона в локальной сети (частные IPv4): по ним зрители открывают мгновенную ссылку.
+Future<List<String>> lanAddresses() async {
+  final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4);
+  final private = RegExp(r'^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)');
+  return [for (final nic in interfaces) for (final a in nic.addresses) if (!a.isLoopback && private.hasMatch(a.address)) a.address];
 }
 
 /// Адрес телефона в той же сети, что и ПК: ПК заберёт файлы именно по нему.

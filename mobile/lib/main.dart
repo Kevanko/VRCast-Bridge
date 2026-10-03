@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'api.dart';
+import 'broadcaster.dart';
 import 'remote.dart';
 import 'screens.dart';
 
@@ -37,6 +38,8 @@ class Root extends StatefulWidget {
 
 class _RootState extends State<Root> {
   Remote? _remote;
+  // Эфир не зависит от связи с ПК: он общий для всех подключений и не прерывается при смене.
+  final Broadcaster _broadcaster = Broadcaster();
 
   @override
   void initState() {
@@ -47,14 +50,14 @@ class _RootState extends State<Root> {
       if (last != null && Prefs.instance.autoConnect) {
         _connect(last.name, last.base);
       } else {
-        setState(() => _remote = Remote.local());
+        setState(() => _remote = Remote.local(broadcaster: _broadcaster));
       }
     });
   }
 
   void _connect(String name, Uri base) {
     final previous = _remote;
-    final remote = Remote(Api(base, token: Prefs.instance.tokens[base.toString()]), pcName: Prefs.instance.nameFor(base.authority, name))..start();
+    final remote = Remote(Api(base, token: Prefs.instance.tokens[base.toString()]), pcName: Prefs.instance.nameFor(base.authority, name), broadcaster: _broadcaster)..start();
     Prefs.instance.remember(name, base.toString());
     setState(() => _remote = remote);
     previous?.dispose();
@@ -63,13 +66,14 @@ class _RootState extends State<Root> {
   void _disconnect() {
     final previous = _remote;
     Prefs.instance.leave();
-    setState(() => _remote = Remote.local());
+    setState(() => _remote = Remote.local(broadcaster: _broadcaster));
     previous?.dispose();
   }
 
   @override
   void dispose() {
     _remote?.dispose();
+    _broadcaster.dispose();
     super.dispose();
   }
 

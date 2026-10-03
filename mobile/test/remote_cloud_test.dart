@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vrcast_remote/api.dart';
+import 'package:vrcast_remote/broadcaster.dart';
 import 'package:vrcast_remote/file_broadcast.dart';
 import 'package:vrcast_remote/media_server.dart';
 import 'package:vrcast_remote/remote.dart';
@@ -52,7 +54,7 @@ void main() {
     final pidFile = '${dir.path}/pid';
     final binary = fake('echo \$\$ > $pidFile\necho "INF https://phone-demo.trycloudflare.com" >&2\necho "INF Registered tunnel connection connIndex=0" >&2\nexec sleep 60');
     Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: clip, title: 'Клип')]);
-    Prefs.instance.setFileDelivery('cloudflare');
+    Prefs.instance.setFileDelivery('tunnel');
     final remote = remoteWith(() async => binary);
     addTearDown(remote.dispose);
 
@@ -73,7 +75,7 @@ void main() {
   test('ссылка оборвалась во время эфира: эфир останавливается с понятной причиной', () async {
     final binary = fake('echo "INF https://short-lived.trycloudflare.com" >&2\necho "INF Registered tunnel connection" >&2\nsleep 2');
     Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: clip, title: 'Клип')]);
-    Prefs.instance.setFileDelivery('cloudflare');
+    Prefs.instance.setFileDelivery('tunnel');
     final remote = remoteWith(() async => binary);
     addTearDown(remote.dispose);
     expect(await remote.startFileBroadcast(), isNull);
@@ -83,7 +85,7 @@ void main() {
 
   test('ошибки бесплатной ссылки возвращаются текстом, эфир не стартует', () async {
     Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: clip, title: 'Клип')]);
-    Prefs.instance.setFileDelivery('cloudflare');
+    Prefs.instance.setFileDelivery('tunnel');
     final missing = remoteWith(() async => null);
     addTearDown(missing.dispose);
     expect(await missing.startFileBroadcast(), contains('нет Cloudflare'));
@@ -101,12 +103,59 @@ void main() {
     expect(await empty.startFileBroadcast(), contains('Сначала добавьте файлы'));
   }, skip: _has('ffmpeg') ? false : 'нужен ffmpeg');
 
+  test('локально: телефон раздаёт эфир по сети, ссылка rtspt://адрес:порт/live открывается, после остановки порт освобождается', () async {
+    final addresses = await lanAddresses();
+    if (addresses.isEmpty) return; // нет сети Wi-Fi — раздавать некому
+    Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: clip, title: 'Клип')]);
+    Prefs.instance.setFileDelivery('lan');
+    final remote = remoteWith(() async => null);
+    addTearDown(remote.dispose);
+    expect(await remote.startFileBroadcast(), isNull);
+    expect(remote.files.active, isTrue);
+    final link = Uri.parse(remote.files.viewLink.replaceFirst('rtspt://', 'http://'));
+    expect(link.path, '/live');
+    expect(addresses, contains(link.host));
+    String described = '';
+    for (var i = 0; i < 40 && !described.startsWith('RTSP/1.0 200'); i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      final socket = await Socket.connect('127.0.0.1', link.port);
+      socket.add(utf8.encode('DESCRIBE rtsp://127.0.0.1:${link.port}/live RTSP/1.0\r\nCSeq: 1\r\nHost: 127.0.0.1\r\n\r\n'));
+      described = utf8.decode(await socket.first.timeout(const Duration(seconds: 5)));
+      socket.destroy();
+    }
+    expect(described, startsWith('RTSP/1.0 200'));
+    await remote.files.stop();
+    await until(() => remote.cloudServes == null, 'раздача остановлена');
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    await expectLater(Socket.connect('127.0.0.1', link.port, timeout: const Duration(seconds: 1)), throwsA(isA<SocketException>()), reason: 'порт освобождён');
+  }, skip: _has('ffmpeg') ? false : 'нужен ffmpeg', timeout: const Timeout(Duration(minutes: 1)));
+
+  test('как в Spotify: эфир идёт дальше при смене подключения к ПК — общий эфир не умирает вместе со старым соединением', () async {
+    if ((await lanAddresses()).isEmpty) return;
+    Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: clip, title: 'Клип')]);
+    Prefs.instance.setFileDelivery('lan');
+    final broadcaster = Broadcaster(files: FileBroadcast(hold: null));
+    addTearDown(broadcaster.dispose);
+    final first = Remote.local(broadcaster: broadcaster);
+    expect(await first.startFileBroadcast(), isNull);
+    expect(broadcaster.files.active, isTrue);
+    first.dispose(); // как при подключении к ПК: прежний Remote уничтожается
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    expect(broadcaster.files.active, isTrue, reason: 'эфир не прервался');
+    final second = Remote(Api(Uri.parse('http://127.0.0.1:1')), broadcaster: broadcaster);
+    addTearDown(second.dispose);
+    expect(second.files.active, isTrue, reason: 'новое подключение видит тот же эфир');
+    expect(second.files.viewLink, startsWith('rtspt://'));
+    await second.broadcaster.stop();
+    expect(second.files.active, isFalse);
+  }, skip: _has('ffmpeg') ? false : 'нужен ffmpeg', timeout: const Timeout(Duration(minutes: 1)));
+
   test('способ вещания запоминается и по умолчанию — свой сервер', () async {
     expect(Prefs.instance.fileDelivery, 'server');
-    Prefs.instance.setFileDelivery('cloudflare');
+    Prefs.instance.setFileDelivery('tunnel');
     await Future<void>.delayed(const Duration(milliseconds: 50));
     await Prefs.instance.load();
-    expect(Prefs.instance.fileDelivery, 'cloudflare');
+    expect(Prefs.instance.fileDelivery, 'tunnel');
     Prefs.instance.setFileDelivery('что-то-ещё');
     expect(Prefs.instance.fileDelivery, 'server');
   });

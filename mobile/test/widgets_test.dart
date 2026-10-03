@@ -305,6 +305,48 @@ void main() {
     expect(Prefs.instance.sharedFiles.map((f) => f.id), ['c', 'a']);
   });
 
+  testWidgets('без ПК: очередь можно сохранить как список, очистить и вернуть из списка', (tester) async {
+    tallScreen(tester);
+    Prefs.instance.addSharedFiles([SharedFile(id: 'a', path: '/tmp/a.mp4', title: 'Первый'), SharedFile(id: 'b', path: '/tmp/b.mp4', title: 'Второй')]);
+    final remote = Remote.local(phone: FakeStream(), files: FakeFiles());
+    await tester.pumpWidget(app(Scaffold(body: ListenableBuilder(listenable: remote, builder: (_, __) => QueuePage(remote: remote)))));
+    await tester.tap(find.text('Списки'));
+    await tester.pumpAndSettle();
+    expect(find.text('Сохранённых списков пока нет'), findsOneWidget);
+    await tester.tap(find.text('Сохранить очередь как список'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Мой вечер');
+    await tester.tap(find.text('Сохранить'));
+    await tester.pumpAndSettle();
+    expect(find.text('Мой вечер'), findsOneWidget);
+    expect(find.text('Роликов: 2'), findsWidgets);
+    expect(Prefs.instance.templates.single.name, 'Мой вечер');
+    await tester.tapAt(const Offset(10, 10)); // закрыть лист
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Очистить'));
+    await tester.pumpAndSettle();
+    expect(find.text('Очистить очередь?'), findsOneWidget);
+    await tester.tap(find.text('Отмена'));
+    await tester.pumpAndSettle();
+    expect(Prefs.instance.sharedFiles, hasLength(2), reason: 'отказались — очередь на месте');
+    await tester.tap(find.text('Очистить'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Очистить'));
+    await tester.pumpAndSettle();
+    expect(Prefs.instance.sharedFiles, isEmpty);
+    expect(find.textContaining('Своя очередь пуста'), findsOneWidget);
+
+    await tester.tap(find.text('Списки'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(PopupMenuButton<String>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Загрузить вместо очереди'));
+    await tester.pumpAndSettle();
+    expect(Prefs.instance.sharedFiles.map((f) => f.title), ['Первый', 'Второй']);
+    expect(find.text('Первый'), findsOneWidget);
+  });
+
   testWidgets('подключение к ПК: ссылки из своей очереди уходят в очередь ПК и убираются у телефона', (tester) async {
     Prefs.instance.addSharedFiles([
       SharedFile(id: 'a', path: '', title: 'Клип', url: 'https://www.youtube.com/watch?v=abc', duration: 60, kind: 'youtube', sourceId: 'abc'),
