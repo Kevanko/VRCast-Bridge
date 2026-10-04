@@ -7,6 +7,7 @@ import 'byte_source.dart';
 import 'hls_source.dart';
 import 'media_server.dart';
 import 'mp4.dart';
+import 'sites.dart';
 
 /// Что нашлось по ссылке: название, длительность и обложка видны в очереди сразу, поток берётся при запуске.
 class LinkInfo {
@@ -70,7 +71,13 @@ class DefaultLinkResolver implements LinkResolver, EngineLinkResolver {
     final host = uri.host.toLowerCase();
     if (host.contains('youtube.com') || host.contains('youtu.be')) return _youtube(text, uri);
     if (isDirect(uri)) return [await _directInfo(uri)];
-    throw UnsupportedLink('Эту ссылку без ПК не разобрать: она уйдёт на ПК при подключении. Сами по себе работают YouTube и прямые ссылки на видео и звук (mp4, mkv, webm, mp3, m3u8).', sendToPc: true);
+    // Rutube, VK, Twitch и любая страница с видео: адрес страницы остаётся в очереди, поток берётся перед запуском.
+    try {
+      final media = await resolveSite(uri);
+      return [LinkInfo(url: text, title: media.title, duration: media.duration, thumbnail: media.thumbnail, kind: media.live ? 'live' : siteKind(uri))];
+    } on SiteError catch (e) {
+      throw UnsupportedLink(e.message);
+    }
   }
 
   Future<List<LinkInfo>> _youtube(String text, Uri uri) async {
@@ -86,7 +93,10 @@ class DefaultLinkResolver implements LinkResolver, EngineLinkResolver {
       }
       if (videoId == null) throw UnsupportedLink('Не получилось понять ссылку на YouTube');
       final video = await yt.videos.get(VideoId(videoId));
-      if (video.isLive) throw UnsupportedLink('Прямые трансляции без ПК не поддерживаются: ссылка уйдёт на ПК при подключении', sendToPc: true);
+      if (video.isLive || video.duration == null || video.duration! > const Duration(hours: 24)) {
+        final info = _fromVideo(video);
+        return [LinkInfo(url: info.url, title: info.title, duration: 0, thumbnail: info.thumbnail, kind: 'live', sourceId: info.sourceId)];
+      }
       return [_fromVideo(video)];
     } on UnsupportedLink {
       rethrow;
@@ -207,18 +217,29 @@ class DefaultLinkResolver implements LinkResolver, EngineLinkResolver {
   /// Картинка и звук отдельно, до [maxHeight]: H.264 предпочтительнее (его телефоны декодируют аппаратно), VP9 — до 720p.
   @override
   Future<EngineSource> engineSource(SharedFile item, {required int maxHeight}) async {
-    if (item.kind != 'youtube') {
-      final uri = Uri.tryParse(item.url);
-      if (uri == null || !_m3u8.hasMatch(uri.path)) return EngineSource(video: item.url);
-      // MediaExtractor плейлисты не читает: склеиваем сегменты в один поток на локальном адресе.
+    if (item.kind == 'live' && item.url.contains('youtu')) {
+      final yt = YoutubeExplode();
       try {
-        final server = await HlsConcatServer.start(await loadHls(uri, maxHeight: maxHeight));
-        await _hls?.close();
-        _hls = server;
-        return EngineSource(video: server.url.toString());
-      } on HlsUnsupported catch (e) {
-        throw UnsupportedLink(e.message);
+        return await _mediaSource(await yt.videos.streamsClient.getHttpLiveStreamUrl(VideoId(item.sourceId)), const {}, maxHeight);
+      } catch (e) {
+        throw UnsupportedLink('Не удалось открыть прямой эфир YouTube: $e');
+      } finally {
+        yt.close();
       }
+    }
+    if (item.kind != 'youtube') {
+      var url = item.url;
+      var headers = const <String, String>{};
+      if (siteKinds.contains(item.kind) || item.kind == 'live') {
+        try {
+          final media = await resolveSite(Uri.parse(item.url));
+          url = media.url;
+          headers = media.headers;
+        } on SiteError catch (e) {
+          throw UnsupportedLink(e.message);
+        }
+      }
+      return _mediaSource(url, headers, maxHeight);
     }
     final yt = YoutubeExplode();
     try {
@@ -272,8 +293,26 @@ class DefaultLinkResolver implements LinkResolver, EngineLinkResolver {
     return EngineSource(video: video, audio: audio);
   }
 
+  static const siteKinds = {'rutube', 'vk', 'twitch', 'page'};
+
+  /// Адрес потока → источник для перекодировщика. Плейлисты HLS (запись и эфир, в том числе шифрованные) склеиваются на локальном адресе.
+  Future<EngineSource> _mediaSource(String url, Map<String, String> headers, int maxHeight) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !(uri.path.toLowerCase().endsWith('.m3u8') || url.contains('.m3u8'))) return EngineSource(video: url);
+    try {
+      final server = await HlsConcatServer.start(await loadHls(uri, maxHeight: maxHeight, headers: headers), headers: headers);
+      await _hls?.close();
+      _hls = server;
+      return EngineSource(video: server.url.toString());
+    } on HlsUnsupported catch (e) {
+      throw UnsupportedLink(e.message);
+    }
+  }
+
   @override
   Future<ByteSource> open(SharedFile item) async {
+    // Сайты и прямые эфиры отдаёт только перекодировщик: сюда они не годятся.
+    if (item.kind == 'live' || siteKinds.contains(item.kind)) throw UnsupportedLink('Этот источник идёт через перекодирование');
     if (item.kind != 'youtube') return HttpSource(Uri.parse(item.url));
     final yt = YoutubeExplode();
     try {

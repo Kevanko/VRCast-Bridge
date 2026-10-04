@@ -934,7 +934,7 @@ class _QueuePageState extends State<QueuePage> {
                           title: Text(item.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: playing ? FontWeight.bold : null)),
                           subtitle: Text([
                             if (item.duration > 0) formatTime(item.duration),
-                            item.kind == 'youtube' ? 'YouTube' : item.kind == 'direct' ? 'ссылка на mp4' : 'файл на телефоне',
+                            const {'youtube': 'YouTube', 'rutube': 'Rutube', 'vk': 'VK', 'twitch': 'Twitch', 'live': 'прямой эфир', 'page': 'видео со страницы', 'direct': 'прямая ссылка'}[item.kind] ?? 'файл на этом устройстве',
                             if (playing) 'в эфире',
                           ].join(' · ')),
                           trailing: playing ? const Icon(Icons.equalizer, color: accent) : null,

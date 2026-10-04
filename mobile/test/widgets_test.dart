@@ -299,8 +299,8 @@ void main() {
     final remote = Remote.local(phone: FakeStream(), files: files);
     await tester.pumpWidget(app(Scaffold(body: ListenableBuilder(listenable: remote, builder: (_, __) => QueuePage(remote: remote)))));
     expect(find.text('1:01 · YouTube'), findsOneWidget);
-    expect(find.text('файл на телефоне'), findsOneWidget);
-    expect(find.text('0:30 · ссылка на mp4'), findsOneWidget);
+    expect(find.text('файл на этом устройстве'), findsOneWidget);
+    expect(find.text('0:30 · прямая ссылка'), findsOneWidget);
     Prefs.instance.moveSharedFile(0, 2);
     expect(Prefs.instance.sharedFiles.map((f) => f.id), ['b', 'c', 'a']);
     Prefs.instance.moveSharedFile(5, 0);
@@ -449,11 +449,11 @@ void main() {
     await tester.pumpWidget(app(HomeScreen(remote: remote, onConnect: (_, __) {}, onDisconnect: () {})));
     await tester.tap(find.text('Очередь'));
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('файл на телефоне'), findsNWidgets(2));
+    expect(find.text('файл на этом устройстве'), findsNWidgets(2));
     await tester.tap(find.text('Второй.mp4'));
     await tester.pump();
     expect(files.calls, ['start vps.example.com from=1 of=2']);
-    expect(find.text('файл на телефоне · в эфире'), findsOneWidget);
+    expect(find.text('файл на этом устройстве · в эфире'), findsOneWidget);
 
     await tester.tap(find.text('Сейчас'));
     await tester.pump(const Duration(milliseconds: 400));

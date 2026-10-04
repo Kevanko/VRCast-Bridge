@@ -201,7 +201,7 @@ void main() {
       expect(item.path, isEmpty);
       expect(item.toJson()['url'], found.single.url);
 
-      await expectLater(DefaultLinkResolver().inspect('https://vk.com/video-1_2'), throwsA(isA<UnsupportedLink>().having((e) => e.message, 'text', contains('уйдёт на ПК'))));
+      await expectLater(DefaultLinkResolver().inspect('https://vk.com/feed'), throwsA(isA<UnsupportedLink>().having((e) => e.message, 'text', contains('VK'))));
       await expectLater(DefaultLinkResolver().inspect('это не ссылка'), throwsA(isA<UnsupportedLink>()));
       await expectLater(DefaultLinkResolver().inspect('ftp://x/y.mp4'), throwsA(isA<UnsupportedLink>()));
     }, skip: _tools ? false : 'нужен ffmpeg');
