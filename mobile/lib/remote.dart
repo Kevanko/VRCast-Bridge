@@ -11,6 +11,7 @@ import 'file_broadcast.dart';
 import 'links.dart';
 import 'media_server.dart';
 import 'models.dart';
+import 'phone_host.dart';
 import 'own_server.dart';
 import 'phone_stream.dart';
 import 'transcode.dart';
@@ -369,6 +370,11 @@ class Prefs extends ChangeNotifier {
   double playVolume = 1;
   bool transportTcp = true; // ссылка rtspt:// (поверх TCP) или rtsp:// (плеер выбирает сам, в том числе UDP)
   int shareRevision = 0;
+  // Это устройство как админ группы: к нему подключаются другие устройства.
+  bool hostEnabled = false;
+  int hostPort = 4717;
+  String hostId = '';
+  List<HostDevice> hostDevices = [];
   // Для проверки на эмуляторе, где адрес телефона не виден ПК: «адрес:порт», который назвать ПК, и порт сервера файлов.
   String mediaAddress = '';
   int mediaPort = 0;
@@ -389,6 +395,10 @@ class Prefs extends ChangeNotifier {
     final saved = p.getString('fileDelivery');
     fileDelivery = saved == 'cloudflare' || saved == 'tunnel' ? 'tunnel' : saved == 'lan' ? 'lan' : 'server';
     lanPort = p.getInt('lanPort') ?? 4718;
+    hostEnabled = p.getBool('hostEnabled') ?? false;
+    hostPort = p.getInt('hostPort') ?? 4717;
+    hostId = p.getString('hostId') ?? '';
+    hostDevices = [for (final raw in p.getStringList('hostDevices') ?? const []) HostDevice.fromJson((jsonDecode(raw) as Map).cast<String, dynamic>())];
     transportTcp = p.getBool('transportTcp') ?? true;
     final quality = p.getString('videoQuality');
     videoQuality = VideoProfile.qualities.containsKey(quality) ? quality! : 'copy';
@@ -423,6 +433,10 @@ class Prefs extends ChangeNotifier {
     await p.setStringList('templates', [for (final t in templates) jsonEncode(t.toJson())]);
     await p.setString('fileDelivery', fileDelivery);
     await p.setInt('lanPort', lanPort);
+    await p.setBool('hostEnabled', hostEnabled);
+    await p.setInt('hostPort', hostPort);
+    await p.setString('hostId', hostId);
+    await p.setStringList('hostDevices', [for (final d in hostDevices) jsonEncode(d.toJson())]);
     await p.setBool('transportTcp', transportTcp);
     await p.setString('videoQuality', videoQuality);
     await p.setInt('videoFps', videoFps);

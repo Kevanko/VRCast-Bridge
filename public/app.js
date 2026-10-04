@@ -743,7 +743,7 @@ function render(state) {
   // Любая отрисовка не из опроса (ответ на нажатие) сбрасывает сравнение:
   // следующий опрос обязан перерисовать, даже если совпал с прошлым опросом.
   ui.lastPollText='';
-  ui.status=state; ui.progressAt=Date.now(); paintPairedList(); const ready=state.tools.ffmpeg&&state.tools.ytdlp;
+  ui.status=state; ui.progressAt=Date.now(); paintPairedList(); paintJoined(state.joined); const ready=state.tools.ffmpeg&&state.tools.ytdlp;
   if(ui.seekPending&&!state.playback?.busy&&Number(state.playback?.revision)>=ui.seekRevision)ui.seekPending=false;
   const streamReady=Boolean(state.stream?.ready), streamStalled=state.stream?.state==='stalled';
   // Связь с ядром пропала — старое «В эфире»/«Готово» было бы враньём.
@@ -2157,6 +2157,26 @@ $('#phoneAccess').addEventListener('change',async()=>{
   ui.configEditUntil=Date.now()+2500;
   try{ render(await saveConfig(false)); toast($('#phoneAccess').value==='on'?'Доступ с других устройств включён':'Доступ с других устройств выключен'); setTimeout(paintPhoneNote,600); }
   catch(error){ ui.configEditUntil=0; toast(error.message,true); }
+});
+
+// Подключение этого компьютера к другому устройству (как у телефона): состояние приходит в статусе.
+function paintJoined(info){
+  $('#joinRow').hidden=Boolean(info);
+  $('#joinedRow').hidden=!info;
+  if(!info) return;
+  setText($('#joinedTitle'),`Подключено к «${info.name}»`);
+  setText($('#joinedNote'),[info.online?'в сети':'нет связи'+(info.error?`: ${info.error}`:''),`отдано файлов: ${info.shared}`,info.title?`${info.running?(info.paused?'на паузе':'идёт'):'сейчас'}: ${info.title}`:(info.running?'идёт эфир':'эфир не идёт'),info.controller?`ведёт: ${info.controller}`:''].filter(Boolean).join(' · '));
+}
+$('#joinGo').addEventListener('click',async()=>{
+  const address=$('#joinAddress').value.trim(), code=$('#joinCode').value.trim();
+  if(!address||!code){ toast('Введите адрес и код другого устройства',true); return; }
+  try{ const reply=await api('/api/join',{method:'POST',body:JSON.stringify({address,code})}); $('#joinCode').value=''; paintJoined(reply.joined); toast('Подключено. Доступ из сети включён: так устройство заберёт ваши файлы'); }
+  catch(error){ toast(error.message,true); }
+});
+$('#joinLeave').addEventListener('click',async()=>{ try{ await api('/api/join/leave',{method:'POST',body:'{}'}); paintJoined(null); toast('Отключено'); }catch(error){ toast(error.message,true); } });
+for(const button of document.querySelectorAll('[data-join]')) button.addEventListener('click',async()=>{
+  try{ const reply=await api('/api/join/control',{method:'POST',body:JSON.stringify({action:button.dataset.join})}); paintJoined(reply.joined); }
+  catch(error){ toast(error.message,true); }
 });
 
 function paintPortNote(state){

@@ -31,6 +31,8 @@ export function lanHostAllowed(host, port) {
 const ALLOWED = [
   ['GET', /^\/api\/(status|events|lan-info|capture-preview)$/],
   ['GET', /^\/(thumbs|stream|api\/local-media)\//],
+  ['GET', /^\/api\/media\//], // файлы этого устройства для админа группы: открывает только ключ
+
   ['POST', /^\/api\/(playback|stop|skip|queue|queue\/inspect|queue\/move|queue\/upload|pair)$/],
   ['POST', /^\/api\/start\/(queue|phone)$/],
   ['DELETE', /^\/api\/queue(\/[^/]+)?$/],

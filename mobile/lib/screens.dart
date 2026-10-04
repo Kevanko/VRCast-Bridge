@@ -17,6 +17,7 @@ import 'own_server.dart';
 import 'ssh.dart';
 import 'transcode.dart';
 import 'models.dart';
+import 'phone_host.dart';
 import 'remote.dart';
 
 const accent = Color(0xFF8B6BFF);
@@ -307,6 +308,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   if (name != null) prefs.setDeviceName(name);
                 },
               ),
+              const HostSettings(),
               if (widget.remote != null && !widget.remote!.isLocal)
                 ListTile(
                   leading: const Icon(Icons.podcasts),
@@ -942,6 +944,21 @@ class _QueuePageState extends State<QueuePage> {
                         ),
                       );
                     })),
+            if (remote.broadcaster.extraFiles.isNotEmpty)
+              ExpansionTile(
+                initiallyExpanded: true,
+                title: Text('Файлы подключённых устройств: ${remote.broadcaster.extraFiles.length}', style: const TextStyle(color: Colors.white70, fontSize: 14)),
+                children: [
+                  for (final item in remote.broadcaster.extraFiles)
+                    ListTile(
+                      dense: true,
+                      title: Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(PhoneHost.current?.ownerName(item.id) ?? ''),
+                      trailing: remote.broadcaster.files.current?.id == item.id ? const Icon(Icons.equalizer, color: accent) : null,
+                      onTap: () async { final e = await remote.startFileBroadcast(fromId: item.id); if (context.mounted) toastError(context, e); },
+                    ),
+                ],
+              ),
             if (pcCopy.isNotEmpty)
               ExpansionTile(
                 title: Text('Очередь ПК (последняя копия): ${pcCopy.length}', style: const TextStyle(color: Colors.white70, fontSize: 14)),
@@ -1628,4 +1645,91 @@ class _ServerDialogState extends State<_ServerDialog> {
           FilledButton(onPressed: _save, child: const Text('Сохранить')),
         ],
       );
+}
+
+
+/// Это устройство как админ группы: другие устройства (телефоны и ПК) подключаются к нему по коду привязки.
+class HostSettings extends StatelessWidget {
+  const HostSettings({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final host = PhoneHost.current;
+    if (host == null) return const SizedBox.shrink();
+    return ListenableBuilder(
+      listenable: Listenable.merge([host, Prefs.instance]),
+      builder: (context, _) {
+        final prefs = Prefs.instance;
+        final code = host.pairCode.length == 6 ? '${host.pairCode.substring(0, 3)} ${host.pairCode.substring(3)}' : host.pairCode;
+        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SwitchListTile(
+            secondary: const Icon(Icons.hub_outlined),
+            title: const Text('Это устройство — админ группы'),
+            subtitle: const Text('Другие устройства подключаются к нему, как к ПК: общая очередь, один эфир, перехват как в Spotify'),
+            value: host.running,
+            onChanged: (on) => host.setEnabled(on),
+          ),
+          if (host.running) ...[
+            FutureBuilder<List<String>>(
+              future: lanAddresses(),
+              builder: (context, snapshot) => ListTile(
+                leading: const SizedBox(width: 24),
+                title: const Text('Адрес для подключения'),
+                subtitle: Text([for (final a in snapshot.data ?? const <String>[]) '$a:${host.port}'].join('\n').ifEmpty('Нет сети Wi-Fi')),
+              ),
+            ),
+            ListTile(
+              leading: const SizedBox(width: 24),
+              title: const Text('Код привязки'),
+              subtitle: const Text('Один раз на каждое новое устройство'),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                Text(code, style: const TextStyle(fontSize: 20, letterSpacing: 2, fontWeight: FontWeight.bold)),
+                IconButton(tooltip: 'Новый код', icon: const Icon(Icons.refresh), onPressed: host.rotateCode),
+              ]),
+            ),
+            ListTile(
+              leading: const SizedBox(width: 24),
+              title: const Text('Порт'),
+              subtitle: const Text('Меняется сразу, без перезапуска'),
+              trailing: SizedBox(
+                  width: 90,
+                  child: TextFormField(
+                      key: ValueKey(prefs.hostPort),
+                      initialValue: '${prefs.hostPort}',
+                      keyboardType: TextInputType.number,
+                      textAlign: TextAlign.center,
+                      decoration: const InputDecoration(isDense: true, border: OutlineInputBorder()),
+                      onFieldSubmitted: (text) {
+                        final v = int.tryParse(text);
+                        if (v != null && v >= 1024 && v <= 65400) host.changePort(v);
+                      })),
+            ),
+            for (final device in prefs.hostDevices)
+              ListTile(
+                leading: const SizedBox(width: 24),
+                title: Text(device.name),
+                subtitle: Text('${host.isOnline(device.id) ? 'в сети' : 'не в сети'}${host.filesOf(device.id) > 0 ? ' · файлов: ${host.filesOf(device.id)}' : ''}'),
+                trailing: PopupMenuButton<String>(
+                  onSelected: (action) async {
+                    if (action == 'rename') {
+                      final name = await renameDialog(context, device.name, title: 'Имя устройства');
+                      if (name != null) host.rename(device.id, name);
+                    } else {
+                      host.unpair(device.id);
+                    }
+                  },
+                  itemBuilder: (_) => const [PopupMenuItem(value: 'rename', child: Text('Переименовать')), PopupMenuItem(value: 'remove', child: Text('Отвязать'))],
+                ),
+              ),
+            if (prefs.hostDevices.length > 1)
+              Align(alignment: Alignment.centerRight, child: Padding(padding: const EdgeInsets.only(right: 16), child: TextButton(onPressed: host.unpairAll, child: const Text('Отвязать все')))),
+          ],
+        ]);
+      },
+    );
+  }
+}
+
+extension on String {
+  String ifEmpty(String other) => isEmpty ? other : this;
 }

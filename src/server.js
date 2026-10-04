@@ -10,6 +10,7 @@ import { Readable } from 'node:stream';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
+import { createJoin } from './join.js';
 import { hashToken, isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRouteOpenWithPin, lanRoutePaired, lanRouteAllowed, pickNetworkConfig, publishService, sameSecret, unpublishService } from './lan.js';
 import { hideMemberSource, sanitizeContribution, sharedQueueItem, sharedServer, takeInitiative } from './group.js';
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
@@ -129,6 +130,8 @@ const defaults = {
   deviceName: '',
   // Постоянный номер этого устройства: по нему группа отличает ПК друг от друга.
   deviceId: '',
+  // Подключение этого ПК к другому устройству (его адрес и ключ), если оно есть.
+  joined: null,
   accessPin: '',
   // Привязанные телефоны: хранится только хеш ключа.
   pairedPhones: [],
@@ -168,6 +171,7 @@ let relayStartedAt = 0;
 let relayProfile = null;
 let relayBitrateKbps = 0;
 let mediaMtxProcess = null;
+let joinGroup = null; // подключение этого ПК к другому устройству (создаётся ниже)
 let mediaMtxFailures = 0;
 let mediaMtxLastError = '';
 const rtspPushProcesses = new Map();
@@ -614,6 +618,7 @@ function saveQueue() {
   // Файлы подключённых устройств живут только пока те подключены — на диск не пишем.
   writeJsonAtomic(QUEUE_FILE, queue.filter(item => !item.member));
   warmQueueSoon();
+  joinGroup?.changed();
 }
 
 // Ближайшие ролики готовим заранее, не дожидаясь запуска эфира: тогда переход
@@ -2201,6 +2206,7 @@ function status(withLogs = true) {
         rtspPort: item.rtspPort, addedAt: item.addedAt, reachable: serverReach[item.id] ?? null,
         permanentLink: item.permanentLink !== false, channel: item.channel || 'live', publishKey: undefined })) },
     group: groupState(),
+    joined: joinGroup?.state() ?? null,
     playbackUrl: publicAddress(),
     webrtcUrl: mediaMtxProcess ? `http://127.0.0.1:${WEBRTC_PORT}/live/whep` : '',
     localPlaybackUrl: `http://127.0.0.1:${PORT}/stream/live.m3u8`,
@@ -6501,9 +6507,10 @@ function pairedByToken(token) {
 
 // Кто прислал запрос: сам ПК (окно программы) или привязанное устройство.
 function actorOf(req) {
-  if (isLoopbackAddress(req.socket.remoteAddress)) return { id: 'self', name: deviceName(), kind: 'pc' };
+  // С ключом привязки — это привязанное устройство (даже если оно запущено на этом же компьютере); без ключа с loopback — сама программа.
   const phone = pairedByToken(String(req.headers['x-vrcast-token'] || ''));
-  return phone ? { id: phone.id, name: phone.name, kind: phone.kind || 'phone' } : null;
+  if (phone) return { id: phone.id, name: phone.name, kind: phone.kind || 'phone' };
+  return isLoopbackAddress(req.socket.remoteAddress) ? { id: 'self', name: deviceName(), kind: 'pc' } : null;
 }
 
 function takeLead(req) { groupController = takeInitiative(groupController, actorOf(req)); }
@@ -6594,6 +6601,18 @@ function probeSharedItem(item) {
     if (info.hasVideo || info.hasAudio) generateThumbnail(item); else item.unavailable = true;
   }).catch(() => { if (queue.includes(item)) item.unavailable = true; });
 }
+
+joinGroup = createJoin({
+  getJoined: () => (config.joined && config.joined.base && config.joined.token ? config.joined : null),
+  setJoined: value => saveConfig({ joined: value }),
+  items: () => queue.filter(item => item.local && !item.member && !item.unavailable).map(item => ({ id: item.id, title: item.title, duration: item.duration })),
+  servers: () => savedServers().filter(item => item.host && item.publishKey).map(item => ({ id: item.id, name: item.name, host: item.host,
+    rtspPort: Number(item.rtspPort) || SERVER_RTSP_PORT, publishKey: item.publishKey, channel: item.channel || 'live' })),
+  deviceName: () => deviceName(),
+  port: () => PORT,
+  dropItems: ids => dropQueueItems(item => ids.includes(item.id)),
+  log,
+});
 
 function groupState() {
   return {
@@ -6893,6 +6912,26 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/servers/export') {
       return json(res, 200, { servers: savedServers().filter(item => item.host).map(item => ({ id: item.id, name: item.name, host: item.host,
         rtspPort: Number(item.rtspPort) || SERVER_RTSP_PORT, publishKey: item.publishKey || '' })) });
+    }
+    // Этот компьютер как участник чужой группы: подключиться, отключиться, управлять эфиром админа.
+    if (req.method === 'POST' && url.pathname === '/api/join') {
+      const body = await readBody(req);
+      const state = await joinGroup.join(body.address, body.code, { name: deviceName() });
+      // Файлы забирает админ по сети, поэтому доступ из сети включаем: без него он до нас не достучится.
+      const needLan = config.lanAccess !== true;
+      if (needLan) saveConfig({ lanAccess: true });
+      if (needLan) res.once('finish', () => setTimeout(applyLanAccess, 50));
+      return json(res, 200, { joined: state });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/join/leave') { await joinGroup.leave(); return json(res, 200, { joined: null }); }
+    if (req.method === 'POST' && url.pathname === '/api/join/control') { const body = await readBody(req); return json(res, 200, { joined: await joinGroup.control(String(body.action)) }); }
+    // Наши файлы для админа: по ключу, который знает только он.
+    if (req.method === 'GET' && url.pathname.startsWith('/api/media/')) {
+      const given = url.searchParams.get('k') || '';
+      if (!config.joined?.mediaKey || !sameSecret(given, config.joined.mediaKey)) return json(res, 403, { error: 'Нет доступа.' });
+      const item = queue.find(entry => entry.id === decodeURIComponent(url.pathname.slice('/api/media/'.length)));
+      if (!item?.local || !serveRangeMp4(req, res, item.sourceUrl)) return json(res, 404, { error: 'Файл не найден.' });
+      return;
     }
     if (req.method === 'POST' && url.pathname === '/api/group/contribute') {
       const member = pairedByToken(String(req.headers['x-vrcast-token'] || ''));
@@ -7358,6 +7397,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, слушаемАдрес, () => {
   if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log, name: deviceName() });
   restoreRoutedApps();
+  joinGroup.resume();
   дозаполнитьДлительности();
   startRemoteBridge();
   // Запустились в режиме своего сервера — меряем канал, пока нет эфира.

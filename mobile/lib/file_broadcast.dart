@@ -35,10 +35,17 @@ enum _Cmd { none, seek, next, previous, jump, stop }
 
 const _channel = MethodChannel('vrcast/screen');
 
-/// Включить или выключить службу переднего плана эфира (на других платформах и в проверках ничего не делает).
-Future<void> holdAwake(bool on) async {
+final _holders = <String>{};
+
+/// Включить или выключить службу переднего плана (на других платформах и в проверках ничего не делает). Служба работает,
+/// пока она нужна хоть кому-то: эфиру или админу группы.
+Future<void> holdAwake(bool on, {String who = 'broadcast'}) async {
+  final before = _holders.isNotEmpty;
+  on ? _holders.add(who) : _holders.remove(who);
+  final after = _holders.isNotEmpty;
+  if (before == after) return;
   try {
-    await _channel.invokeMethod<void>(on ? 'broadcastStart' : 'broadcastStop');
+    await _channel.invokeMethod<void>(after ? 'broadcastStart' : 'broadcastStop');
   } catch (_) {}
 }
 

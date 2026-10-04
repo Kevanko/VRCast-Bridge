@@ -5,6 +5,7 @@ import 'api.dart';
 import 'app_log.dart';
 import 'broadcaster.dart';
 import 'discovery.dart';
+import 'phone_host.dart';
 import 'remote.dart';
 import 'screens.dart';
 
@@ -46,6 +47,7 @@ class _RootState extends State<Root> {
   Remote? _remote;
   // Эфир не зависит от связи с ПК: он общий для всех подключений и не прерывается при смене.
   final Broadcaster _broadcaster = Broadcaster();
+  late final PhoneHost _host = PhoneHost(broadcaster: _broadcaster);
   Timer? _follow;
   bool _following = false;
 
@@ -77,7 +79,9 @@ class _RootState extends State<Root> {
   void initState() {
     super.initState();
     _follow = Timer.periodic(const Duration(seconds: 12), (_) => _followPort());
+    PhoneHost.current = _host;
     Prefs.instance.load().then((_) {
+      if (Prefs.instance.hostEnabled) unawaited(_host.start().then((_) {}, onError: (_) {}));
       final last = Prefs.instance.last;
       if (!mounted) return;
       if (last != null && Prefs.instance.autoConnect) {
@@ -106,6 +110,8 @@ class _RootState extends State<Root> {
   @override
   void dispose() {
     _follow?.cancel();
+    unawaited(_host.stop());
+    if (PhoneHost.current == _host) PhoneHost.current = null;
     _remote?.dispose();
     _broadcaster.dispose();
     super.dispose();

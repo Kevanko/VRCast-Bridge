@@ -35,6 +35,8 @@ class Broadcaster extends ChangeNotifier {
   bool starting = false; // поднимается раздача (сервер в сети или бесплатная ссылка)
   bool? serves; // бесплатная ссылка отвечает снаружи: null — ещё проверяем
   _Hosted? _hosted;
+  /// Файлы подключённых устройств: идут в очередь вслед за своими, пока те в сети (это устройство — админ группы).
+  List<SharedFile> extraFiles = const [];
 
   void _onFiles() {
     // Эфир кончился — раздача больше не нужна.
@@ -48,7 +50,7 @@ class Broadcaster extends ChangeNotifier {
     final delivery = prefs.fileDelivery;
     final server = prefs.currentOwnServer;
     if (delivery == 'server' && server == null) return 'Нет своего сервера. Добавьте его в настройках или выберите другой способ.';
-    final list = prefs.sharedFiles;
+    final list = [...prefs.sharedFiles, ...extraFiles];
     if (list.isEmpty) return 'Сначала добавьте файлы на вкладке «Очередь».';
     if (starting) return null;
     files.speed = prefs.playSpeed;
