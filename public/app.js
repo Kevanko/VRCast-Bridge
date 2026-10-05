@@ -2120,13 +2120,32 @@ function paintPairedList(){
     row.append(name,rename,remove); box.append(row);
   }
 }
+// QR-код для телефона: адрес пульта в браузере и текущий код привязки. Код меняется после каждой привязки, поэтому QR обновляется.
+let phoneQrAddress='';
+async function paintPhoneQr(pin){
+  const row=$('#phoneQrRow');
+  if(!row||typeof qrcode!=='function'){ if(row) row.hidden=true; return; }
+  try{
+    if(!phoneQrAddress){ const info=await api('/api/lan-info'); phoneQrAddress=(info.addresses||[])[0]||''; }
+    if(!phoneQrAddress||!pin){ row.hidden=true; return; }
+    const url=`${phoneQrAddress}/m#${pin}`;
+    if($('#phoneQrUrl').textContent===url){ row.hidden=false; return; }
+    const qr=qrcode(0,'M'); qr.addData(url); qr.make();
+    $('#phoneQr').innerHTML=qr.createSvgTag({cellSize:4,margin:0,scalable:true});
+    const svg=$('#phoneQr').querySelector('svg'); if(svg){ svg.style.width='100%'; svg.style.height='100%'; }
+    setText($('#phoneQrUrl'),url); row.hidden=false;
+  }catch{ row.hidden=true; }
+}
+setInterval(()=>{ if(!$('#phonePairRow').hidden&&settingsDialog.open) paintPhonePin(); },4000);
 async function paintPhonePin(){
   const on=$('#phoneAccess').value==='on';
   $('#phonePairRow').hidden=!on;
+  if(!on) $('#phoneQrRow').hidden=true;
   paintPairedList();
   if(!on) return;
   try{
     const info=await api('/api/pair/pin');
+    paintPhoneQr(info.pin);
     setText($('#phonePin'),`${info.pin.slice(0,3)} ${info.pin.slice(3)}`);
     setText($('#phonePairNote'),info.phones?`Привязано устройств: ${info.phones}. Код меняется после каждой привязки`:'Введите этот код на другом устройстве: Настройки → Настройки эфира');
   }catch{}

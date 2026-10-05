@@ -31,6 +31,7 @@ export function lanHostAllowed(host, port) {
 const ALLOWED = [
   ['GET', /^\/api\/(status|events|lan-info|capture-preview)$/],
   ['GET', /^\/(thumbs|stream|api\/local-media)\//],
+  ['GET', /^\/m(\/[\w.-]*)?$/], // мобильная страница управления (в браузере телефона): сама по себе секретов не содержит
   ['GET', /^\/api\/media\//], // файлы этого устройства для админа группы: открывает только ключ
 
   ['POST', /^\/api\/(playback|stop|skip|queue|queue\/inspect|queue\/move|queue\/upload|pair)$/],
@@ -41,6 +42,7 @@ const ALLOWED = [
 // ПК с PIN: без ключа привязки пускаем только узнать имя, ввести PIN и посмотреть поток (он и так открыт по RTSP в сети).
 const OPEN_WITH_PIN = [
   ['GET', /^\/api\/lan-info$/],
+  ['GET', /^\/m(\/[\w.-]*)?$/],
   ['POST', /^\/api\/pair$/],
   ['GET', /^\/(thumbs|stream)\//],
 ];
@@ -49,6 +51,7 @@ export const lanRouteOpenWithPin = (method, pathname) => OPEN_WITH_PIN.some(([m,
 // Настройки эфира: только привязанному телефону (знает код с ПК). Серверы и ключи сюда не входят.
 const PAIRED = [
   ['GET', /^\/api\/(pair\/check|servers\/export)$/],
+  ['POST', /^\/api\/start\/screen$/], // захват экрана ПК: только привязанному устройству
   ['POST', /^\/api\/(config|tunnels\/test|servers\/speedtest|servers\/import|group\/contribute|group\/leave|group\/take)$/],
 ];
 export const lanRoutePaired = (method, pathname) => PAIRED.some(([m, pattern]) => m === method && pattern.test(pathname));

@@ -2201,7 +2201,7 @@ function status(withLogs = true) {
       expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError,
       speeds: config.tunnelSpeeds || {}, test: проверкаТуннелей },
     config: { ...config,
-      pairedPhones: (config.pairedPhones || []).map(({ id, name, at }) => ({ id, name, at })),
+      pairedPhones: (config.pairedPhones || []).map(({ id, name, at, kind }) => ({ id, name, at, kind: kind || 'phone' })),
       servers: allServers().map(item => ({ id: item.id, name: item.name, host: item.host, owner: item.owner || '',
         rtspPort: item.rtspPort, addedAt: item.addedAt, reachable: serverReach[item.id] ?? null,
         permanentLink: item.permanentLink !== false, channel: item.channel || 'live', publishKey: undefined })) },
@@ -6482,8 +6482,8 @@ function pairPhone(req, body) {
     throw Object.assign(new Error(accessPinSet() ? 'Неверный PIN.' : 'Неверный код. Он показан в настройках программы на ПК.'), { status: 403 });
   }
   const token = crypto.randomBytes(24).toString('base64url');
-  const phone = { id: crypto.randomUUID().slice(0, 8), name: String(body.name || 'Устройство').slice(0, 40), kind: body.kind === 'pc' ? 'pc' : 'phone', hash: hashToken(token), at: new Date().toISOString() };
-  saveConfig({ pairedPhones: [phone, ...(config.pairedPhones || [])].slice(0, 10) });
+  const phone = { id: crypto.randomUUID().slice(0, 8), name: String(body.name || 'Устройство').slice(0, 40), kind: ['pc', 'web'].includes(body.kind) ? body.kind : 'phone', hash: hashToken(token), at: new Date().toISOString() };
+  saveConfig({ pairedPhones: [phone, ...(config.pairedPhones || [])].slice(0, 20) });
   rotatePin();
   pairFailures.delete(ip);
   log(`Устройство привязано: ${phone.name}`);
@@ -7367,7 +7367,8 @@ const server = http.createServer(async (req, res) => {
       if (serveFile(res, THUMB_DIR, url.pathname.slice(8), true)) return; return json(res, 404, { error: 'Превью ещё создаётся.' });
     }
     if (req.method === 'GET') {
-      const relative = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
+      // /m — мобильная страница управления: открывается в браузере телефона по QR-коду, без приложения.
+      const relative = url.pathname === '/' ? 'index.html' : (url.pathname === '/m' || url.pathname === '/m/') ? 'm/index.html' : url.pathname.slice(1);
       // Версию в адресах стилей и скриптов подставляем на лету: иначе WebView2
       // отдаёт файлы прошлой версии из кеша и обновлённый интерфейс не виден.
       if (relative === 'index.html') {

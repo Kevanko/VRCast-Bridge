@@ -439,6 +439,8 @@
         <div class="setting-row" id="phonePairRow" hidden><span><b>Код привязки устройства</b><small id="phonePairNote">Нужен один раз, чтобы менять настройки эфира с другого устройства</small></span>
           <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end"><code id="phonePin" style="font-size:18px;letter-spacing:2px;white-space:nowrap">------</code>
           <button class="btn" id="phonePinNew" type="button">Новый</button><button class="btn" id="phoneUnpair" type="button">Отвязать все</button></span></div>
+        <div class="setting-row" id="phoneQrRow" hidden><span><b>Открыть пульт на телефоне</b><small id="phoneQrNote">Наведите камеру телефона на QR-код: пульт откроется в браузере, ничего ставить не нужно. Телефон и компьютер — в одной сети Wi-Fi</small></span>
+          <span style="display:flex;flex-direction:column;gap:6px;align-items:center"><span id="phoneQr" style="width:132px;height:132px;background:#fff;border-radius:8px;padding:4px;display:block" aria-label="QR-код для телефона"></span><code id="phoneQrUrl" style="font-size:11px;max-width:210px;word-break:break-all;text-align:center"></code></span></div>
         <div class="setting-row"><span><b>Имя этого устройства в сети</b><small>Так его увидят другие устройства. Пусто — имя компьютера</small></span>
           <input id="deviceNameInput" type="text" maxlength="40" style="width:170px" aria-label="Имя этого устройства в сети"></div>
         <div class="setting-row"><span><b>PIN для подключения</b><small id="accessPinNote">Необязательно. Если задан, другое устройство спросит его один раз. Поток в сети остаётся открытым</small></span>
@@ -486,6 +488,7 @@
   </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/vendor/hls.min.js?v=0.29.0"></script>
+  <script src="/vendor/qrcode.js"></script>
   <script type="module" src="/app.js?v=0.60.0"></script>
 </body>
 </html>

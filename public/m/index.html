@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101218">
+<title>VRCast — пульт</title>
+<link rel="stylesheet" href="/m/m.css">
+</head>
+<body>
+<header><b id="devName">VRCast</b><span id="pill" class="pill">…</span></header>
+
+<main>
+  <section id="pair" hidden>
+    <h2>Подключение</h2>
+    <p>Введите код привязки из настроек программы на компьютере (Настройки → Программа → «Доступ с других устройств»). Или просто отсканируйте QR-код оттуда.</p>
+    <form id="pairForm"><input id="pairCode" inputmode="numeric" autocomplete="off" placeholder="код привязки" maxlength="8"><button class="big">Подключить</button></form>
+    <p id="pairError" class="err"></p>
+  </section>
+
+  <section id="tabNow" class="tab">
+    <div class="card now">
+      <div id="cover" class="cover"></div>
+      <h2 id="title">Ничего не играет</h2>
+      <p id="sub" class="muted"></p>
+      <input id="seek" type="range" min="0" max="1000" value="0" disabled>
+      <div class="times muted"><span id="tNow">0:00</span><span id="tAll">0:00</span></div>
+      <div class="row ctl">
+        <button id="bPrev" aria-label="Назад">⏮</button>
+        <button id="bPlay" class="big" aria-label="Играть или пауза">▶</button>
+        <button id="bNext" aria-label="Далее">⏭</button>
+      </div>
+      <div class="row">
+        <button id="bStart" class="big">Начать эфир</button>
+        <button id="bStop">Стоп</button>
+      </div>
+    </div>
+    <div class="card">
+      <label>Громкость <span id="volText" class="muted"></span><input id="vol" type="range" min="0" max="200" value="100"></label>
+      <div class="row">
+        <label>Скорость <select id="speed"><option>0.5</option><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option><option>2</option></select></label>
+        <label>Повтор <select id="loop"><option value="once">Без повтора</option><option value="one">Трек</option><option value="all">Список</option></select></label>
+      </div>
+    </div>
+    <div class="card">
+      <button id="bScreen" class="wide">Транслировать экран ПК</button>
+      <p class="muted small">Экран компьютера пойдёт в тот же эфир. Остановить — кнопкой «Стоп». Экран самого телефона из браузера транслировать нельзя: для этого есть приложение.</p>
+    </div>
+  </section>
+
+  <section id="tabQueue" class="tab" hidden>
+    <div class="card">
+      <form id="addForm" class="row"><input id="addUrl" type="url" placeholder="Ссылка: YouTube, Rutube, VK, mp4…" autocomplete="off"><button class="big">Добавить</button></form>
+      <label class="file">Или файлы с телефона<input id="addFiles" type="file" accept="video/*,audio/*" multiple></label>
+      <div id="upload" class="muted small"></div>
+    </div>
+    <ul id="queue" class="queue"></ul>
+  </section>
+
+  <section id="tabLinks" class="tab" hidden>
+    <div class="card" id="links"></div>
+  </section>
+
+  <section id="tabMore" class="tab" hidden>
+    <div class="card">
+      <label>Качество <select id="quality"><option>480p</option><option>720p</option><option>1080p</option></select></label>
+      <label>Кадры в секунду <select id="fps"><option>30</option><option>60</option></select></label>
+      <label>Куда идёт эфир <select id="output"><option value="local">Локально (в этой сети)</option><option value="tunnel">Публичная ссылка</option><option value="remote">Свой сервер</option></select></label>
+    </div>
+    <div class="card"><button id="bForget" class="wide">Забыть этот телефон</button></div>
+  </section>
+</main>
+
+<nav>
+  <button data-tab="Now" class="on">Сейчас</button>
+  <button data-tab="Queue">Очередь</button>
+  <button data-tab="Links">Ссылки</button>
+  <button data-tab="More">Ещё</button>
+</nav>
+<div id="toast"></div>
+<script src="/m/m.js"></script>
+</body>
+</html>
