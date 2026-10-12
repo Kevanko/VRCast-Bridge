@@ -2,7 +2,7 @@
 
 *{box-sizing:border-box}
 html{color-scheme:dark}
-body{margin:0;min-width:960px;height:100vh;overflow:hidden;background:var(--bg);color:var(--text);
+body{margin:0;min-width:960px;height:calc(100vh / var(--zoom,1));overflow:hidden;background:var(--bg);color:var(--text);
   font:400 14px/1.4 "Golos Text",system-ui,sans-serif;-webkit-font-smoothing:antialiased;text-rendering:geometricPrecision}
 /* ── Живой фон ──────────────────────────────────────────────────────────────
    Плавный перелив цветов темы: огромный конический градиент (цвета сменяют
@@ -115,7 +115,7 @@ option{background:var(--menu);color:var(--text)}
 .seg button:focus-visible{outline-offset:-2px}
 
 /* ─── Каркас ────────────────────────────────────────────────────────────── */
-.app{height:100vh;display:grid;grid-template-rows:60px minmax(0,1fr) 36px}
+.app{height:calc(100vh / var(--zoom,1));display:grid;grid-template-rows:60px minmax(0,1fr) 36px}
 .topbar{position:relative;display:flex;align-items:center;gap:16px;padding:0 20px;border-bottom:1px solid var(--edge);background:var(--bar)}
 .brand{display:flex;align-items:center;gap:10px;flex:none}
 .brand-mark{width:32px;height:32px;padding:8px;display:flex;align-items:flex-end;justify-content:center;gap:3px;border-radius:9px;background:var(--raise)}
@@ -518,11 +518,11 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 .dialog-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:18px}
 #logDialog{width:min(820px,86vw)}
 #logs{max-height:420px;margin:0;overflow:auto;padding:12px;border:1px solid var(--edge);border-radius:10px;background:var(--bg);color:var(--soft);font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word}
-#serverDialog{width:min(440px,92vw);max-height:min(88vh,660px);overflow:auto}
+#serverDialog{width:min(440px,92vw);max-height:min(calc(88vh / var(--zoom,1)),660px);overflow:auto}
 #serverDialog .field-label{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
 #serverDialog input[type=text],#serverDialog input[type=password]{width:100%}
 /* Окно добавления: обложка и название сверху, выбор серий, озвучки, качества. */
-#addDialog{width:min(480px,92vw);max-height:min(88vh,720px);overflow:auto}
+#addDialog{width:min(480px,92vw);max-height:min(calc(88vh / var(--zoom,1)),720px);overflow:auto}
 .add-head{display:flex;align-items:center;gap:14px;margin-bottom:18px}
 .add-cover{width:56px;height:78px;flex:none;display:grid;place-items:center;overflow:hidden;border-radius:8px;background:var(--raise);color:var(--accent-strong)}
 .add-cover img{width:100%;height:100%;object-fit:cover}
@@ -909,3 +909,21 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 /* В «Терминале» время — зелёная метрика, но тёмно-зелёная, чтобы читалась на светлом. */
 :root[data-theme="terminal"] .transport .time{color:#08743c}
 :root[data-theme="terminal"] .transport .vol-head output{color:#08743c;font-weight:600}
+/* Светлая тема: фон шагов — как у самого экрана; смесь с чёрным давала грязно-серый. */
+:root[data-theme="minimal-light"] .first-run{background:var(--bg);border-color:var(--edge)}
+
+/* Размер текста: масштаб всего окна, высота экрана делится обратно. */
+html{zoom:var(--zoom,1)}
+/* Выбор шрифта: каждая карточка показывает «Аа» своим шрифтом. */
+.font-picker{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:8px 0 18px}
+.font-picker button{display:flex;align-items:baseline;gap:12px;padding:12px 14px;border:1px solid var(--edge);border-radius:12px;background:var(--bg);color:var(--soft);text-align:left}
+.font-picker button:hover{border-color:var(--edge-strong);color:var(--text)}
+.font-picker button[aria-checked="true"]{border-color:var(--accent);background:var(--accent-soft);color:var(--text)}
+.font-picker b{font-size:13px;font-weight:600;font-family:inherit}
+.font-sample{font-size:26px;line-height:1;font-weight:500;color:var(--text)}
+.font-picker [data-font-choice="golos"] *{font-family:"Golos Text",system-ui,sans-serif!important}
+.font-picker [data-font-choice="onest"] *{font-family:"Onest",system-ui,sans-serif!important}
+.font-picker [data-font-choice="geist"] *{font-family:"Geist",system-ui,sans-serif!important}
+.font-picker [data-font-choice="serif"] *{font-family:"Playfair Display",Georgia,serif!important}
+.font-picker [data-font-choice="mono"] *{font-family:"JetBrains Mono",ui-monospace,monospace!important}
+.scale-seg button{min-width:44px;font-weight:600;line-height:1}

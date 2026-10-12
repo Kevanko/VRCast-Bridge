@@ -8,29 +8,29 @@
   --second:#38e1ff;--live:#ff4d6d;--live-text:#ff8098;--ok:#3ee6a3;--ok-text:#8ff0c8;--cue:#ffc15e;--danger:#ff4d6d;
   --shade:rgba(10,9,19,.72);
   --sw-night-1:#0e0c18;--sw-night-2:#1e1a36;--sw-night-3:#8f6bff;
-  --sw-broadcast-1:#0f1115;--sw-broadcast-2:#1e222b;--sw-broadcast-3:#4d9fff;
-  --sw-projector-1:#121110;--sw-projector-2:#252321;--sw-projector-3:#ffb547;
+  --sw-broadcast-1:#0d0d0d;--sw-broadcast-2:#212121;--sw-broadcast-3:#339cff;
+  --sw-projector-1:#262624;--sw-projector-2:#3a3936;--sw-projector-3:#d97757;
   --glow-a:#8f6bff;--glow-b:#c050ff;--glow-c:#5b3dff;
   --ease:cubic-bezier(.2,.8,.2,1);
   --mono:"JetBrains Mono",ui-monospace,monospace;
 }
 :root[data-theme="broadcast"]{
-  --bg:#0f1115;--bar:#11141a;--side:#12151b;--surface:#161920;--raise:#1e222b;--sel:#262c38;--menu:#1a1e27;
-  --edge:#2c313c;--edge-strong:#3b4250;
-  --text:#eef1f6;--soft:#d3d8e2;--muted:#9aa3b2;--faint:#7f8796;
-  --accent:#4d9fff;--accent-strong:#8ec2ff;--accent-soft:rgba(77,159,255,.14);--accent-line:rgba(77,159,255,.55);--on-accent:#06121f;
-  --second:#4d9fff;--live:#ff4757;--live-text:#ff7f8a;--ok:#2fd98a;--ok-text:#86ecbd;--cue:#ffb020;--danger:#ff4757;
-  --shade:rgba(8,10,14,.72);
-  --glow-a:#4d9fff;--glow-b:#2c5dff;--glow-c:#3cc4ff;
+  --bg:#0d0d0d;--bar:#111111;--side:#141414;--surface:#181818;--raise:#212121;--sel:#2b2b2b;--menu:#1a1a1a;
+  --edge:#262626;--edge-strong:#363636;
+  --text:#ececec;--soft:#d4d4d4;--muted:#a3a3a3;--faint:#737373;
+  --accent:#ececec;--accent-strong:#7cb8ff;--accent-soft:rgba(51,156,255,.12);--accent-line:rgba(51,156,255,.5);--on-accent:#0d0d0d;
+  --second:#339cff;--live:#ff5c5c;--live-text:#ff8f8f;--ok:#4ade80;--ok-text:#86efac;--cue:#fbbf24;--danger:#ff5c5c;
+  --shade:rgba(13,13,13,.78);
+  --glow-a:#339cff;--glow-b:#7c5cff;--glow-c:#1a3a8f;
 }
 :root[data-theme="projector"]{
-  --bg:#121110;--bar:#151412;--side:#161513;--surface:#1b1a18;--raise:#252321;--sel:#2f2c28;--menu:#22201d;
-  --edge:#3a3733;--edge-strong:#4c4843;
-  --text:#f5f1e8;--soft:#ddd7cb;--muted:#aaa398;--faint:#8f887f;
-  --accent:#ffb547;--accent-strong:#ffd08a;--accent-soft:rgba(255,181,71,.14);--accent-line:rgba(255,181,71,.55);--on-accent:#1a1206;
-  --second:#ffb547;--live:#ff5a4e;--live-text:#ff8a80;--ok:#6ee28f;--ok-text:#a8f0bd;--cue:#ffd166;--danger:#ff5a4e;
-  --shade:rgba(14,12,10,.72);
-  --glow-a:#ffb547;--glow-b:#ff7a3d;--glow-c:#ffd66e;
+  --bg:#262624;--bar:#1f1e1d;--side:#1f1e1d;--surface:#30302e;--raise:#3a3936;--sel:#45443f;--menu:#30302e;
+  --edge:#3e3d39;--edge-strong:#52504a;
+  --text:#faf9f5;--soft:#e5e3da;--muted:#c2c0b6;--faint:#9c9a92;
+  --accent:#d97757;--accent-strong:#eb9a7c;--accent-soft:rgba(217,119,87,.14);--accent-line:rgba(217,119,87,.55);--on-accent:#ffffff;
+  --second:#d97757;--live:#e5604a;--live-text:#f2957f;--ok:#7fbf7a;--ok-text:#b2dcae;--cue:#e3b062;--danger:#e5604a;
+  --shade:rgba(31,30,29,.78);
+  --glow-a:#d97757;--glow-b:#b5583a;--glow-c:#e3b062;
 }
 :root[data-theme="midnight"]{
   --bg:#03040a;--bar:#070915;--side:#080a17;--surface:#0b0e1c;--raise:#141a30;--sel:#1c2244;--menu:#0c0f1f;
@@ -88,3 +88,12 @@
   --second:#00e0ff;--live:#ff2e63;--live-text:#ff6f93;--ok:#00ff6a;--ok-text:#7dffb1;--cue:#e6ff00;--danger:#ff2e63;
   --shade:rgba(1,10,4,.8);--glow-a:#00ff6a;--glow-b:#00b34a;--glow-c:#00e0ff;
 }
+
+/* Шрифт, выбранный в «Оформлении», — поверх шрифта темы (заголовки и цифры
+   остаются в характере темы). Один набор и для окна, и для пульта телефона. */
+:root[data-font="golos"]{--ui-font:"Golos Text",system-ui,sans-serif}
+:root[data-font="onest"]{--ui-font:"Onest",system-ui,sans-serif}
+:root[data-font="geist"]{--ui-font:"Geist","Golos Text",system-ui,sans-serif}
+:root[data-font="serif"]{--ui-font:"Playfair Display",Georgia,serif}
+:root[data-font="mono"]{--ui-font:"JetBrains Mono",ui-monospace,monospace}
+:root[data-font] body,:root[data-font] :is(button,input,select,textarea){font-family:var(--ui-font)!important}

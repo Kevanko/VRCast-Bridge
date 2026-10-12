@@ -18,7 +18,7 @@ async function api(path, method = 'GET', body) {
   return data;
 }
 // Тема — та же, что в программе на ПК. Запоминаем, чтобы при следующем открытии не мигала чужая.
-const THEME_COLORS = { midnight: '#03040a', minimal: '#000000', 'minimal-light': '#ffffff', stage: '#000000', terminal: '#101010', matrix: '#010a04', night: '#0e0c18', broadcast: '#0f1115', projector: '#121110' };
+const THEME_COLORS = { midnight: '#03040a', minimal: '#000000', 'minimal-light': '#ffffff', stage: '#000000', terminal: '#101010', matrix: '#010a04', night: '#0e0c18', broadcast: '#0d0d0d', projector: '#262624' };
 function applyTheme(theme) {
   if (!THEME_COLORS[theme]) return;
   const root = document.documentElement;
@@ -63,6 +63,8 @@ function render() {
   const pb = state.playback || {}, p = state.progress || {}, cfg = state.config || {};
   const cur = (state.queue || []).find(q => q.id === state.currentId);
   applyTheme(cfg.theme);
+  const font = cfg.uiFont || '';
+  if ((document.documentElement.dataset.font || '') !== font) { if (font) document.documentElement.dataset.font = font; else delete document.documentElement.dataset.font; try { localStorage.setItem('vrcast-m-font', font); } catch {} }
   setPill(!state.running ? 'Не в эфире' : pb.buffering ? 'Загружаю…' : pb.paused ? 'Пауза' : 'В эфире', state.running ? 'live' : '');
   $('title').textContent = state.activeKind === 'screen' ? 'Экран компьютера' : cur?.title || (state.queue?.length ? 'Ничего не играет' : 'Очередь пуста');
   $('sub').textContent = cur?.owner ? `у «${cur.owner}»` : '';

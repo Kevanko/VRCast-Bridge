@@ -7243,6 +7243,8 @@ const server = http.createServer(async (req, res) => {
         mediaFps: body.mediaFps === 60 ? 60 : (body.mediaFps === 30 ? 30 : (config.mediaFps || 30)),
         // Тема окна — её же берёт пульт в браузере телефона.
         theme: /^[a-z-]{1,24}$/.test(body.theme || '') ? body.theme : (config.theme || ''),
+        uiFont: ['', 'golos', 'onest', 'geist', 'serif', 'mono'].includes(body.uiFont) ? body.uiFont : (config.uiFont || ''),
+        uiScale: [0.9, 1, 1.1, 1.25].includes(Number(body.uiScale)) ? Number(body.uiScale) : (Number(config.uiScale) || 1),
       };
       const previousOutput = config.outputMode;
       const previousConfig = { ...config };

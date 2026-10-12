@@ -2068,7 +2068,7 @@ $('#cacheLimit').addEventListener('change',async()=>{
 // плейлист. Окно раскрывается и закрывается с короткой анимацией; при
 // системной настройке «меньше движения» — мгновенно.
 const settingsDialog=$('#settingsDialog');
-const ТЕМЫ={midnight:'#03040a',minimal:'#000000','minimal-light':'#ffffff',stage:'#000000',terminal:'#101010',matrix:'#010a04',night:'#0e0c18',broadcast:'#0f1115',projector:'#121110'};
+const ТЕМЫ={midnight:'#03040a',minimal:'#000000','minimal-light':'#ffffff',stage:'#000000',terminal:'#101010',matrix:'#010a04',night:'#0e0c18',broadcast:'#0d0d0d',projector:'#262624'};
 
 function применитьТему(тема){
   if(!ТЕМЫ[тема])тема='midnight';
@@ -2099,11 +2099,42 @@ function применитьТему(тема){
   размер(); setInterval(кадр,55);
 })();
 
-// Тема живёт в настройках программы: пульт в браузере телефона берёт её оттуда.
-function сохранитьТему(тема){ api('/api/config',{method:'POST',body:JSON.stringify({theme:тема})}).catch(()=>{}); }
+// Тема, шрифт и размер живут в настройках программы: пульт в браузере телефона берёт их оттуда.
+function сохранитьВид(поля){ api('/api/config',{method:'POST',body:JSON.stringify(поля)}).catch(()=>{}); }
+const сохранитьТему=тема=>сохранитьВид({theme:тема});
+const ШРИФТЫ=['','golos','onest','geist','serif','mono'], МАСШТАБЫ=[0.9,1,1.1,1.25];
+function применитьШрифт(шрифт){
+  if(!ШРИФТЫ.includes(шрифт))шрифт='';
+  if(шрифт)document.documentElement.dataset.font=шрифт; else delete document.documentElement.dataset.font;
+  for(const кнопка of $$('[data-font-choice]'))кнопка.setAttribute('aria-checked',String(кнопка.dataset.fontChoice===шрифт));
+}
+function применитьМасштаб(масштаб){
+  масштаб=МАСШТАБЫ.includes(Number(масштаб))?Number(масштаб):1;
+  document.documentElement.style.setProperty('--zoom',масштаб);
+  for(const кнопка of $$('[data-scale]'))кнопка.setAttribute('aria-checked',String(Number(кнопка.dataset.scale)===масштаб));
+}
+применитьШрифт(document.documentElement.dataset.font||'');
+применитьМасштаб(Number(getComputedStyle(document.documentElement).getPropertyValue('--zoom'))||1);
+function синхронВида(config){
+  if(Date.now()<=(синхронТемы.ждать||0))return;
+  const шрифт=config?.uiFont??'', масштаб=Number(config?.uiScale)||1;
+  if(шрифт!==(document.documentElement.dataset.font||'')){ применитьШрифт(шрифт); положить('ui-font',шрифт); }
+  if(масштаб!==(Number(getComputedStyle(document.documentElement).getPropertyValue('--zoom'))||1)){ применитьМасштаб(масштаб); положить('ui-scale',масштаб); }
+}
+$('.font-picker').addEventListener('click',event=>{
+  const кнопка=event.target.closest('[data-font-choice]'); if(!кнопка)return;
+  применитьШрифт(кнопка.dataset.fontChoice); положить('ui-font',кнопка.dataset.fontChoice);
+  синхронТемы.ждать=Date.now()+4000; сохранитьВид({uiFont:кнопка.dataset.fontChoice});
+});
+$('#uiScale').addEventListener('click',event=>{
+  const кнопка=event.target.closest('[data-scale]'); if(!кнопка)return;
+  применитьМасштаб(кнопка.dataset.scale); положить('ui-scale',кнопка.dataset.scale);
+  синхронТемы.ждать=Date.now()+4000; сохранитьВид({uiScale:Number(кнопка.dataset.scale)});
+});
 function синхронТемы(тема){
   const своя=document.documentElement.dataset.theme||'night';
   if(!тема){ if(!синхронТемы.отправлена){ синхронТемы.отправлена=true; сохранитьТему(своя); } return; }
+  синхронВида(ui.status?.config);
   // Пока выбор только что сделан и ещё летит на сервер, старый статус его не откатывает.
   if(тема!==своя&&ТЕМЫ[тема]&&Date.now()>(синхронТемы.ждать||0)){ применитьТему(тема); положить('theme',тема); }
 }
