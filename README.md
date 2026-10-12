@@ -21,7 +21,7 @@ Videos, anime and your screen in a VRChat video player, with one link.
 
 VRCast Bridge turns what's on your PC into a single link for the AVPro player in a VRChat world. The link stays the same while the app is open, so you can switch videos, pause or move to screen capture without anyone pressing resync. It reaches the world in about half a second.
 
-- **Queue:** YouTube and playlists, VK, Rutube, AnimeLib and other Kodik sites, direct `.mp4` / `.m3u8` links, your own files.
+- **Queue:** YouTube and playlists, VK, Rutube, AnimeLib and other Kodik sites, direct `.mp4` / `.m3u8` links, your own files. Spotify playlists, albums and copied tracks play via YouTube.
 - **Screen:** a monitor, a window or a region, with system or per-app sound.
 - **Friends:** a free public link (Cloudflare, Serveo) or your own server, installed with one command.
 - **Phone remote:** scan a QR code and control the stream from your phone's browser.
@@ -65,7 +65,7 @@ More: [Linux, phone and building from source](docs/LINUX-AND-PHONE.md) (in Russi
 
 VRCast Bridge отдаёт то, что происходит на компьютере, одной ссылкой для плеера AVPro в мире VRChat. Ссылка не меняется, пока программа открыта: можно переключать видео, ставить паузу или переходить на захват экрана, и никому не нужно жать resync. Картинка доходит до мира примерно за полсекунды.
 
-- **Очередь:** YouTube и плейлисты, VK, Rutube, AnimeLib и другие сайты с Kodik, прямые ссылки `.mp4` и `.m3u8`, свои файлы.
+- **Очередь:** YouTube и плейлисты, VK, Rutube, AnimeLib и другие сайты с Kodik, прямые ссылки `.mp4` и `.m3u8`, свои файлы. Плейлисты, альбомы и скопированные треки Spotify — звук берётся с YouTube.
 - **Экран:** монитор, окно или область, системный звук или звук одного приложения.
 - **Для друзей:** бесплатная публичная ссылка (Cloudflare, Serveo) или свой сервер, который ставится одной командой.
 - **Пульт с телефона:** наведите камеру на QR-код и управляйте эфиром из браузера телефона.

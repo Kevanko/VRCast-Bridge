@@ -592,7 +592,7 @@ function queueRowHtml(item,index,state,{готовые,качаются,unityВ�
 // Пустая очередь — приглашение, а не пустота: куда перетащить и что можно вставить.
 function queueEmptyHtml(){
   return `<div class="queue-empty"><div class="deck-icon">${icon('folder-plus')}</div><div><b>Перетащите видео сюда</b><br><small>или вставьте ссылку выше — ролик, плейлист или аниме-сайт</small></div>`
-    +`<button class="btn" type="button" data-pick-local>Выбрать файлы</button><div class="source-chips"><span>YouTube</span><span>VK Видео</span><span>Rutube</span><span>Файлы</span></div></div>`;
+    +`<button class="btn" type="button" data-pick-local>Выбрать файлы</button><div class="source-chips"><span>YouTube</span><span>VK Видео</span><span>Rutube</span><span title="Плейлист, альбом или скопированные треки — звук берётся с YouTube">Spotify</span><span>Файлы</span></div></div>`;
 }
 
 // Часы эфира в шапке тикают раз в секунду, только пока идёт эфир и окно видно.

@@ -12,6 +12,7 @@ import { pipeline } from 'node:stream/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
 import { createJoin } from './join.js';
 import { hashToken, isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRouteOpenWithPin, lanRoutePaired, lanRouteAllowed, pickNetworkConfig, publishService, sameSecret, unpublishService } from './lan.js';
+import { spotifyLinks, spotifyTracks } from './spotify.js';
 import { hideMemberSource, sanitizeContribution, sharedQueueItem, sharedServer, takeInitiative } from './group.js';
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
@@ -609,6 +610,8 @@ function normalizeQueueItem(raw, freshId = false) {
     // шли через yt-dlp («Unsupported URL») и прогревались все подряд. Берём её
     // и по самой ссылке — так чинятся и уже сохранённые списки.
     anime: Boolean(raw.anime) || (!local && isAnimeUrl(sourceUrl)),
+    ...(raw.search ? { search: String(raw.search).slice(0, 300) } : {}),
+    ...(raw.foundUrl && validWebUrl(String(raw.foundUrl)) ? { foundUrl: String(raw.foundUrl) } : {}),
   };
 }
 
@@ -4680,7 +4683,7 @@ function resolveItem(item) {
   }
   const cached = resolvedMedia.get(item.id);
   if (!cached || Date.now() - cached.createdAt > 12 * 60 * 1000) {
-    const promise = (item.anime ? resolveAnimeMedia(item) : resolveRemoteMedia(item.sourceUrl)).catch(error => { resolvedMedia.delete(item.id); throw error; });
+    const promise = (item.anime ? resolveAnimeMedia(item) : источникТрека(item).then(resolveRemoteMedia)).catch(error => { resolvedMedia.delete(item.id); throw error; });
     resolvedMedia.set(item.id, { createdAt: Date.now(), promise });
   }
   return resolvedMedia.get(item.id).promise;
@@ -4922,7 +4925,7 @@ function startCacheDownload(item) {
   mkdirSync(directory, { recursive: true });
   let promise;
   // У серии с аниме-сайта yt-dlp качает не страницу, а свежую прямую ссылку.
-  const источник = item.anime ? resolveAnime(item.sourceUrl).then(media => media.url) : Promise.resolve(item.sourceUrl);
+  const источник = item.anime ? resolveAnime(item.sourceUrl).then(media => media.url) : источникТрека(item);
   promise = источник.then(sourceUrl => new Promise((resolvePromise, reject) => {
     log(`Буферизация трека: ${item.title}`);
     // Во время эфира качаем бережно: четыре потока на полной скорости забивают
@@ -5919,9 +5922,10 @@ const ждутПодтверждения = new Map();
 const СПРОСИТЬ_ОТ = 10;
 
 async function addUrl(rawUrl, options = {}) {
+  if (spotifyLinks(rawUrl).length) return addSpotify(rawUrl, options);
   if (!validWebUrl(rawUrl)) throw new Error('Вставьте полную ссылку с http:// или https://');
   const host = new URL(rawUrl).hostname.toLowerCase();
-  if (host === 'open.spotify.com') throw new Error('Spotify не отдаёт полный трек. Для Spotify используйте захват окна и звук компьютера.');
+  if (host === 'open.spotify.com') throw new Error('Это не трек, альбом или плейлист Spotify.');
   if (!tools.ytdlp) throw new Error('Компонент загрузки видео не найден.');
   if (isAnimeUrl(rawUrl)) return addAnime(rawUrl, options.anime);
   const direct = DIRECT_LIVE.test(rawUrl) || DIRECT_FILE.test(rawUrl);
@@ -5996,6 +6000,53 @@ async function addUrl(rawUrl, options = {}) {
   // между треками идут с диска и не ждут разбора ссылки.
   prefetchQueue(0);
   return added;
+}
+
+// Spotify: плейлист, альбом, трек или несколько треков, скопированных в
+// Spotify (Ctrl+C). Список берём сразу, а ролик на YouTube ищем, только когда
+// трек начинают качать или играть, — так сотня треков добавляется мгновенно.
+async function addSpotify(rawUrl, options) {
+  if (!tools.ytdlp) throw new Error('Компонент загрузки видео не найден.');
+  const отложенный = ждутПодтверждения.get(rawUrl);
+  ждутПодтверждения.delete(rawUrl);
+  const found = options.confirm === 'all' && отложенный?.spotify && Date.now() - отложенный.at < 10 * 60000
+    ? отложенный.spotify : await spotifyTracks(rawUrl);
+  if (!found.tracks.length) throw new Error('В этой ссылке Spotify нет доступных треков.');
+  if (found.tracks.length > СПРОСИТЬ_ОТ && !options.confirm) {
+    ждутПодтверждения.set(rawUrl, { spotify: found, at: Date.now() });
+    return { ask: { count: found.tracks.length, title: found.title, single: false } };
+  }
+  const added = found.tracks.map(track => ({
+    id: crypto.randomUUID(), title: track.artist ? `${track.artist} — ${track.title}` : track.title,
+    sourceUrl: `https://open.spotify.com/track/${track.id}`, search: track.artist ? `${track.artist} - ${track.title}` : track.title,
+    duration: track.duration, thumbnail: track.cover, local: false, hasVideo: true, hasAudio: true,
+  }));
+  queue.push(...added);
+  saveQueue();
+  log(`Добавлено из Spotify${found.title ? ` «${found.title}»` : ''}: ${added.length} — звук возьмём с YouTube`);
+  prefetchQueue(0);
+  return added;
+}
+
+// Ссылка, которую качает и играет yt-dlp. Для трека из Spotify — первый ролик
+// поиска на YouTube; найденный адрес запоминается вместе с очередью.
+const поискиYouTube = new Map();
+function источникТрека(item) {
+  if (!item.search || item.foundUrl) return Promise.resolve(item.foundUrl || item.sourceUrl);
+  if (!поискиYouTube.has(item.id)) {
+    const поиск = spawnJson(ytdlpPath(), ['--no-warnings', '--flat-playlist', '--dump-single-json', `ytsearch1:${item.search}`], 45000).then(result => {
+      const entry = result.entries?.[0];
+      const url = entry?.url && validWebUrl(entry.url) ? entry.url : entry?.id ? `https://www.youtube.com/watch?v=${entry.id}` : '';
+      if (!url) throw new Error(`На YouTube не нашлось «${item.search}»`);
+      item.foundUrl = url;
+      for (const same of queue) if (same.id === item.id) same.foundUrl = url;
+      saveQueue();
+      logDetail(`Spotify → YouTube: «${item.search}» → ${url}`);
+      return url;
+    }).finally(() => поискиYouTube.delete(item.id));
+    поискиYouTube.set(item.id, поиск);
+  }
+  return поискиYouTube.get(item.id);
 }
 
 const FFPROBE_ARGS = ['-v', 'error', '-show_entries',
