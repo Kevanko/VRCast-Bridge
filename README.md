@@ -53,11 +53,11 @@ On any Linux VPS with systemd:
 curl -fsSL https://raw.githubusercontent.com/Kevanko/VRCast-Bridge/main/server/install.sh | sudo bash
 ```
 
-It prints the address and a key. In the app: **Settings → Network and servers → Add server → Already set up**, paste both, then pick **Own server** at the top. Manage it later with `vrcast status`, `sudo vrcast key`, `sudo vrcast update` or `sudo vrcast uninstall`.
+It prints the address and a key. In the app: **Settings → Links and servers → Add server → Already set up**, paste both, then pick **Own server** at the top. Manage it later with `vrcast status`, `sudo vrcast key`, `sudo vrcast update` or `sudo vrcast uninstall`.
 
 ### Phone remote
 
-**Settings → App → Access from other devices**, then scan the QR code with a phone on the same Wi-Fi. Only paired devices can control the app.
+**Settings → Phone**, then scan the QR code with a phone on the same Wi-Fi. Only paired devices can control the app.
 
 More: [Linux, phone and building from source](docs/LINUX-AND-PHONE.md) (in Russian), [full guide](docs/GUIDE.md).
 
@@ -97,20 +97,18 @@ git clone https://github.com/Kevanko/VRCast-Bridge.git && cd VRCast-Bridge
 curl -fsSL https://raw.githubusercontent.com/Kevanko/VRCast-Bridge/main/server/install.sh | sudo bash
 ```
 
-Скрипт покажет адрес и ключ. В программе: «Настройки → Сеть и серверы → Добавить сервер → Уже настроен», вставьте их и сверху выберите «Свой сервер». Дальше сервером управляет команда `vrcast`: `vrcast status`, `sudo vrcast key`, `sudo vrcast update`, `sudo vrcast uninstall`.
+Скрипт покажет адрес и ключ. В программе: «Настройки → Ссылки и серверы → Добавить сервер → Уже настроен», вставьте их и сверху выберите «Свой сервер». Дальше сервером управляет команда `vrcast`: `vrcast status`, `sudo vrcast key`, `sudo vrcast update`, `sudo vrcast uninstall`.
 
 Без консоли тоже можно: «Добавить сервер → Настроить с нуля», программа сама зайдёт по SSH (пароль не сохраняется).
 
 ### Пульт с телефона
 
-«Настройки → Программа → Доступ с других устройств», затем наведите камеру телефона в той же Wi-Fi на QR-код. Управлять программой могут только привязанные устройства.
+«Настройки → Телефон», затем наведите камеру телефона в той же Wi-Fi на QR-код. Управлять программой могут только привязанные устройства.
 
 Подробнее: [Linux, телефон и сборка](docs/LINUX-AND-PHONE.md), [полное руководство](docs/GUIDE.md).
 
 <div align="center">
 
-<img src="docs/media/screenshot.png" width="800" alt="Окно программы в теме «Полночь»: эфир фильма Spring, очередь из четырёх фильмов Blender">
-
-<sub>In the frame: open movies by Blender Studio (CC BY). [MIT](LICENSE)</sub>
+<sub>[MIT](LICENSE)</sub>
 
 </div>

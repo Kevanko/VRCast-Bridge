@@ -19,8 +19,11 @@
     <DebugType>none</DebugType>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+  <!-- Пакеты качаются при restore (в том числе в CI); берём именно сборку Wasapi под Windows. -->
   <ItemGroup>
-    <Reference Include="NAudio.Core" HintPath="C:\Users\NM\.nuget\packages\naudio.core\2.3.0\lib\netstandard2.0\NAudio.Core.dll" Private="true" />
-    <Reference Include="NAudio.Wasapi" HintPath="C:\Users\NM\.nuget\packages\naudio.wasapi\2.3.0\lib\net9.0-windows10.0.26100\NAudio.Wasapi.dll" Private="true" />
+    <PackageDownload Include="NAudio.Core" Version="[2.3.0]" />
+    <PackageDownload Include="NAudio.Wasapi" Version="[2.3.0]" />
+    <Reference Include="NAudio.Core" HintPath="$(NuGetPackageRoot)\naudio.core\2.3.0\lib\netstandard2.0\NAudio.Core.dll" Private="true" />
+    <Reference Include="NAudio.Wasapi" HintPath="$(NuGetPackageRoot)\naudio.wasapi\2.3.0\lib\net9.0-windows10.0.26100\NAudio.Wasapi.dll" Private="true" />
   </ItemGroup>
 </Project>
