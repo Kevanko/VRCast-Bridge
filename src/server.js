@@ -6167,12 +6167,28 @@ let кадрыИдут = false;
 const нетКадра = item => !String(item.thumbnail || '').startsWith('/thumbs/') || thumbFileMissing(item);
 const нуженРазбор = item => item.anime && (нетКадра(item) || !item.duration);
 
+// Длительности серий хранятся и отдельно, по ссылке: удалили список и
+// добавили тайтл заново — время уже известно, сайт не спрашиваем.
+const MEDIA_INFO_FILE = join(DATA_DIR, 'media-info.json');
+const сведенияОСериях = (() => { try { return new Map(Object.entries(JSON.parse(readFileSync(MEDIA_INFO_FILE, 'utf8')))); } catch { return new Map(); } })();
+let сохранениеСведений = null;
 function запомнитьОСерии(sourceUrl, поля) {
   for (const entry of [...queue, ...templates.flatMap(list => list.items || [])]) if (entry.sourceUrl === sourceUrl) Object.assign(entry, поля);
+  if (поля.duration) {
+    сведенияОСериях.set(sourceUrl, { duration: поля.duration });
+    сохранениеСведений ||= setTimeout(() => { сохранениеСведений = null; writeJsonAtomic(MEDIA_INFO_FILE, Object.fromEntries(сведенияОСериях)); }, 3000);
+  }
   saveQueueSoon(); saveTemplatesSoon();
+}
+// Подставить известное время сериям без него (после добавления, открытия списка, запуска).
+function временаИзКеша(items) {
+  let есть = 0;
+  for (const item of items) if (item.anime && !item.duration && сведенияОСериях.get(item.sourceUrl)?.duration) { item.duration = сведенияОСериях.get(item.sourceUrl).duration; есть++; }
+  return есть;
 }
 
 function кадрыДляСерий(items) {
+  if (временаИзКеша(items)) { saveQueueSoon(); saveTemplatesSoon(); }
   for (const item of items) if (нуженРазбор(item) && !кадрыСерий.some(other => other.sourceUrl === item.sourceUrl)) кадрыСерий.push(item);
   if (кадрыИдут) return;
   кадрыИдут = true;
@@ -6184,12 +6200,27 @@ function кадрыДляСерий(items) {
   (async () => {
     while (кадрыСерий.length) {
       const пачка = кадрыСерий.splice(0);
-      await поОчереди(пачка, 8, async item => {
+      // Сайт отвечает «429, слишком много запросов», если спрашивать быстро:
+      // по три серии с паузой, на 429 — ждём и повторяем.
+      const неВышло = [];
+      await поОчереди(пачка, 3, async item => {
         if (item.duration) return;
-        const media = await resolveAnime(item.sourceUrl);
-        if (media?.duration && !item.duration) запомнитьОСерии(item.sourceUrl, { duration: media.duration });
+        for (let попытка = 1; ; попытка++) {
+          try {
+            const media = await resolveAnime(item.sourceUrl);
+            if (media?.duration && !item.duration) запомнитьОСерии(item.sourceUrl, { duration: media.duration });
+            break;
+          } catch (error) {
+            if (!/429|5\d\d|timeout|fetch failed/i.test(String(error.message)) || попытка >= 5) { неВышло.push(item); break; }
+            await new Promise(resolve => setTimeout(resolve, 4000 * попытка));
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
       });
-      await поОчереди(пачка, 4, async item => {
+      // Не вышло — вернёмся к ним через минуту, а не бросаем до перезапуска.
+      if (неВышло.length) setTimeout(() => кадрыДляСерий(неВышло), 60000).unref?.();
+      // Кадры — по два: им тоже нужна ссылка с сайта, а он не любит частых запросов.
+      await поОчереди(пачка, 2, async item => {
         if (!нетКадра(item)) return;
         const вход = cachedMediaPath(cacheKey(item)) || (await resolveAnime(item.sourceUrl))?.url;
         if (!вход) return;
@@ -7626,6 +7657,8 @@ server.listen(PORT, слушаемАдрес, () => {
   cleanupStorage();
   setInterval(cleanupStorage, 10 * 60 * 1000).unref();
   // Свои кадры серий аниме — в фоне, когда программа уже запустилась.
+  // Уже известное время серий из списков — тоже в кеш по ссылке.
+  for (const item of [...queue, ...templates.flatMap(list => list.items || [])]) if (item.anime && item.duration && !сведенияОСериях.has(item.sourceUrl)) сведенияОСериях.set(item.sourceUrl, { duration: item.duration });
   setTimeout(() => кадрыДляСерий([...queue, ...templates.flatMap(list => list.items || [])]), 15000).unref?.();
   // Скачанный установщик после перезапуска уже не нужен — это 200 МБ на диске.
   try { rmSync(UPDATE_DIR, { recursive: true, force: true }); } catch {}
