@@ -783,6 +783,7 @@ function applyQueueTemplate(id, append = false) {
   if (!append && activeKind !== 'queue') saveConfig(template.settings);
   if (!append) saveConfig({ currentTemplateId: template.id });
   for (const item of restored) if (item.local && item.hasVideo && !item.thumbnail) generateThumbnail(item);
+  кадрыДляСерий(restored);
   log(`${append ? 'Добавлен' : 'Загружен'} шаблон: ${template.name}`);
 }
 
@@ -4846,6 +4847,7 @@ function cleanupStorage() {
   storageInfo = { ...storageInfo, sizeMb: mediaCacheSizeMb() };
   listDrives().then(drives => { storageInfo = { ...storageInfo, drives }; }).catch(() => {});
   const alive = new Set(queue.map(item => item.id));
+  for (const item of [...queue, ...templates.flatMap(list => list.items || [])]) { const m = /^\/thumbs\/([^/?]+)\.jpg/.exec(item.thumbnail || ''); if (m) alive.add(decodeURIComponent(m[1])); }
   try {
     // Удаляем только то, чего нет ни в очереди, ни в одном сохранённом списке.
     const нужные = нужныеКлючиКеша(), занятые = занятыеКлючиКеша();
@@ -5888,6 +5890,7 @@ async function addAnime(rawUrl, choice = {}) {
   log(`Добавлено серий: ${added.length}${added.length === 1 ? ` — ${added[0].title}` : ''}`);
   prefetchQueue(0);
   дозаполнитьДлительности();
+  кадрыДляСерий(added);
   return added;
 }
 
@@ -6109,37 +6112,74 @@ const очередьПревью = [];
 const previewChildren = new Set();
 let занятоПревью = 0;
 
-function generateThumbnail(item) {
+// source — откуда снять кадр, если не из самого файла: { input: путь, ссылка
+// или Promise с ними, at: секунда кадра }.
+function generateThumbnail(item, source = null) {
   // Раньше превью делалось только для видео. Но у музыки внутри часто лежит
   // обложка альбома — берём её. Так у трека в списке появляется картинка, а
   // не серый квадрат.
-  очередьПревью.push(item);
+  очередьПревью.push([item, source]);
   качатьПревью();
 }
 
 function качатьПревью() {
   while (занятоПревью < 2 && очередьПревью.length) {
-    const item = очередьПревью.shift();
+    const [item, source] = очередьПревью.shift();
     занятоПревью++;
-    const destination = join(THUMB_DIR, `${item.id}.jpg`);
-    // Для видео — кадр на первой секунде; для музыки — встроенная обложка.
-    const args = item.hasVideo
-      ? ['-hide_banner', '-loglevel', 'error', '-ss', '1', '-i', item.sourceUrl,
-         '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination]
-      : ['-hide_banner', '-loglevel', 'error', '-i', item.sourceUrl,
-         '-an', '-map', 'disp:attached_pic', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination];
-    const child = inBackground(spawn('ffmpeg', args, { windowsHide: true, stdio: 'ignore' }));
-    previewChildren.add(child);
-    const дальше = () => { previewChildren.delete(child); занятоПревью--; качатьПревью(); };
-    child.on('close', code => {
-      if (code === 0 && queue.some(entry => entry.id === item.id)) {
-        item.thumbnail = `/thumbs/${item.id}.jpg?v=${Date.now()}`;
-        saveQueue();
-      }
-      дальше();
-    });
-    child.on('error', дальше);
+    const дальше = () => { занятоПревью--; качатьПревью(); };
+    Promise.resolve(source ? source.input : item.sourceUrl).then(input => {
+      const destination = join(THUMB_DIR, `${item.id}.jpg`);
+      // Для видео — кадр на первой секунде (у серии — из середины, мимо
+      // заставки); для музыки — встроенная обложка.
+      const args = item.hasVideo || source
+        ? ['-hide_banner', '-loglevel', 'error', '-ss', String(source?.at ?? 1), '-i', input,
+           '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination]
+        : ['-hide_banner', '-loglevel', 'error', '-i', input,
+           '-an', '-map', 'disp:attached_pic', '-vf', 'scale=320:-2', '-q:v', '4', '-y', destination];
+      const child = inBackground(spawn('ffmpeg', args, { windowsHide: true, stdio: 'ignore' }));
+      previewChildren.add(child);
+      const готово = () => { previewChildren.delete(child); дальше(); };
+      child.on('close', code => {
+        if (code === 0) {
+          const кадр = `/thumbs/${item.id}.jpg?v=${Date.now()}`;
+          // Серия могла лежать и в очереди, и в сохранённом списке.
+          for (const entry of queue) if (entry.id === item.id) entry.thumbnail = кадр;
+          // В списках у серии другой id (при открытии списка id новые) — ищем по ссылке.
+          for (const entry of templates.flatMap(list => list.items || [])) if (entry.id === item.id || (item.anime && entry.sourceUrl === item.sourceUrl)) entry.thumbnail = кадр;
+          item.thumbnail = кадр;
+          saveQueue(); saveTemplates();
+        }
+        готово();
+      });
+      child.on('error', готово);
+    }, дальше);
   }
+}
+
+// Серии аниме: у площадки одна обложка на весь тайтл, и в списке все серии
+// были одинаковыми. Свой кадр каждой серии — из скачанного файла, если он
+// есть, иначе из потока; по одной серии в фоне, только для тех, у кого кадра нет.
+const кадрыСерий = [];
+let кадрыИдут = false;
+function кадрыДляСерий(items) {
+  const нужен = item => item.anime && (!String(item.thumbnail || '').startsWith('/thumbs/') || thumbFileMissing(item));
+  for (const item of items) if (нужен(item) && !кадрыСерий.some(other => other.sourceUrl === item.sourceUrl)) кадрыСерий.push(item);
+  if (кадрыИдут) return;
+  кадрыИдут = true;
+  (async () => {
+    for (let item; (item = кадрыСерий.shift());) {
+      if (String(item.thumbnail || '').startsWith('/thumbs/') && !thumbFileMissing(item)) continue;
+      const файл = cachedMediaPath(cacheKey(item));
+      const at = Math.round((Number(item.duration) || 1440) * 0.4);
+      await new Promise(done => {
+        generateThumbnail(item, { input: файл || resolveAnime(item.sourceUrl).then(media => media.url), at });
+        // Ждём, пока очередь превью освободится: серии не должны забивать её целиком.
+        const ждать = () => (занятоПревью === 0 && !очередьПревью.length ? done() : setTimeout(ждать, 500));
+        setTimeout(ждать, 500);
+      });
+    }
+    кадрыИдут = false;
+  })();
 }
 
 async function addLocalFiles(paths) {
@@ -7568,6 +7608,8 @@ server.listen(PORT, слушаемАдрес, () => {
   ensureCacheDir();
   cleanupStorage();
   setInterval(cleanupStorage, 10 * 60 * 1000).unref();
+  // Свои кадры серий аниме — в фоне, когда программа уже запустилась.
+  setTimeout(() => кадрыДляСерий([...queue, ...templates.flatMap(list => list.items || [])]), 15000).unref?.();
   // Скачанный установщик после перезапуска уже не нужен — это 200 МБ на диске.
   try { rmSync(UPDATE_DIR, { recursive: true, force: true }); } catch {}
   refreshYtdlp();

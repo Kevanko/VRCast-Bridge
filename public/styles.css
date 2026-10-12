@@ -938,3 +938,6 @@ html{zoom:var(--zoom,1)}
 :root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport #mediaVolumeValue{font-size:13px;font-weight:700;color:#0b0b0d}
 :root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport .chip-button{font-size:14px;font-weight:700}
 :root[data-theme="terminal"] .transport #mediaVolumeValue{color:#05612f}
+/* В покое (нечего играть) кнопки панели неактивны: на светлой панели 40 %
+   превращали их в серую кашу — видно, что неактивны, но читаются. */
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport.disabled :is(.seek-row,.transport-buttons,.chips){opacity:.72}
