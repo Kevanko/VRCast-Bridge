@@ -92,8 +92,16 @@
 /* Шрифт, выбранный в «Оформлении», — поверх шрифта темы (заголовки и цифры
    остаются в характере темы). Один набор и для окна, и для пульта телефона. */
 :root[data-font="golos"]{--ui-font:"Golos Text",system-ui,sans-serif}
-:root[data-font="onest"]{--ui-font:"Onest",system-ui,sans-serif}
-:root[data-font="geist"]{--ui-font:"Geist","Golos Text",system-ui,sans-serif}
+:root[data-font="unbounded"]{--ui-font:"Unbounded",system-ui,sans-serif}
+:root[data-font="exo"]{--ui-font:"Exo 2",system-ui,sans-serif}
+:root[data-font="rubik"]{--ui-font:"Rubik",system-ui,sans-serif}
+:root[data-font="comfortaa"]{--ui-font:"Comfortaa",system-ui,sans-serif}
 :root[data-font="serif"]{--ui-font:"Playfair Display",Georgia,serif}
+:root[data-font="lora"]{--ui-font:"Lora",Georgia,serif}
 :root[data-font="mono"]{--ui-font:"JetBrains Mono",ui-monospace,monospace}
+:root[data-font="pixel"]{--ui-font:"VT323",ui-monospace,monospace}
+/* VT323 и Comfortaa мельче на глаз при том же кегле — подрастают. */
+:root[data-font="pixel"]{--font-boost:1.3}
+:root[data-font="comfortaa"]{--font-boost:1.03}
+:root[data-font="unbounded"]{--font-boost:.9}
 :root[data-font] body,:root[data-font] :is(button,input,select,textarea){font-family:var(--ui-font)!important}

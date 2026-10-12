@@ -6,7 +6,7 @@
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 [hidden]{display:none!important}
 html{background:var(--bg)}
-body{margin:0;min-height:100vh;color:var(--text);background:var(--bg);font:16px/1.45 var(--body);padding-bottom:calc(76px + env(safe-area-inset-bottom))}
+body{margin:0;min-height:100vh;color:var(--text);background:var(--bg);font:calc(16px * var(--font-boost,1))/1.45 var(--body);padding-bottom:calc(76px + env(safe-area-inset-bottom))}
 .ic{width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 
 header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 16px;padding-top:calc(12px + env(safe-area-inset-top));background:color-mix(in srgb,var(--bg) 82%,transparent);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);border-bottom:1px solid var(--edge)}
@@ -27,7 +27,7 @@ h1{margin:14px 0 2px;font:700 22px/1.2 var(--display);letter-spacing:-.02em;over
 .cover.art .ic{display:none}.cover .ic{width:40px;height:40px}
 
 input[type=range]{width:100%;margin:0;height:28px;background:none;accent-color:var(--accent-strong);-webkit-appearance:none;appearance:none}
-input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:4px;background:linear-gradient(var(--accent-strong),var(--accent-strong)) 0/var(--fill,0%) 100% no-repeat,var(--edge-strong)}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:4px;background:linear-gradient(var(--accent-strong),var(--accent-strong)) 0/var(--fill,0%) 100% no-repeat,linear-gradient(color-mix(in srgb,var(--text) 35%,var(--edge-strong)),color-mix(in srgb,var(--text) 35%,var(--edge-strong))) 0/var(--buffered,0%) 100% no-repeat,var(--edge-strong)}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;margin-top:-7px;border-radius:50%;background:var(--text);border:0;box-shadow:0 1px 6px rgba(0,0,0,.35)}
 input[type=range]::-moz-range-track{height:4px;border-radius:4px;background:var(--edge-strong)}
 input[type=range]::-moz-range-progress{height:4px;border-radius:4px;background:var(--accent-strong)}

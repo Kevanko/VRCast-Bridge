@@ -8,13 +8,13 @@
   <title>VRCast Bridge</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Onest:wght@400;500;600;700&family=Unbounded:wght@700;800&family=Playfair+Display:wght@500;600&family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Unbounded:wght@400;500;600;700;800&family=Exo+2:wght@400;500;600;700&family=Rubik:wght@400;500;600;700&family=Comfortaa:wght@400;500;600;700&family=Lora:wght@400;500;600&family=VT323&family=Playfair+Display:wght@500;600&family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/m/themes.css?v=0.60.0">
   <link rel="stylesheet" href="/styles.css?v=0.60.0">
   <!-- Тема ставится до первой отрисовки: иначе при запуске на долю секунды
        мелькала бы палитра по умолчанию. Хранилище может быть недоступно —
        тогда просто остаётся «Ночной мир». -->
-  <script>var t='midnight';try{t=localStorage.getItem('theme')||t;if(!localStorage.getItem('theme-v2')){localStorage.setItem('theme-v2','1');if(t==='night'){t='midnight';localStorage.setItem('theme',t);}}}catch(e){}var known={broadcast:1,projector:1,minimal:1,'minimal-light':1,stage:1,terminal:1,matrix:1};if(t!=='night')document.documentElement.dataset.theme=known[t]?t:'midnight';try{var f=localStorage.getItem('ui-font'),z=Number(localStorage.getItem('ui-scale'))||1;if(f)document.documentElement.dataset.font=f;if(z!==1)document.documentElement.style.setProperty('--zoom',z);}catch(e){}</script>
+  <script>var t='midnight';try{t=localStorage.getItem('theme')||t;if(!localStorage.getItem('theme-v2')){localStorage.setItem('theme-v2','1');if(t==='night'){t='midnight';localStorage.setItem('theme',t);}}}catch(e){}var known={broadcast:1,projector:1,minimal:1,'minimal-light':1,stage:1,terminal:1,matrix:1};if(t!=='night')document.documentElement.dataset.theme=known[t]?t:'midnight';try{var f=localStorage.getItem('ui-font'),z=Number(localStorage.getItem('ui-scale'))||1;if(f)document.documentElement.dataset.font=f;if(z!==1)document.documentElement.style.setProperty('--ui-scale',z);}catch(e){}</script>
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" width="0" height="0"><defs>
@@ -381,19 +381,23 @@
         </div>
         <p class="sub-title">Шрифт</p>
         <div class="font-picker" role="radiogroup" aria-label="Шрифт">
-          <button type="button" role="radio" aria-checked="true" data-font-choice=""><span class="font-sample">Аа</span><b>Как в теме</b></button>
-          <button type="button" role="radio" aria-checked="false" data-font-choice="golos"><span class="font-sample">Аа</span><b>Golos</b></button>
-          <button type="button" role="radio" aria-checked="false" data-font-choice="onest"><span class="font-sample">Аа</span><b>Onest</b></button>
-          <button type="button" role="radio" aria-checked="false" data-font-choice="geist"><span class="font-sample">Аа</span><b>Geist</b></button>
-          <button type="button" role="radio" aria-checked="false" data-font-choice="serif"><span class="font-sample">Аа</span><b>Антиква</b></button>
-          <button type="button" role="radio" aria-checked="false" data-font-choice="mono"><span class="font-sample">Аа</span><b>Моно</b></button>
+          <button type="button" role="radio" aria-checked="true" data-font-choice=""><span class="font-sample">Аа</span><span class="font-copy"><b>Как в теме</b><small>Свой у каждой темы</small></span></button>
+          <button type="button" role="radio" aria-checked="false" data-font-choice="golos"><span class="font-sample">Аа</span><span class="font-copy"><b>Golos</b><small>Ровный, на каждый день</small></span></button>
+          <button type="button" role="radio" aria-checked="false" data-font-choice="unbounded"><span class="font-sample">Аа</span><span class="font-copy"><b>Unbounded</b><small>Широкий, к «Полночи»</small></span></button>
+          <button type="button" role="radio" aria-checked="false" data-font-choice="exo"><span class="font-sample">Аа</span><span class="font-copy"><b>Exo 2</b><small>Технический, к «Эфирной»</small></span></button>
+          <button type="button" role="radio" aria-checked="false" data-font-choice="rubik"><span class="font-sample">Аа</span><span class="font-copy"><b>Rubik</b><small>Мягкий, к «Глине»</small></span></button>
+          <button type="button" role="radio" aria-checked="false" data-font-choice="comfortaa"><span class="font-sample">Аа</span><span class="font-copy"><b>Comfortaa</b><small>Округлый и лёгкий</small></span></button>
+          <button type="button" role="radio" aria-checked="false" data-font-choice="serif"><span class="font-sample">Аа</span><span class="font-copy"><b>Playfair</b><small>Антиква, к «Минимализму»</small></span></button>
+          <button type="button" role="radio" aria-checked="false" data-font-choice="lora"><span class="font-sample">Аа</span><span class="font-copy"><b>Lora</b><small>Книжный, спокойный</small></span></button>
+          <button type="button" role="radio" aria-checked="false" data-font-choice="mono"><span class="font-sample">Аа</span><span class="font-copy"><b>JetBrains Mono</b><small>Моно, к «Терминалу»</small></span></button>
+          <button type="button" role="radio" aria-checked="false" data-font-choice="pixel"><span class="font-sample">Аа</span><span class="font-copy"><b>VT323</b><small>Экранный, к «Матрице»</small></span></button>
         </div>
         <div class="setting-row"><span><b>Размер текста</b><small>Вместе с текстом растут кнопки и отступы</small></span>
           <div class="seg scale-seg" id="uiScale" role="radiogroup" aria-label="Размер текста">
             <button type="button" role="radio" aria-checked="false" data-scale="0.9" style="font-size:11px">А</button>
             <button type="button" role="radio" aria-checked="true" data-scale="1" style="font-size:13px">А</button>
             <button type="button" role="radio" aria-checked="false" data-scale="1.1" style="font-size:15px">А</button>
-            <button type="button" role="radio" aria-checked="false" data-scale="1.25" style="font-size:18px">А</button>
+            <button type="button" role="radio" aria-checked="false" data-scale="1.2" style="font-size:17px">А</button>
           </div></div>
         <label class="switch-row"><input type="checkbox" id="ambientToggle" checked>
           <span class="switch-copy"><b>Живой фон и подсветка плеера</b><small>Фон темы двигается под музыку, вокруг плеера — продолжение картинки</small></span></label>

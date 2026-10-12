@@ -78,6 +78,7 @@ function render() {
   $('tNow').textContent = fmt(position()); $('tAll').textContent = p.duration ? fmt(p.duration) : '';
   if (document.activeElement !== $('vol')) { $('vol').value = Math.round((cfg.mediaVolume ?? 1) * 100); }
   $('volText').textContent = $('vol').value + '%'; fill($('vol')); fill(seek);
+  seek.style.setProperty('--buffered', Math.round((p.buffered ?? 0) * 1000) / 10 + '%');
   if (document.activeElement !== $('speed')) $('speed').value = String(pb.speed || 1);
   if (document.activeElement !== $('loop')) $('loop').value = pb.loopMode || 'once';
   if (document.activeElement !== $('quality')) $('quality').value = cfg.quality || '720p';

@@ -67,16 +67,26 @@ function renderProgress() {
     const position=ui.seeking?ui.seekDraft:video.currentTime||0;
     setText($('#elapsedTime'),formatTime(position)); setText($('#totalTime'),formatTime(total));
     if (!ui.seeking) paintSeek(total?Math.min(100,position/total*100):0);
+    const загружено=video.buffered.length?video.buffered.end(video.buffered.length-1):0;
+    paintBuffered(total?загружено/total*100:0);
     return;
   }
   if (!state?.progress || state.activeKind !== 'queue') {
     setText($('#elapsedTime'),'0:00'); setText($('#totalTime'),state?.activeKind==='screen'&&state.running?'':'0:00');
     if (!ui.seeking&&!ui.seekPending) paintSeek(0);
+    paintBuffered(0);
     return;
   }
   const position=(ui.seeking||ui.seekPending)?ui.seekDraft:progressPosition(state), total=Number(state?.progress?.duration)||0, percent=total?Math.min(100,position/total*100):0;
   setText($('#elapsedTime'),formatTime(position)); setText($('#totalTime'),total?formatTime(total):'');
   if (!ui.seeking&&!ui.seekPending) paintSeek(percent);
+  paintBuffered((Number(state.progress.buffered)||0)*100);
+}
+// Светлая полоса — сколько трека уже скачано: в её пределах перемотка идёт с диска.
+function paintBuffered(percent) {
+  const bar=$('#seekBar'), step=Math.round(Math.min(100,percent)*2)/2;
+  if (bar._buffered===step) return;
+  bar._buffered=step; bar.style.setProperty('--buffered',`${step}%`);
 }
 // Полоса перемотки двигается по десятым долям процента: чаще перерисовывать
 // её незачем, а каждая запись стиля — это перерасчёт и отрисовка плеера.
@@ -2102,7 +2112,7 @@ function применитьТему(тема){
 // Тема, шрифт и размер живут в настройках программы: пульт в браузере телефона берёт их оттуда.
 function сохранитьВид(поля){ api('/api/config',{method:'POST',body:JSON.stringify(поля)}).catch(()=>{}); }
 const сохранитьТему=тема=>сохранитьВид({theme:тема});
-const ШРИФТЫ=['','golos','onest','geist','serif','mono'], МАСШТАБЫ=[0.9,1,1.1,1.25];
+const ШРИФТЫ=['','golos','unbounded','exo','rubik','comfortaa','serif','lora','mono','pixel'], МАСШТАБЫ=[0.9,1,1.1,1.2];
 function применитьШрифт(шрифт){
   if(!ШРИФТЫ.includes(шрифт))шрифт='';
   if(шрифт)document.documentElement.dataset.font=шрифт; else delete document.documentElement.dataset.font;
@@ -2110,16 +2120,16 @@ function применитьШрифт(шрифт){
 }
 function применитьМасштаб(масштаб){
   масштаб=МАСШТАБЫ.includes(Number(масштаб))?Number(масштаб):1;
-  document.documentElement.style.setProperty('--zoom',масштаб);
+  document.documentElement.style.setProperty('--ui-scale',масштаб);
   for(const кнопка of $$('[data-scale]'))кнопка.setAttribute('aria-checked',String(Number(кнопка.dataset.scale)===масштаб));
 }
 применитьШрифт(document.documentElement.dataset.font||'');
-применитьМасштаб(Number(getComputedStyle(document.documentElement).getPropertyValue('--zoom'))||1);
+применитьМасштаб(Number(getComputedStyle(document.documentElement).getPropertyValue('--ui-scale'))||1);
 function синхронВида(config){
   if(Date.now()<=(синхронТемы.ждать||0))return;
   const шрифт=config?.uiFont??'', масштаб=Number(config?.uiScale)||1;
   if(шрифт!==(document.documentElement.dataset.font||'')){ применитьШрифт(шрифт); положить('ui-font',шрифт); }
-  if(масштаб!==(Number(getComputedStyle(document.documentElement).getPropertyValue('--zoom'))||1)){ применитьМасштаб(масштаб); положить('ui-scale',масштаб); }
+  if(масштаб!==(Number(getComputedStyle(document.documentElement).getPropertyValue('--ui-scale'))||1)){ применитьМасштаб(масштаб); положить('ui-scale',масштаб); }
 }
 $('.font-picker').addEventListener('click',event=>{
   const кнопка=event.target.closest('[data-font-choice]'); if(!кнопка)return;

@@ -12,6 +12,7 @@ import { pipeline } from 'node:stream/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
 import { createJoin } from './join.js';
 import { hashToken, isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRouteOpenWithPin, lanRoutePaired, lanRouteAllowed, pickNetworkConfig, publishService, sameSecret, unpublishService } from './lan.js';
+import { downloadShare } from './download-share.js';
 import { closestByDuration, spotifyCover, spotifyLinks, spotifyTracks } from './spotify.js';
 import { hideMemberSource, sanitizeContribution, sharedQueueItem, sharedServer, takeInitiative } from './group.js';
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
@@ -2157,7 +2158,7 @@ function status(withLogs = true) {
     appVersion: APP_VERSION,
     port: PORT,
     phoneSource, tools, toolDownloads, disk: { freeMb: freeDiskMb, totalMb: totalDiskMb, low: freeDiskMb !== null && freeDiskMb < 3000 }, running: Boolean(activeKind), activeKind, currentId, queue: queue.map(hideMemberSource), templates: templateSummaries(), currentTemplate: currentTemplateState(), queueSaved: queueSaved(),
-    progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration } : null,
+    progress: currentId ? { elapsed: currentDuration ? Math.min(elapsed, currentDuration) : elapsed, duration: currentDuration, buffered: скачаноДляСтатуса(currentId) } : null,
     playback: { paused: queuePaused, busy: playbackBusy, buffering: Boolean(currentId && mediaCacheJobs.has(currentId)), revision: playbackRevision,
       speed, loopMode: config.loopMode || 'once', canSeek: activeKind === 'queue' && Boolean(currentDuration) },
     cache: { ready: cachedReadyCount(), total: queue.length, downloading: [...mediaCacheJobs.keys()],
@@ -2235,6 +2236,8 @@ function status(withLogs = true) {
 // прямо во время эфира. Теперь набор обновляется по событиям: при уборке,
 // после удачной загрузки и при удалении трека.
 let готовыеВКеше = new Set();
+// Сколько трека уже скачано в кеш (0…1) — светлая полоса на перемотке, как на YouTube.
+const скачаноДоля = new Map();
 
 function обновитьГотовые() {
   try { готовыеВКеше = new Set(readdirSync(mediaCacheDir())); } catch { готовыеВКеше = new Set(); }
@@ -4921,6 +4924,13 @@ function downloadRemoteMedia(item) {
   return startCacheDownload(item);
 }
 
+function скачаноДляСтатуса(id) {
+  const item = queue.find(entry => entry.id === id);
+  if (!item || item.local || item.direct) return 1;
+  if (готовыеВКеше.has(cacheKey(item)) && !mediaCacheJobs.has(id)) return 1;
+  return Math.round((скачаноДоля.get(id) || 0) * 1000) / 1000;
+}
+
 function startCacheDownload(item) {
   if (mediaCacheJobs.has(item.id)) return mediaCacheJobs.get(item.id);
   const directory = join(mediaCacheDir(), cacheKey(item));
@@ -4941,8 +4951,12 @@ function startCacheDownload(item) {
       '--socket-timeout', '20', '-f',
       'bv*[vcodec^=avc1][height<=?1080]+ba[ext=m4a]/b[ext=mp4][height<=?1080]/best[height<=?1080]',
       '--merge-output-format', 'mp4', '--remux-video', 'mp4', '-o', join(directory, 'source.%(ext)s'), sourceUrl];
-    const child = inBackground(spawn(ytdlpPath(), args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
+    const child = inBackground(spawn(ytdlpPath(), args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
     mediaCacheProcesses.set(child, item.id);
+    const доля = downloadShare();
+    скачаноДоля.set(item.id, 0);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => { for (const line of chunk.split('\n')) { const d = доля(line); if (d !== null) скачаноДоля.set(item.id, Math.max(скачаноДоля.get(item.id) || 0, d)); } });
     let stderr = '';
     child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-16000); });
     child.on('error', reject);
@@ -4964,7 +4978,7 @@ function startCacheDownload(item) {
   })).then(media => {
     log(`Трек буферизирован: ${item.title}`); готовыеВКеше.add(cacheKey(item)); trimMediaCache();
     storageInfo = { ...storageInfo, sizeMb: mediaCacheSizeMb() }; return media;
-  }).finally(() => { if (mediaCacheJobs.get(item.id) === promise) mediaCacheJobs.delete(item.id); });
+  }).finally(() => { скачаноДоля.delete(item.id); if (mediaCacheJobs.get(item.id) === promise) mediaCacheJobs.delete(item.id); });
   mediaCacheJobs.set(item.id, promise);
   return promise;
 }
@@ -6113,7 +6127,7 @@ const previewChildren = new Set();
 let занятоПревью = 0;
 
 // source — откуда снять кадр, если не из самого файла: { input: путь, ссылка
-// или Promise с ними, at: секунда кадра }.
+// или Promise с ними, at: секунда кадра, done: вызвать по окончании }.
 function generateThumbnail(item, source = null) {
   // Раньше превью делалось только для видео. Но у музыки внутри часто лежит
   // обложка альбома — берём её. Так у трека в списке появляется картинка, а
@@ -6123,10 +6137,11 @@ function generateThumbnail(item, source = null) {
 }
 
 function качатьПревью() {
-  while (занятоПревью < 2 && очередьПревью.length) {
+  // По четыре: один кадр — это секунда работы ffmpeg, эфиру не мешает.
+  while (занятоПревью < 4 && очередьПревью.length) {
     const [item, source] = очередьПревью.shift();
     занятоПревью++;
-    const дальше = () => { занятоПревью--; качатьПревью(); };
+    const дальше = () => { занятоПревью--; source?.done?.(); качатьПревью(); };
     Promise.resolve(source ? source.input : item.sourceUrl).then(input => {
       const destination = join(THUMB_DIR, `${item.id}.jpg`);
       // Для видео — кадр на первой секунде (у серии — из середины, мимо
@@ -6166,20 +6181,16 @@ function кадрыДляСерий(items) {
   for (const item of items) if (нужен(item) && !кадрыСерий.some(other => other.sourceUrl === item.sourceUrl)) кадрыСерий.push(item);
   if (кадрыИдут) return;
   кадрыИдут = true;
-  (async () => {
+  // Четыре серии разом, по порядку списка: видимые в начале получают кадр первыми.
+  const работник = async () => {
     for (let item; (item = кадрыСерий.shift());) {
       if (String(item.thumbnail || '').startsWith('/thumbs/') && !thumbFileMissing(item)) continue;
       const файл = cachedMediaPath(cacheKey(item));
       const at = Math.round((Number(item.duration) || 1440) * 0.4);
-      await new Promise(done => {
-        generateThumbnail(item, { input: файл || resolveAnime(item.sourceUrl).then(media => media.url), at });
-        // Ждём, пока очередь превью освободится: серии не должны забивать её целиком.
-        const ждать = () => (занятоПревью === 0 && !очередьПревью.length ? done() : setTimeout(ждать, 500));
-        setTimeout(ждать, 500);
-      });
+      await new Promise(done => generateThumbnail(item, { input: файл || resolveAnime(item.sourceUrl).then(media => media.url), at, done }));
     }
-    кадрыИдут = false;
-  })();
+  };
+  Promise.all(Array.from({ length: 4 }, работник)).finally(() => { кадрыИдут = false; });
 }
 
 async function addLocalFiles(paths) {
@@ -7348,8 +7359,8 @@ const server = http.createServer(async (req, res) => {
         mediaFps: body.mediaFps === 60 ? 60 : (body.mediaFps === 30 ? 30 : (config.mediaFps || 30)),
         // Тема окна — её же берёт пульт в браузере телефона.
         theme: /^[a-z-]{1,24}$/.test(body.theme || '') ? body.theme : (config.theme || ''),
-        uiFont: ['', 'golos', 'onest', 'geist', 'serif', 'mono'].includes(body.uiFont) ? body.uiFont : (config.uiFont || ''),
-        uiScale: [0.9, 1, 1.1, 1.25].includes(Number(body.uiScale)) ? Number(body.uiScale) : (Number(config.uiScale) || 1),
+        uiFont: ['', 'golos', 'unbounded', 'exo', 'rubik', 'comfortaa', 'serif', 'lora', 'mono', 'pixel'].includes(body.uiFont) ? body.uiFont : (config.uiFont || ''),
+        uiScale: [0.9, 1, 1.1, 1.2].includes(Number(body.uiScale)) ? Number(body.uiScale) : (Number(config.uiScale) || 1),
       };
       const previousOutput = config.outputMode;
       const previousConfig = { ...config };
