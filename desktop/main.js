@@ -9,7 +9,8 @@ const path = require('node:path');
 // AppArmor в Ubuntu 24.04 запрещает песочнице Chromium без suid-помощника.
 app.commandLine.appendSwitch('no-sandbox');
 
-const ROOT = path.resolve(__dirname, '..');
+// В пакете (AppImage, .deb) файлы программы лежат рядом, в resources; из исходников — на уровень выше.
+const ROOT = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..');
 const DATA_DIR = path.join(process.env.XDG_DATA_HOME || path.join(app.getPath('home'), '.local', 'share'), 'VRCastBridge');
 // Тот же порядок, что у сервера: переменная окружения, порт из настроек, 4717.
 const savedPort = () => { try { const v = Number(JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'config.json'), 'utf8')).port); return v >= 1024 && v <= 65400 ? v : 0; } catch { return 0; } };

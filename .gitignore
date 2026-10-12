@@ -32,3 +32,6 @@ auto.key
 launcher/publish/
 vrcast.installed
 desktop/node_modules/
+
+# Пакеты Linux (electron-builder)
+desktop/dist/

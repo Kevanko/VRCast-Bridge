@@ -30,11 +30,11 @@ VRCast Bridge turns what's on your PC into a single link for the AVPro player in
 
 **Windows:** download [VRCast Bridge.exe](https://github.com/Kevanko/VRCast-Bridge/releases/latest) and run it. It installs itself and fetches everything else on first launch.
 
-**Linux** (Node.js 20+ and `ffmpeg`):
+**Linux (X11):** download the `.AppImage` (any distro) or `.deb` (Ubuntu, Debian) from [Releases](https://github.com/Kevanko/VRCast-Bridge/releases/latest). Nothing else to install; `ffmpeg` is fetched on first launch if missing.
 
 ```bash
-git clone https://github.com/Kevanko/VRCast-Bridge.git && cd VRCast-Bridge
-./bin/vrcast install && ./bin/vrcast
+chmod +x VRCast-Bridge-*.AppImage && ./VRCast-Bridge-*.AppImage
+# or: sudo apt install ./VRCast-Bridge-*-amd64.deb
 ```
 
 Then:
@@ -74,11 +74,11 @@ VRCast Bridge отдаёт то, что происходит на компьют
 
 **Windows:** скачайте [VRCast Bridge.exe](https://github.com/Kevanko/VRCast-Bridge/releases/latest) и запустите. Программа установится сама и при первом запуске докачает всё остальное.
 
-**Linux** (нужны Node.js 20+ и `ffmpeg`):
+**Linux (X11):** скачайте `.AppImage` (любой дистрибутив) или `.deb` (Ubuntu, Debian) из [релизов](https://github.com/Kevanko/VRCast-Bridge/releases/latest). Больше ничего ставить не нужно; `ffmpeg` докачается при первом запуске, если его нет.
 
 ```bash
-git clone https://github.com/Kevanko/VRCast-Bridge.git && cd VRCast-Bridge
-./bin/vrcast install && ./bin/vrcast
+chmod +x VRCast-Bridge-*.AppImage && ./VRCast-Bridge-*.AppImage
+# или: sudo apt install ./VRCast-Bridge-*-amd64.deb
 ```
 
 Дальше:

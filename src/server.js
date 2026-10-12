@@ -12,7 +12,7 @@ import { pipeline } from 'node:stream/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
 import { createJoin } from './join.js';
 import { hashToken, isLoopbackAddress, isPrivateAddress, lanHostAllowed, lanRouteOpenWithPin, lanRoutePaired, lanRouteAllowed, pickNetworkConfig, publishService, sameSecret, unpublishService } from './lan.js';
-import { spotifyLinks, spotifyTracks } from './spotify.js';
+import { closestByDuration, spotifyCover, spotifyLinks, spotifyTracks } from './spotify.js';
 import { hideMemberSource, sanitizeContribution, sharedQueueItem, sharedServer, takeInitiative } from './group.js';
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
@@ -6025,7 +6025,21 @@ async function addSpotify(rawUrl, options) {
   saveQueue();
   log(`Добавлено из Spotify${found.title ? ` «${found.title}»` : ''}: ${added.length} — звук возьмём с YouTube`);
   prefetchQueue(0);
+  обложкиSpotify(found.tracks.filter(track => !track.cover).map(track => [added[found.tracks.indexOf(track)].id, track.id]));
   return added;
+}
+
+// Свои обложки треков плейлиста подтягиваем в фоне, по восемь запросов: добавление не ждёт.
+async function обложкиSpotify(пары) {
+  const очередь = [...пары];
+  await Promise.all(Array.from({ length: Math.min(8, очередь.length) }, async () => {
+    for (let пара; (пара = очередь.shift());) {
+      const обложка = await spotifyCover(пара[1]).catch(() => '');
+      const item = обложка && queue.find(entry => entry.id === пара[0]);
+      if (item) item.thumbnail = обложка;
+    }
+  }));
+  if (пары.length) saveQueue();
 }
 
 // Ссылка, которую качает и играет yt-dlp. Для трека из Spotify — первый ролик
@@ -6034,8 +6048,8 @@ const поискиYouTube = new Map();
 function источникТрека(item) {
   if (!item.search || item.foundUrl) return Promise.resolve(item.foundUrl || item.sourceUrl);
   if (!поискиYouTube.has(item.id)) {
-    const поиск = spawnJson(ytdlpPath(), ['--no-warnings', '--flat-playlist', '--dump-single-json', `ytsearch1:${item.search}`], 45000).then(result => {
-      const entry = result.entries?.[0];
+    const поиск = spawnJson(ytdlpPath(), ['--no-warnings', '--flat-playlist', '--dump-single-json', `ytsearch5:${item.search}`], 45000).then(result => {
+      const entry = closestByDuration(result.entries || [], item.duration);
       const url = entry?.url && validWebUrl(entry.url) ? entry.url : entry?.id ? `https://www.youtube.com/watch?v=${entry.id}` : '';
       if (!url) throw new Error(`На YouTube не нашлось «${item.search}»`);
       item.foundUrl = url;

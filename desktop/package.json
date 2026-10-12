@@ -1,9 +1,75 @@
 {
-  "name": "vrcast-bridge-desktop",
-  "version": "0.60.5",
+  "name": "vrcast-bridge",
+  "version": "0.61.0",
   "private": true,
   "description": "Оболочка VRCast Bridge для Linux (окно, трей, диалоги)",
   "main": "main.js",
-  "scripts": { "start": "electron --no-sandbox ." },
-  "devDependencies": { "electron": "^38.0.0" }
+  "scripts": {
+    "start": "electron --no-sandbox .",
+    "dist": "electron-builder --linux AppImage deb --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "author": {
+    "name": "Kevanko",
+    "email": "124017017+Kevanko@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/Kevanko/VRCast-Bridge",
+  "build": {
+    "appId": "io.github.kevanko.vrcastbridge",
+    "productName": "VRCast Bridge",
+    "executableName": "vrcast-bridge",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "outline.html",
+      "region.html"
+    ],
+    "extraResources": [
+      {
+        "from": "../src",
+        "to": "src"
+      },
+      {
+        "from": "../public",
+        "to": "public"
+      },
+      {
+        "from": "../server",
+        "to": "server"
+      },
+      {
+        "from": "../package.json",
+        "to": "package.json"
+      },
+      {
+        "from": "../launcher/assets/vrcast-icon.png",
+        "to": "launcher/assets/vrcast-icon.png"
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "AudioVideo",
+      "icon": "../launcher/assets/vrcast-icon.png",
+      "synopsis": "Screen and video playlists to VRChat players",
+      "artifactName": "VRCast-Bridge-${version}-${arch}.${ext}"
+    },
+    "deb": {
+      "recommends": [
+        "ffmpeg",
+        "x11-utils",
+        "x11-xserver-utils",
+        "pulseaudio-utils"
+      ]
+    },
+    "afterPack": "./after-pack.js"
+  }
 }

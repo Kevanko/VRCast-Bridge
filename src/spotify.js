@@ -29,9 +29,17 @@ export function parseSpotifyEmbed(html) {
       title: String(t.title),
       artist: String(t.subtitle || '').replace(/\s+/g, ' ').trim(),
       duration: Number(t.duration) > 0 ? Math.round(Number(t.duration) / 1000) : null,
-      cover,
+      // В списке плейлиста своих обложек у треков нет, а общая обложка плейлиста
+      // на каждом треке не нужна: свою подтянет spotifyCover.
+      cover: entity.type === 'playlist' ? '' : cover,
     })),
   };
+}
+
+// Своя обложка трека (для плейлиста): короткий открытый запрос oEmbed.
+export async function spotifyCover(id, fetchJson = url => fetch(url, { signal: AbortSignal.timeout(10000) }).then(r => r.ok ? r.json() : {})) {
+  const reply = await fetchJson(`https://open.spotify.com/oembed?url=https://open.spotify.com/track/${id}`);
+  return typeof reply?.thumbnail_url === 'string' && reply.thumbnail_url.startsWith('https://') ? reply.thumbnail_url : '';
 }
 
 // Все треки из текста по порядку, без повторов.
@@ -43,4 +51,13 @@ export async function spotifyTracks(text, fetchPage = url => fetch(url, { header
   const seen = new Set(), tracks = [];
   for (const page of pages) for (const track of page.tracks) if (!seen.has(track.id)) { seen.add(track.id); tracks.push(track); }
   return { title: links.length === 1 ? pages[0].title : '', tracks };
+}
+
+// Первый ролик поиска часто клип с длинным вступлением или «1 час»: из пяти
+// первых берём тот, что ближе всего по длине к треку (в пределах 25 с), иначе первый.
+export function closestByDuration(entries, duration) {
+  const список = entries.filter(Boolean);
+  if (!duration) return список[0];
+  const близкие = список.filter(entry => Math.abs((Number(entry.duration) || 0) - duration) <= 25);
+  return близкие.sort((a, b) => Math.abs(a.duration - duration) - Math.abs(b.duration - duration))[0] || список[0];
 }

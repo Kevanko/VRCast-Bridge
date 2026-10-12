@@ -903,8 +903,8 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 :root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.chip-button,.icon-btn):hover:not(:disabled){border-color:var(--deck-ink);background:rgba(0,0,0,.05)}
 :root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.vol-head,.vol-head output,.now-copy small){color:#3f3f46;opacity:1}
 :root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport .deck-volume{color:var(--deck-ink)}
-:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.scrub,.range)::-webkit-slider-runnable-track{background:linear-gradient(90deg,var(--deck-ink) var(--seek,var(--volume,0%)),#cfcfd4 var(--seek,var(--volume,0%)))}
-:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport .range::-webkit-slider-runnable-track{background:linear-gradient(90deg,var(--deck-ink) var(--volume,50%),#cfcfd4 var(--volume,50%))}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.scrub,.range)::-webkit-slider-runnable-track{background:linear-gradient(90deg,var(--deck-ink) var(--seek,var(--volume,0%)),#b4b4ba var(--seek,var(--volume,0%)))}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport .range::-webkit-slider-runnable-track{background:linear-gradient(90deg,var(--deck-ink) var(--volume,50%),#b4b4ba var(--volume,50%))}
 :root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.scrub,.range)::-webkit-slider-thumb{background:var(--deck-ink)}
 /* В «Терминале» время — зелёная метрика, но тёмно-зелёная, чтобы читалась на светлом. */
 :root[data-theme="terminal"] .transport .time{color:#08743c}
@@ -927,3 +927,14 @@ html{zoom:var(--zoom,1)}
 .font-picker [data-font-choice="serif"] *{font-family:"Playfair Display",Georgia,serif!important}
 .font-picker [data-font-choice="mono"] *{font-family:"JetBrains Mono",ui-monospace,monospace!important}
 .scale-seg button{min-width:44px;font-weight:600;line-height:1}
+/* Светлая панель плеера, второй заход: тонкий серый текст на #eee читался
+   бледно. Всё — почти чёрное и плотнее, зелёный темнее, дорожки контрастнее. */
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.time,.time.total,#nowTitle){color:#0b0b0d;font-weight:700}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.now-copy small,.vol-head,.vol-head span){color:#26262b;font-weight:500;opacity:1}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.chip-button,.icon-btn){color:#0b0b0d;border-color:#9d9da4;font-weight:600}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.chip-button,.icon-btn):disabled{color:#6b6b72;opacity:1}
+:root[data-theme="terminal"] .transport :is(#elapsedTime,#mediaVolumeValue){color:#05612f;font-weight:700}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(#nowSource,.vol-head,.vol-head span){font-size:13px;color:#18181b}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport #mediaVolumeValue{font-size:13px;font-weight:700;color:#0b0b0d}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport .chip-button{font-size:14px;font-weight:700}
+:root[data-theme="terminal"] .transport #mediaVolumeValue{color:#05612f}

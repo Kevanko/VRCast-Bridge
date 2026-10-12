@@ -4,6 +4,8 @@
 
 ## Linux
 
+Проще всего — пакет из [релизов](https://github.com/Kevanko/VRCast-Bridge/releases/latest): `.AppImage` для любого дистрибутива или `.deb` для Ubuntu и Debian. Внутри всё нужное, Node.js ставить не надо; обновляется скачиванием нового пакета.
+
 Запуск из исходников (нужны Node.js 20+ и `ffmpeg`; `yt-dlp`, MediaMTX и cloudflared программа докачает сама или возьмёт из `PATH`):
 
 ```bash
