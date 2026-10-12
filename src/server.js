@@ -1057,7 +1057,9 @@ const ТУННЕЛИ = {
   // в VRChat такая ссылка не играет.
 };
 const ключТуннеля = имя => Object.keys(ТУННЕЛИ).find(ключ => ТУННЕЛИ[ключ].name === имя) || '';
-const туннельДоступен = ключ => ключ === 'cloudflare' ? Boolean(tools.cloudflared) : Boolean(PLINK());
+// Serveo и localhost.run — по SSH: в Windows через свой plink, в Linux — через системный ssh.
+const sshДляТуннеля = () => (IS_LINUX && !PLINK() ? which('ssh') : '');
+const туннельДоступен = ключ => ключ === 'cloudflare' ? Boolean(tools.cloudflared) : Boolean(PLINK() || sshДляТуннеля());
 
 // Ключ SSH-сервера узнаём первым подключением и держим до перезапуска.
 const sshКлючи = new Map();
@@ -1093,6 +1095,14 @@ async function командаТуннеля(ключ) {
   const host = ТУННЕЛИ[ключ].ssh;
   // С выбранной картой plink идёт через местный мост, иначе — напрямую.
   const port = карта ? await мостДо(host, 22) : 22;
+  const ssh = sshДляТуннеля();
+  if (ssh) {
+    // Без своих ключей пользователя (не светим их чужому серверу); вход пустой,
+    // интерактивный — так пускает Serveo; ввод закрыт, поэтому ничего не ждёт.
+    return { cmd: ssh, args: ['-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', '-o', 'PubkeyAuthentication=no',
+      '-o', 'PasswordAuthentication=no', '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=15',
+      '-p', String(port), '-R', `80:127.0.0.1:${PORT}`, `nokey@${port === 22 ? host : '127.0.0.1'}`], ready: () => true };
+  }
   const hostkey = await sshКлюч(host, port);
   if (!hostkey) throw new Error(`${ТУННЕЛИ[ключ].name}: сервер не отдал ключ`);
   return { cmd: PLINK(), args: ['-ssh', '-batch', '-no-antispoof', '-hostkey', hostkey, '-P', String(port),
@@ -3571,7 +3581,9 @@ async function замеритьКаналСервера(причина = '') {
   });
   try {
     await new Promise((resolve, reject) => { мост.once('error', reject); мост.listen(0, '127.0.0.1', resolve); });
-    const адрес = `rtsp://vrcast:${encodeURIComponent(activeServer()?.publishKey || '')}@127.0.0.1:${мост.address().port}/vrcast-speedtest`;
+    const адрес = `rtsp://vrcast:${encodeURIComponent(activeServer()?.publishKey || '')}@127.0.0.1:${мост.address().port}/vrcast-speedtest-${crypto.randomUUID().slice(0, 8)}`;
+    // Путь у каждого замера свой: сервер не пускает второго отправителя в занятый путь
+    // (overridePublisher: no) — замер с другого ПК или зависшая сессия ломали его всегда.
     await new Promise(resolve => {
       // Шум, сжатый без потерь: кадры огромные, кодировщику легко — упираемся в сеть, а не в процессор.
       const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=1280x720:r=30,noise=alls=100:allf=t',
