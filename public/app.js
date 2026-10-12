@@ -555,9 +555,12 @@ function renderTemplates(state) {
   setTitle($('#newEmptyTemplate'),пустой?`Пустой список уже есть — «${пустой.name}»`:'Начать новый список с чистой очереди');
   setDisabled($('#saveTemplate'),!state.queue.length);
   // Открытый список — в заголовке очереди; кнопка внизу сохраняет в него.
-  setHidden($('#currentList'),!текущий);
-  setText($('#currentListName'),текущий?`· ${текущий.name}`:'');
-  setHidden($('#currentListDirty'),!текущий?.dirty);
+  // Открытый список — на самой кнопке списков: рядом с «Очередь» имя не помещалось.
+  setHidden($('#currentList'),true);
+  const подпись=$('#templatesButton>span:not(.count)');
+  setText(подпись,текущий?текущий.name:'Мои списки');
+  setTitle($('#templatesButton'),текущий?`Открыт список «${текущий.name}»${текущий.dirty?' — есть несохранённые изменения':''}`:'Сохранённые списки');
+  $('#templatesButton').classList.toggle('dirty',Boolean(текущий?.dirty));
   const кнопка=$('#saveTemplateQuick');
   setText(кнопка,текущий&&!текущий.dirty?'Сохранено':'Сохранить');
   setTitle(кнопка,текущий?`Сохранить очередь в список «${текущий.name}»`:'Сохранить очередь как новый список');
@@ -922,9 +925,9 @@ function render(state) {
   const всего=всегоСекунд?(часы?`${часы} ч${минуты?` ${минуты} мин`:''}`:`${Math.max(1,минуты)} мин`):'';
   // Пока длительность серий ещё считается, сумма неполная — говорим об этом, а не занижаем.
   const безДлины=state.queue.filter(item=>!item.live&&!(Number(item.duration)>0)).length;
-  const итог=безДлины?(всего?`≥ ${всего}, считаю ещё ${безДлины}`:'считаю длительность'):всего;
+  const итог=безДлины?(всего?`≥ ${всего}`:'считаю время'):всего;
   setHtml($('#queueSummary'),`${штук(state.queue.length,['видео','видео','видео'])}${итог?` · <b>${итог}</b>`:''}`);
-  setTitle($('#queueSummary'),всегоСекунд?`Всего ${formatTime(всегоСекунд)}`:'');
+  setTitle($('#queueSummary'),(всегоСекунд?`Всего ${formatTime(всегоСекунд)}`:'')+(безДлины?` — длительность ещё считается у ${безДлины}`:''));
   setHidden($('#pickLocal'),!state.queue.length);
   setDisabled($('#clearQueue'),!state.queue.length);
   // Журнал в сотню строк переписываем, только пока его окно открыто: иначе
@@ -2115,7 +2118,7 @@ function применитьТему(тема){
 // Тема, шрифт и размер живут в настройках программы: пульт в браузере телефона берёт их оттуда.
 function сохранитьВид(поля){ api('/api/config',{method:'POST',body:JSON.stringify(поля)}).catch(()=>{}); }
 const сохранитьТему=тема=>сохранитьВид({theme:тема});
-const ШРИФТЫ=['','golos','unbounded','exo','rubik','comfortaa','serif','lora','mono','pixel'], МАСШТАБЫ=[0.9,1,1.1,1.2];
+const ШРИФТЫ=['','unbounded','exo','rubik','comfortaa','serif','lora','mono','pixel'], МАСШТАБЫ=[0.9,1,1.1,1.2];
 function применитьШрифт(шрифт){
   if(!ШРИФТЫ.includes(шрифт))шрифт='';
   if(шрифт)document.documentElement.dataset.font=шрифт; else delete document.documentElement.dataset.font;

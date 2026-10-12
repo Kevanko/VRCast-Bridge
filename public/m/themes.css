@@ -56,9 +56,10 @@
   --serif:"Playfair Display",Georgia,serif;
 }
 :root[data-theme="minimal-light"]{
-  --bg:#ffffff;--bar:#ffffff;--side:#fafafa;--surface:#fafafa;--raise:#f1f1f3;--sel:#e9e9ec;--menu:#ffffff;
-  --edge:#e4e4e7;--edge-strong:#d0d0d5;
-  --text:#09090b;--soft:#27272a;--muted:#52525b;--faint:#71717a;
+  /* Зоны окна различимы: шапка и панель на тон темнее холста, рамки видны. */
+  --bg:#ffffff;--bar:#f6f6f8;--side:#f3f3f5;--surface:#f3f3f5;--raise:#e8e8ec;--sel:#dcdce2;--menu:#ffffff;
+  --edge:#d4d4da;--edge-strong:#b2b2ba;
+  --text:#09090b;--soft:#1f1f23;--muted:#3f3f46;--faint:#5b5b63;
   --accent:#09090b;--accent-strong:#6d5ae6;--accent-soft:rgba(109,90,230,.09);--accent-line:rgba(109,90,230,.45);--on-accent:#ffffff;
   --second:#6d5ae6;--live:#e11d48;--live-text:#be123c;--ok:#16a34a;--ok-text:#15803d;--cue:#d97706;--danger:#e11d48;
   --shade:rgba(255,255,255,.72);--glow-a:#6d5ae6;--glow-b:#c4b8ff;--glow-c:#e4e4e7;

@@ -699,7 +699,8 @@ function queueSaved() {
 function templateSummaries() {
   // Обложка списка — превью первого ролика, у которого оно есть.
   return templates.map(item => ({ id: item.id, name: item.name, count: item.items.length, updatedAt: item.updatedAt,
-    cover: String(item.items.find(entry => /^https?:\/\//.test(entry.thumbnail || ''))?.thumbnail || '') }));
+    // Обложка — первая картинка ролика: с сайта или свой кадр (у серий аниме).
+    cover: String(item.items.find(entry => /^(https?:\/\/|\/thumbs\/)/.test(entry.thumbnail || ''))?.thumbnail || '') }));
 }
 
 function очиститьОчередь() {
@@ -6175,22 +6176,28 @@ function кадрыДляСерий(items) {
   for (const item of items) if (нуженРазбор(item) && !кадрыСерий.some(other => other.sourceUrl === item.sourceUrl)) кадрыСерий.push(item);
   if (кадрыИдут) return;
   кадрыИдут = true;
-  // Четыре серии разом, по порядку списка: видимые в начале готовы первыми.
-  const работник = async () => {
-    for (let item; (item = кадрыСерий.shift());) {
-      if (shuttingDown) return;
-      if (!нуженРазбор(item)) continue;
-      const файл = cachedMediaPath(cacheKey(item));
-      let media = null;
-      if (!файл || !item.duration) media = await resolveAnime(item.sourceUrl).catch(() => null);
-      if (media?.duration && !item.duration) запомнитьОСерии(item.sourceUrl, { duration: media.duration });
-      const вход = файл || media?.url;
-      if (!нетКадра(item) || !вход) continue;
-      const at = Math.round((Number(item.duration) || 1440) * 0.4);
-      await new Promise(done => generateThumbnail(item, { input: вход, at, done }));
+  // Сначала время у всех — по восемь серий разом (это лишь запрос к сайту),
+  // потом кадры — по четыре (это ещё и кусок видео). По порядку списка.
+  const поОчереди = (пачка, сколько, шаг) => { const список = [...пачка]; return Promise.all(Array.from({ length: сколько }, async () => {
+    for (let item; (item = список.shift());) { if (shuttingDown) return; await шаг(item).catch(() => {}); }
+  })); };
+  (async () => {
+    while (кадрыСерий.length) {
+      const пачка = кадрыСерий.splice(0);
+      await поОчереди(пачка, 8, async item => {
+        if (item.duration) return;
+        const media = await resolveAnime(item.sourceUrl);
+        if (media?.duration && !item.duration) запомнитьОСерии(item.sourceUrl, { duration: media.duration });
+      });
+      await поОчереди(пачка, 4, async item => {
+        if (!нетКадра(item)) return;
+        const вход = cachedMediaPath(cacheKey(item)) || (await resolveAnime(item.sourceUrl))?.url;
+        if (!вход) return;
+        const at = Math.round((Number(item.duration) || 1440) * 0.4);
+        await new Promise(done => generateThumbnail(item, { input: вход, at, done }));
+      });
     }
-  };
-  Promise.all(Array.from({ length: 4 }, работник)).finally(() => { кадрыИдут = false; });
+  })().finally(() => { кадрыИдут = false; });
 }
 
 async function addLocalFiles(paths) {
@@ -7359,7 +7366,7 @@ const server = http.createServer(async (req, res) => {
         mediaFps: body.mediaFps === 60 ? 60 : (body.mediaFps === 30 ? 30 : (config.mediaFps || 30)),
         // Тема окна — её же берёт пульт в браузере телефона.
         theme: /^[a-z-]{1,24}$/.test(body.theme || '') ? body.theme : (config.theme || ''),
-        uiFont: ['', 'golos', 'unbounded', 'exo', 'rubik', 'comfortaa', 'serif', 'lora', 'mono', 'pixel'].includes(body.uiFont) ? body.uiFont : (config.uiFont || ''),
+        uiFont: ['', 'unbounded', 'exo', 'rubik', 'comfortaa', 'serif', 'lora', 'mono', 'pixel'].includes(body.uiFont) ? body.uiFont : (config.uiFont || ''),
         uiScale: [0.9, 1, 1.1, 1.2].includes(Number(body.uiScale)) ? Number(body.uiScale) : (Number(config.uiScale) || 1),
       };
       const previousOutput = config.outputMode;

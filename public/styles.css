@@ -921,8 +921,8 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 :root[data-theme="minimal-light"] .first-run{background:var(--bg);border-color:var(--edge)}
 
 /* Выбор шрифта: каждая карточка показывает «Аа» своим шрифтом. */
-.font-picker{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:8px 0 18px}
-.font-picker button{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:12px;border:1px solid var(--edge);border-radius:12px;background:var(--bg);color:var(--soft);text-align:left;min-width:0}
+.font-picker{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px 0 18px}
+.font-picker button{display:flex;flex-direction:row;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--edge);border-radius:12px;background:var(--bg);color:var(--soft);text-align:left;min-width:0}
 .font-picker button:hover{border-color:var(--edge-strong);color:var(--text)}
 .font-picker button[aria-checked="true"]{border-color:var(--accent);background:var(--accent-soft);color:var(--text)}
 .font-sample{font-size:30px;line-height:1;font-weight:500;color:var(--text)}
@@ -964,3 +964,19 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 .panel-head .templates-anchor{min-width:0;flex:0 1 auto}
 #templatesButton{max-width:100%;min-width:0}
 #templatesButton>span:not(.count){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Несохранённые изменения открытого списка — точка на кнопке списков. */
+#templatesButton.dirty{position:relative}
+#templatesButton.dirty::after{content:"";position:absolute;top:5px;right:5px;width:7px;height:7px;border-radius:50%;background:var(--cue)}
+/* «Эфирная» — как «Глина»: спокойный фон без цветных пятен и свечения за плеером. */
+:root[data-theme="broadcast"] .ambient :is(.flow,.blob){display:none}
+:root[data-theme="broadcast"] .player-glow{display:none}
+/* Марка в шапке — всегда в цветах логотипа, как значок программы. */
+.brand-mark{background:linear-gradient(135deg,#b08bff,#7a52f5 55%,#3f6dff)}
+.brand-mark i{background:#fff}
+.font-sample{min-width:46px;text-align:center}
+/* Светлая тема: карточки очереди и панели читаются отдельно от фона. */
+:root[data-theme="minimal-light"] :is(.topbar,.statusbar){background:var(--bar)}
+:root[data-theme="minimal-light"] .side{background:var(--side)}
+:root[data-theme="minimal-light"] :is(.deck,.linkbar,.steps li){border-color:var(--edge);background:var(--surface)}
+:root[data-theme="minimal-light"] .queue-item.playing{background:#e6e3fb;border-color:#b9b0f3}
+.font-picker [data-font-choice="pixel"] b{font-size:18px}
