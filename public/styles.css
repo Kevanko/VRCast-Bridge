@@ -977,3 +977,8 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 :root[data-theme="terminal"] .player-glow{display:none}
 /* Нет своего сервера — нечего мерить и не к чему выбирать карту. */
 .server-list:empty~.setting-row{display:none}
+/* Кружок тумблера — цветом «текст на акценте»: в темах с белым акцентом он был белым на белом. */
+.switch-row input:checked::after{background:var(--on-accent)}
+:root[data-theme="minimal"] :is(.btn.primary,.go-live):hover:not(:disabled){background:#d4d4d8!important;border-color:#d4d4d8!important}
+:root[data-theme="minimal-light"] :is(.btn.primary,.go-live):hover:not(:disabled){background:#3f3f46!important;border-color:#3f3f46!important}
+:root[data-theme="terminal"] :is(.btn.primary,.go-live):hover:not(:disabled){background:#ffffff!important;border-color:#ffffff!important}

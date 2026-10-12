@@ -108,6 +108,7 @@ const defaults = {
   // Адрес сетевой карты, с которой поток уходит на свой сервер ('' — как
   // решит система). Выбирает сам человек в настройках: так поток идёт мимо VPN.
   remoteBindAddress: '',
+  remoteBindName: '',
   // Какой сохранённый список сейчас открыт в очереди: «Сохранить» обновляет
   // его, а при выходе с изменениями программа спрашивает, сохранить ли их.
   currentTemplateId: '',
@@ -888,7 +889,8 @@ function activatePublicTunnel(child, provider, url) {
   // как это делает плеер, и перепроверяем — заглушка может появиться и позже.
   tunnelServes = null; tunnelVerifyFails = 0;
   if (tunnelVerifyTimer) clearInterval(tunnelVerifyTimer);
-  setTimeout(verifyTunnelServes, 2500);
+  // Ссылка готова, как только реально отдаёт поток: первая проверка почти сразу.
+  setTimeout(verifyTunnelServes, 800);
   tunnelVerifyTimer = setInterval(verifyTunnelServes, 30000);
   tunnelVerifyTimer.unref?.();
 }
@@ -936,7 +938,11 @@ async function verifyTunnelServes() {
         // начинает не с края, а от начала окна плейлиста. Замер пользователя:
         // при окне 12 с показывали 3–4 с, а реально было 8–9.
         audienceLatencyMaxSec: Number.isFinite(edgeMs) ? Number(Math.max(0, (Date.now() - edgeMs) / 1000 + TUNNEL_WINDOW + elapsedMs / 1000).toFixed(1)) : null };
-      if (!tunnelBudgetKbps && !activeKind) {
+      // «Готово» говорим сразу — скорость меряем следом, в фоне. Раньше ссылка
+      // ждала замер (до 6 с), прежде чем её показать.
+      if (tunnelServes !== true) log(`Публичная ссылка готова · ${провайдер} — реально отдаёт поток, можно отправлять друзьям`);
+      tunnelServes = true; tunnelState = 'ready'; tunnelError = ''; tunnelVerifyFails = 0;
+      if (!tunnelBudgetKbps && !activeKind) (async () => {
         const { ttfbMs, rawKbps: kbps } = await measureTunnelKbps(url);
         if (tunnelUrl !== url) return;
         // Секундный сегмент должен приходить к зрителю за полсекунды вместе с
@@ -953,9 +959,7 @@ async function verifyTunnelServes() {
         запомнитьСкоростьТуннеля(ключТуннеля(провайдер), kbps);
         const p = streamProfile('queue');
         log(`Скорость публичной ссылки ~${(kbps / 1000).toFixed(1)} Мбит/с, ответ ${ttfbMs} мс — эфир через неё пойдёт в ${p.quality}/${p.fps}, ${p.bitrateKbps} кбит/с`);
-      }
-      if (tunnelServes !== true) log(`Публичная ссылка готова · ${провайдер} — реально отдаёт поток, можно отправлять друзьям`);
-      tunnelServes = true; tunnelState = 'ready'; tunnelError = ''; tunnelVerifyFails = 0;
+      })().catch(() => {});
       return;
     }
     if (сбой()) return;
@@ -975,7 +979,7 @@ async function verifyTunnelServes() {
     tunnelVerifyBusy = false;
     // Пока ссылка не подтверждена, проверяем часто: адрес Cloudflare нередко
     // начинает резолвиться через несколько секунд, и ждать 30 с незачем.
-    if (tunnelUrl === url && tunnelServes !== true) setTimeout(verifyTunnelServes, 4000).unref?.();
+    if (tunnelUrl === url && tunnelServes !== true) setTimeout(verifyTunnelServes, 1500).unref?.();
   }
 }
 
@@ -2187,7 +2191,7 @@ function status(withLogs = true) {
     stream: { ready: hlsHealth.ready, segmentCount: hlsHealth.segmentCount,
       state: !relayProcess ? 'offline' : hlsHealth.ready ? 'ready' : hlsHealth.segmentAge !== null && hlsHealth.segmentAge >= 4 ? 'stalled' : 'starting' },
     compatibility: { unity: unityCompatibility() },
-    network: { vpn: vpnInterface, route: vpnRoute, adapters: сетевыеКарты() },
+    network: { vpn: vpnInterface, route: vpnRoute, adapters: картыСИнтернетом(), chosen: выбраннаяКарта() },
     delivery: { mode: config.outputMode, phase: deliveryPhase, ready: deliveryReady,
       error: config.outputMode === 'tunnel' ? tunnelError : config.outputMode === 'remote' && remoteReachable === false ? 'Сервер не отвечает.' : '' },
     // linkReady — единственный честный признак «ссылку уже можно вставлять».
@@ -3757,7 +3761,7 @@ function measureRemoteDrain(sink, written) {
 // с 1080p/60 на 4,5 Мбит/с в канал на 1,9 — затор, выброшенные кадры и
 // стоящая картинка у зрителя в первые минуты.
 let каналЗаписанВ = 0;
-// Сетевые карты с IPv4 — для выбора в настройках. VPN-адаптеры помечены.
+// Сетевые карты с IPv4. VPN-адаптеры помечены.
 function сетевыеКарты() {
   const карты = [];
   for (const [name, list] of Object.entries(networkInterfaces())) {
@@ -3768,10 +3772,40 @@ function сетевыеКарты() {
   }
   return карты;
 }
-// Выбранная карта, если она сейчас есть (кабель вынули — идём как система).
+// Есть ли у карты интернет: TCP до 1.1.1.1:443 с её адреса, не дольше 1,5 с.
+// В настройках показываем только такие — VirtualBox, Hyper-V, WSL и прочие
+// виртуальные карты без выхода в сеть только путали.
+const интернетКарт = new Map(); // адрес → { online, rttMs, at }
+function проверитьКарту(адрес) {
+  return new Promise(resolve => {
+    const начало = Date.now();
+    const сокет = netConnect({ host: '1.1.1.1', port: 443, localAddress: адрес, timeout: 1500 });
+    const итог = online => { сокет.destroy(); интернетКарт.set(адрес, { online, rttMs: online ? Date.now() - начало : 0, at: Date.now() }); resolve(online); };
+    сокет.once('connect', () => итог(true));
+    сокет.once('timeout', () => итог(false));
+    сокет.once('error', () => итог(false));
+  });
+}
+let картыПроверяются = false;
+async function обновитьИнтернетКарт() {
+  if (картыПроверяются) return;
+  картыПроверяются = true;
+  try { await Promise.all(сетевыеКарты().filter(карта => !карта.vpn).map(карта => проверитьКарту(карта.address))); }
+  finally { картыПроверяются = false; }
+}
+// Для настроек: карты с интернетом (и выбранная, даже если сейчас без него).
+function картыСИнтернетом() {
+  if (!картыПроверяются && [...интернетКарт.values()].every(x => Date.now() - x.at > 60000)) обновитьИнтернетКарт();
+  return сетевыеКарты().filter(карта => !карта.vpn && (интернетКарт.get(карта.address)?.online || карта.address === выбраннаяКарта()))
+    .map(карта => ({ ...карта, rttMs: интернетКарт.get(карта.address)?.rttMs || 0 }));
+}
+// Выбранная карта. Помним и адрес, и имя: роутер выдал новый адрес — карта та
+// же, выбор не слетает. Кабель вынули — идём как система.
 function выбраннаяКарта() {
-  const адрес = config.remoteBindAddress;
-  return адрес && сетевыеКарты().some(карта => карта.address === адрес) ? адрес : '';
+  const адрес = config.remoteBindAddress, имя = config.remoteBindName;
+  const карты = сетевыеКарты();
+  if (адрес && карты.some(карта => карта.address === адрес)) return адрес;
+  return (имя && карты.find(карта => карта.name === имя && !карта.vpn)?.address) || '';
 }
 
 // Настоящий адрес хоста через DNS-over-HTTPS. Системный DNS под mihomo отдаёт
@@ -7171,6 +7205,8 @@ const server = http.createServer(async (req, res) => {
         // Только адрес одной из карт этого ПК — чужое значение не пройдёт.
         remoteBindAddress: body.remoteBindAddress === undefined ? (config.remoteBindAddress || '')
           : сетевыеКарты().some(карта => карта.address === body.remoteBindAddress) ? body.remoteBindAddress : '',
+        remoteBindName: body.remoteBindAddress === undefined ? (config.remoteBindName || '')
+          : сетевыеКарты().find(карта => карта.address === body.remoteBindAddress)?.name || '',
         cacheLimitGb: Math.max(0, Math.min(200, Number(body.cacheLimitGb ?? config.cacheLimitGb ?? 0) || 0)),
         // Только настоящий булев: строка «false» из кривого запроса не должна
         // превращаться в true и молча прятать окно вместо выхода.

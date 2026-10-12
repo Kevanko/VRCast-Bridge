@@ -630,14 +630,16 @@ $('#testTunnels').addEventListener('click',async()=>{try{render(await api('/api/
 // Выбор сетевой карты для потока на свой сервер. Перерисовываем только когда
 // список карт или выбор поменялись, иначе открытый список закрывался бы сам.
 function paintAdapters(state){
-  const select=$('#remoteAdapter'), карты=state.network?.adapters||[], выбрана=state.config.remoteBindAddress||'';
-  const подпись=JSON.stringify([карты,выбрана]);
+  // Только карты, через которые есть интернет: виртуальные (VirtualBox, Hyper-V,
+  // WSL) и VPN сюда не попадают. Выбор помнится по имени карты.
+  const select=$('#remoteAdapter'), карты=(state.network?.adapters||[]).map(к=>({name:к.name,address:к.address})), выбрана=state.network?.chosen||'', имя=state.config.remoteBindName||'';
+  const подпись=JSON.stringify([карты,выбрана,имя]);
   if(select.dataset.sig===подпись||document.activeElement===select)return;
   select.dataset.sig=подпись;
-  const есть=карты.some(к=>к.address===выбрана);
-  select.innerHTML=`<option value="">Как в системе</option>`+карты.map(к=>`<option value="${escapeHtml(к.address)}"${к.vpn?' disabled':''}>${escapeHtml(к.name)} · ${escapeHtml(к.address)}${к.vpn?' · VPN':''}</option>`).join('')
-    +(выбрана&&!есть?`<option value="${escapeHtml(выбрана)}">${escapeHtml(выбрана)} · сейчас не подключена</option>`:'');
-  select.value=выбрана;
+  const пропала=имя&&!выбрана;
+  select.innerHTML=`<option value="">Как в системе</option>`+карты.map(к=>`<option value="${escapeHtml(к.address)}">${escapeHtml(к.name)} · ${escapeHtml(к.address)}</option>`).join('')
+    +(пропала?`<option value="__gone" disabled>${escapeHtml(имя)} · сейчас не подключена</option>`:'');
+  select.value=выбрана||(пропала?'__gone':'');
 }
 $('#remoteAdapter').addEventListener('change',async event=>{
   try{render(await api('/api/config',{method:'POST',body:JSON.stringify({remoteBindAddress:event.target.value})}));toast(event.target.value?'Поток пойдёт через выбранную карту':'Поток пойдёт как решит система');}
