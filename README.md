@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="launcher/assets/vrcast-icon.png" width="88" alt="">
+<img src="docs/media/logo.svg" width="96" alt="VRCast Bridge logo">
 
 # VRCast Bridge
 
