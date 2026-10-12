@@ -18,10 +18,10 @@ Get-File 'yt-dlp' 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-
 $mediamtx = Join-Path $tools 'mediamtx.exe'
 if (-not (Test-Path $mediamtx)) {
   Write-Host 'mediamtx       downloading...'
-  $release = Invoke-RestMethod 'https://api.github.com/repos/bluenviron/mediamtx/releases/latest' -UseBasicParsing
-  $asset = $release.assets | Where-Object { $_.name -match 'windows_amd64\.zip$' } | Select-Object -First 1
+  # Pinned version, same as on the server: no GitHub API call (its rate limit broke CI).
+  $version = 'v1.20.1'
   $zip = Join-Path $env:TEMP 'mediamtx.zip'
-  Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
+  Invoke-WebRequest -Uri "https://github.com/bluenviron/mediamtx/releases/download/$version/mediamtx_${version}_windows_amd64.zip" -OutFile $zip -UseBasicParsing
   $unpacked = Join-Path $env:TEMP 'mediamtx-unpack'
   Remove-Item $unpacked -Recurse -Force -ErrorAction SilentlyContinue
   Expand-Archive $zip -DestinationPath $unpacked -Force
