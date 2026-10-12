@@ -4,16 +4,16 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <link rel="icon" type="image/png" href="/logo.png?v=0.54.18">
-  <meta name="theme-color" content="#0e0c18">
+  <meta name="theme-color" content="#03040a">
   <title>VRCast Bridge</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Unbounded:wght@700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css?v=0.60.0">
   <!-- Тема ставится до первой отрисовки: иначе при запуске на долю секунды
        мелькала бы палитра по умолчанию. Хранилище может быть недоступно —
        тогда просто остаётся «Ночной мир». -->
-  <script>try{var t=localStorage.getItem('theme');if(t==='broadcast'||t==='projector')document.documentElement.dataset.theme=t;}catch(e){}</script>
+  <script>var t='midnight';try{t=localStorage.getItem('theme')||t;if(!localStorage.getItem('theme-v2')){localStorage.setItem('theme-v2','1');if(t==='night'){t='midnight';localStorage.setItem('theme',t);}}}catch(e){}if(t!=='night')document.documentElement.dataset.theme=(t==='broadcast'||t==='projector')?t:'midnight';</script>
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" width="0" height="0"><defs>
@@ -51,7 +51,7 @@
 </defs></svg>
 
   <!-- Живой фон: плавный перелив цветов темы, дышит под музыку. -->
-  <div class="ambient" id="ambient" aria-hidden="true"><div class="flow"></div><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><div class="grain"></div></div>
+  <div class="ambient" id="ambient" aria-hidden="true"><div class="flow"></div><div class="grid"></div><div class="sweep"></div><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><div class="grain"></div></div>
   <div class="app">
     <!-- Шапка: марка слева, ссылка для плеера по центру, состояние справа.
          Ссылка — главное, что человек делает с программой, поэтому она на виду всегда. -->
@@ -134,7 +134,7 @@
 
           <!-- Первый запуск: три шага вместо пустого чёрного кадра. -->
           <div class="first-run" id="firstRun" hidden>
-            <div class="first-head"><h1>Три шага до экрана в VRChat</h1><p>Ссылка не меняется, пока программа открыта, — вставить её нужно один раз</p></div>
+            <div class="wordmark" aria-hidden="true">VRCast</div><div class="first-head"><h1>Три шага до экрана в VRChat</h1><p>Ссылка не меняется, пока программа открыта, — вставить её нужно один раз</p></div>
             <ol class="steps">
               <li class="on"><span>1</span><b>Выберите, что вещать</b><small>Вставьте ссылку на видео справа или откройте вкладку «Экран»</small></li>
               <li><span>2</span><b>Начните эфир</b><small>Кнопка вверху справа. Здесь появится то, что увидят в мире</small></li>
@@ -366,7 +366,8 @@
       <section class="settings-group" id="setLook">
         <h3>Оформление</h3>
         <div class="theme-picker" role="radiogroup" aria-label="Тема">
-          <button type="button" role="radio" aria-checked="true" data-theme-choice="night"><span class="swatch night"><i></i><i></i><i></i></span><b>Ночной мир</b></button>
+          <button type="button" role="radio" aria-checked="true" data-theme-choice="midnight"><span class="swatch midnight"><i></i><i></i><i></i></span><b>Полночь</b></button>
+          <button type="button" role="radio" aria-checked="false" data-theme-choice="night"><span class="swatch night"><i></i><i></i><i></i></span><b>Ночной мир</b></button>
           <button type="button" role="radio" aria-checked="false" data-theme-choice="broadcast"><span class="swatch broadcast"><i></i><i></i><i></i></span><b>Эфирная</b></button>
           <button type="button" role="radio" aria-checked="false" data-theme-choice="projector"><span class="swatch projector"><i></i><i></i><i></i></span><b>Проектор</b></button>
         </div>

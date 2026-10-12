@@ -275,7 +275,8 @@ class Remote extends ChangeNotifier {
       final info = await api.lanInfo();
       final s = state;
       await phone.start(api.base, (info['webrtcPort'] as num).toInt(),
-          quality: s?.profileQuality ?? '720p', fps: s?.profileFps ?? 30, bitrateKbps: s?.profileBitrateKbps ?? 0);
+          quality: s?.profileQuality ?? '720p', fps: s?.profileFps ?? 30, bitrateKbps: s?.profileBitrateKbps ?? 0,
+          auth: info['phonePublishAuth'] as String?);
       await api.startPhone();
       notifyListeners();
       return null;

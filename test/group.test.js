@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { isPrivateAddress } from '../src/lan.js';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer, request } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -8,7 +9,7 @@ import { homedir, networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hideMemberSource, parseMediaBase, sanitizeContribution, sharedQueueItem, takeInitiative } from '../src/group.js';
 
-const lanIp = Object.values(networkInterfaces()).flat().find(item => item && item.family === 'IPv4' && !item.internal)?.address;
+const lanIp = Object.values(networkInterfaces()).flat().find(item => item && item.family === 'IPv4' && !item.internal && isPrivateAddress(item.address))?.address;
 const KEY = 'k'.repeat(24);
 
 test('группа: проверка присланного — чужой адрес, мусор и лишнее отбрасываются', () => {
@@ -226,7 +227,7 @@ test('группа: эфир идёт с файла участника, его �
   // Участник сам выходит из группы.
   await contribute(a);
   assert.equal((await call('/api/group/leave', { method: 'POST', token: a.token })).status, 200);
-  assert.equal((await state(null)).queue.some(entry => entry.member === a.id), false);
+  assert.equal((await local('/api/status?logs=0')).data.queue.some(entry => entry.member === a.id), false);
   a.stream.destroy(); b.stream.destroy();
 });
 

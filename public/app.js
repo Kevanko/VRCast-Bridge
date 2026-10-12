@@ -2069,10 +2069,10 @@ $('#cacheLimit').addEventListener('change',async()=>{
 // плейлист. Окно раскрывается и закрывается с короткой анимацией; при
 // системной настройке «меньше движения» — мгновенно.
 const settingsDialog=$('#settingsDialog');
-const ТЕМЫ={night:'#0e0c18',broadcast:'#0f1115',projector:'#121110'};
+const ТЕМЫ={midnight:'#03040a',night:'#0e0c18',broadcast:'#0f1115',projector:'#121110'};
 
 function применитьТему(тема){
-  if(!ТЕМЫ[тема])тема='night';
+  if(!ТЕМЫ[тема])тема='midnight';
   if(тема==='night')delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme=тема;
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content',ТЕМЫ[тема]);

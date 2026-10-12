@@ -78,7 +78,8 @@ let published = null;
 export async function publishService({ port, version, log, name = hostname() }) {
   await unpublishService();
   try {
-    const { Bonjour } = await import('bonjour-service');
+    // Собран в один файл (esbuild), чтобы работать без node_modules — в EXE их нет.
+    const { Bonjour } = (await import('./vendor/bonjour.js')).default;
     const bonjour = new Bonjour();
     const service = bonjour.publish({ name: `VRCast Bridge (${name})`, type: 'vrcast', protocol: 'tcp', port,
       txt: { name, ver: String(version) } });

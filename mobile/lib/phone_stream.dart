@@ -50,8 +50,9 @@ class PhoneStream {
   void emitChange() => _changes.add(null);
 
   /// Экран телефона → ПК. [pc] — адрес ПК (http://хост:порт), [webrtcPort] — порт WebRTC на нём.
-  Future<void> start(Uri pc, int webrtcPort, {String quality = '720p', int fps = 30, int bitrateKbps = 0}) =>
-      _publish(pc.replace(port: webrtcPort, path: '/phone/whip'), const {},
+  /// [auth] — заголовок Authorization из /api/lan-info (выдаётся только привязанному устройству).
+  Future<void> start(Uri pc, int webrtcPort, {String quality = '720p', int fps = 30, int bitrateKbps = 0, String? auth}) =>
+      _publish(pc.replace(port: webrtcPort, path: '/phone/whip'), auth == null ? const {} : {'Authorization': auth},
           quality: quality, fps: fps, bitrateKbps: bitrateKbps, h264: false, hint: 'Устройство не приняло поток. Включён ли «Доступ с других устройств»?');
 
   /// Экран телефона → свой сервер напрямую, без ПК. Видео H.264: его понимает плеер в VRChat.

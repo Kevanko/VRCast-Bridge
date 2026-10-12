@@ -650,7 +650,7 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 #addServerForm .field-label{display:flex;flex-direction:column;gap:6px}
 #addServerForm input{width:100%;background:var(--surface)}
 .form-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.theme-picker{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.theme-picker{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
 .theme-picker button{display:flex;flex-direction:column;gap:10px;padding:10px;border:1px solid var(--edge);border-radius:12px;background:var(--bg);color:var(--soft);text-align:left}
 .theme-picker button:hover{border-color:var(--edge-strong);color:var(--text)}
 .theme-picker button[aria-checked="true"]{border-color:var(--accent);background:var(--accent-soft);color:var(--text)}
@@ -721,3 +721,111 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 /* Свёрнутое окно: никаких анимаций — смотреть на них некому. */
 .window-hidden *,.window-hidden *::before,.window-hidden *::after{animation-play-state:paused!important;transition:none!important}
+
+/* ─── Тема «Полночь» (по умолчанию) ─────────────────────────────────────────
+   Ночной запуск продукта: почти чёрный холст, чертёжная сетка, стекло вместо
+   панелей. Поверхности — полупрозрачные пластины, подсвеченные снизу, у всего
+   интерактивного вместо рамки — внутренняя волосяная линия холодного
+   бело-голубого цвета. Единственный рабочий акцент — фиолетовый. */
+:root[data-theme="midnight"]{
+  --bg:#03040a;--bar:#070915;--side:#080a17;--surface:#0b0e1c;--raise:#141a30;--sel:#1c2244;--menu:#0c0f1f;
+  --edge:#1a2042;--edge-strong:#283063;
+  --text:#f3f5ff;--soft:#d9def5;--muted:#9aa3c8;--faint:#6f789c;
+  --accent:#8a5cff;--accent-strong:#bca4ff;--accent-soft:rgba(138,92,255,.15);--accent-line:rgba(138,92,255,.6);--on-accent:#ffffff;
+  --second:#86a8ff;--live:#ff4d6d;--live-text:#ff8aa0;--ok:#4ee0b0;--ok-text:#9cf0d2;--cue:#ffc66b;--danger:#ff4d6d;
+  --shade:rgba(3,4,10,.74);
+  --glow-a:#6a3cff;--glow-b:#2745ff;--glow-c:#2aa5ff;
+  --hair:inset 0 0 0 1px rgba(196,212,255,.09),inset 0 1px 0 rgba(232,238,255,.11);
+  --hair-strong:inset 0 0 0 1px rgba(200,214,255,.16),inset 0 1px 0 rgba(236,240,255,.18);
+  --glass:linear-gradient(180deg,rgba(158,172,255,.065),rgba(158,172,255,.022));
+  --glass-lit:linear-gradient(0deg,rgba(138,92,255,.10),rgba(138,92,255,0) 60%),linear-gradient(180deg,rgba(158,172,255,.07),rgba(158,172,255,.025));
+  --blur:blur(22px) saturate(150%);
+}
+:root{--sw-midnight-1:#03040a;--sw-midnight-2:#141a30;--sw-midnight-3:#8a5cff}
+.swatch.midnight i:nth-child(1){background:var(--sw-midnight-1)}
+.swatch.midnight i:nth-child(2){background:var(--sw-midnight-2)}
+.swatch.midnight i:nth-child(3){background:var(--sw-midnight-3)}
+
+/* Живые обои: сетка-чертёж (мелкая 48px и крупная 240px) медленно плывёт;
+   по ней раз в полминуты проходит полоса света и проявляет линии; снизу —
+   свечение, под музыку ярче. Двигаются только transform, opacity и маска. */
+.ambient .grid,.ambient .sweep{display:none}
+:root[data-theme="midnight"] .ambient .flow{opacity:calc(.16 + var(--energy) * .18);filter:blur(90px)}
+:root[data-theme="midnight"] .ambient .grid,:root[data-theme="midnight"] .ambient .sweep{display:block;position:absolute;inset:-240px}
+:root[data-theme="midnight"] .ambient .grid{
+  background-image:
+    linear-gradient(rgba(150,170,255,.09) 1px,transparent 1px),linear-gradient(90deg,rgba(150,170,255,.09) 1px,transparent 1px),
+    linear-gradient(rgba(150,170,255,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(150,170,255,.035) 1px,transparent 1px);
+  background-size:240px 240px,240px 240px,48px 48px,48px 48px;
+  -webkit-mask:radial-gradient(ellipse 70% 62% at 50% 46%,#000 20%,transparent 78%);mask:radial-gradient(ellipse 70% 62% at 50% 46%,#000 20%,transparent 78%);
+  opacity:calc(.8 + var(--energy) * .4);animation:grid-drift 90s linear infinite}
+@keyframes grid-drift{to{transform:translate(240px,240px)}}
+:root[data-theme="midnight"] .ambient .sweep{
+  background-image:linear-gradient(rgba(190,175,255,.22) 1px,transparent 1px),linear-gradient(90deg,rgba(190,175,255,.22) 1px,transparent 1px);
+  background-size:48px 48px;
+  -webkit-mask:linear-gradient(105deg,transparent 40%,#000 50%,transparent 60%) 120% 0/300% 100% no-repeat;mask:linear-gradient(105deg,transparent 40%,#000 50%,transparent 60%) 120% 0/300% 100% no-repeat;
+  animation:grid-drift 90s linear infinite,sweep 26s ease-in-out infinite}
+@keyframes sweep{0%{-webkit-mask-position:120% 0;mask-position:120% 0;opacity:0}12%{opacity:1}55%{-webkit-mask-position:-20% 0;mask-position:-20% 0;opacity:.9}62%,100%{opacity:0;-webkit-mask-position:-20% 0;mask-position:-20% 0}}
+:root[data-theme="midnight"] .ambient .b1{left:-10vmax;top:auto;bottom:-34vmax;background:radial-gradient(closest-side,color-mix(in srgb,var(--glow-a) 55%,transparent),transparent)}
+:root[data-theme="midnight"] .ambient .b2{right:-14vmax;bottom:-30vmax;background:radial-gradient(closest-side,color-mix(in srgb,var(--glow-b) 46%,transparent),transparent)}
+:root[data-theme="midnight"] .ambient .b3{left:34vw;top:auto;bottom:-22vmax;opacity:calc(.32 + var(--energy) * .4);background:radial-gradient(closest-side,color-mix(in srgb,var(--glow-c) 40%,transparent),transparent)}
+:root[data-theme="midnight"] .ambient .grain{opacity:.035}
+@media (prefers-reduced-motion:reduce){:root[data-theme="midnight"] .ambient .grid,:root[data-theme="midnight"] .ambient .sweep{animation:none}}
+.ambient.still .grid,.ambient.still .sweep{animation-play-state:paused}
+
+/* Стекло: каркас и пластины. */
+:root[data-theme="midnight"] .topbar,:root[data-theme="midnight"] .statusbar{border-color:rgba(190,205,255,.07);background:rgba(6,8,18,.55);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
+:root[data-theme="midnight"] .side{border-left-color:rgba(190,205,255,.07);background:rgba(8,10,22,.42);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
+:root[data-theme="midnight"] .deck,:root[data-theme="midnight"] .steps li,:root[data-theme="midnight"] .linkbar{border-color:transparent;background:var(--glass);box-shadow:var(--hair),0 30px 60px -30px rgba(0,0,0,.8);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
+:root[data-theme="midnight"] .menu,:root[data-theme="midnight"] dialog{border-color:transparent;background:rgba(12,15,32,.84);box-shadow:var(--hair-strong),0 40px 100px rgba(0,0,0,.7);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
+:root[data-theme="midnight"] dialog::backdrop{background:rgba(3,4,10,.6);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+:root[data-theme="midnight"] .settings-nav{border-right-color:rgba(190,205,255,.07);background:rgba(255,255,255,.015)}
+:root[data-theme="midnight"] .settings-close{background:transparent!important}
+:root[data-theme="midnight"] .settings-group+.settings-group{border-top-color:rgba(190,205,255,.07)}
+:root[data-theme="midnight"] .player{background:#010207;box-shadow:0 0 0 1px rgba(196,212,255,.07),0 40px 120px -40px rgba(106,60,255,.45)}
+:root[data-theme="midnight"] .player::after{box-shadow:inset 0 0 0 1px rgba(196,212,255,.10),inset 0 1px 0 rgba(236,240,255,.10)}
+
+/* Интерактивное — волосяная линия вместо рамки. */
+:root[data-theme="midnight"] .btn,:root[data-theme="midnight"] .seg,:root[data-theme="midnight"] .icon-btn.edge,
+:root[data-theme="midnight"] input[type=text],:root[data-theme="midnight"] input[type=url],:root[data-theme="midnight"] input[type=number],:root[data-theme="midnight"] input[type=password],:root[data-theme="midnight"] select{
+  border-color:transparent;background-color:rgba(158,172,255,.04);box-shadow:var(--hair)}
+:root[data-theme="midnight"] .btn:hover:not(:disabled),:root[data-theme="midnight"] .icon-btn:hover:not(:disabled){border-color:transparent;background-color:rgba(158,172,255,.09);box-shadow:var(--hair-strong)}
+:root[data-theme="midnight"] input:focus-visible,:root[data-theme="midnight"] select:focus-visible{border-color:transparent!important;box-shadow:inset 0 0 0 1px var(--accent),0 0 0 4px rgba(138,92,255,.18)}
+:root[data-theme="midnight"] .btn.ghost{box-shadow:none;border:1px dashed rgba(196,212,255,.18)}
+:root[data-theme="midnight"] .btn.text,:root[data-theme="midnight"] .btn.text:hover:not(:disabled){box-shadow:none;background-color:transparent}
+:root[data-theme="midnight"] .seg button[aria-checked="true"]{background:rgba(158,172,255,.12);box-shadow:var(--hair-strong)}
+/* Фиолетовый — светящееся стекло, а не плоская заливка. */
+:root[data-theme="midnight"] .btn.primary,:root[data-theme="midnight"] .go-live{border-color:transparent;color:#fff;
+  background:linear-gradient(180deg,#9b74ff,#7444f5);box-shadow:inset 0 1px 0 rgba(255,255,255,.28),inset 0 0 0 1px rgba(210,195,255,.35),0 10px 30px -8px rgba(138,92,255,.7)}
+:root[data-theme="midnight"] .btn.primary:hover:not(:disabled),:root[data-theme="midnight"] .go-live:hover:not(:disabled){color:#fff;background:linear-gradient(180deg,#ab89ff,#8152ff);box-shadow:inset 0 1px 0 rgba(255,255,255,.34),inset 0 0 0 1px rgba(220,208,255,.45),0 14px 40px -8px rgba(138,92,255,.85)}
+:root[data-theme="midnight"] .status-pill{background:rgba(158,172,255,.06);box-shadow:var(--hair)}
+:root[data-theme="midnight"] .status-pill.ready{background:rgba(78,224,176,.08);box-shadow:inset 0 0 0 1px rgba(78,224,176,.22)}
+:root[data-theme="midnight"] .status-pill.live{background:rgba(255,77,109,.1);box-shadow:inset 0 0 0 1px rgba(255,77,109,.3),0 0 24px -6px rgba(255,77,109,.5)}
+:root[data-theme="midnight"] .brand-mark{background:rgba(158,172,255,.07);box-shadow:var(--hair-strong)}
+:root[data-theme="midnight"] .queue-item:hover{background:rgba(158,172,255,.05)}
+:root[data-theme="midnight"] .queue-item.playing,:root[data-theme="midnight"] .queue-item.selected{border-color:transparent;background:linear-gradient(90deg,rgba(138,92,255,.16),rgba(138,92,255,.04));box-shadow:inset 0 0 0 1px rgba(170,140,255,.28),inset 3px 0 0 var(--accent)}
+
+/* Светящийся текст: заголовки будто подсвечены сзади, из-под стекла. */
+:root[data-theme="midnight"] .brand b,:root[data-theme="midnight"] .panel-head h2,:root[data-theme="midnight"] .first-head h1{
+  text-shadow:0 0 18px rgba(200,190,255,.35),0 0 2px rgba(255,255,255,.4)}
+
+/* Главный экран до первого эфира: во всю ширину светится имя программы, а
+   три шага — стеклянные пластины, парящие поверх него. */
+.wordmark{display:none}
+:root[data-theme="midnight"] .first-run{gap:26px}
+:root[data-theme="midnight"] .wordmark{display:block;margin-bottom:-14px;pointer-events:none;user-select:none;white-space:nowrap;
+  font:800 clamp(64px,10.5vw,168px)/.95 "Unbounded",system-ui,sans-serif;letter-spacing:-.05em;
+  color:transparent;background:linear-gradient(180deg,#ffffff 18%,#d9cdff 52%,rgba(138,92,255,.35) 100%);-webkit-background-clip:text;background-clip:text;
+  filter:drop-shadow(0 0 28px rgba(138,92,255,.55)) drop-shadow(0 0 1px rgba(255,255,255,.6));animation:wordmark-in 1.8s var(--ease) both}
+@keyframes wordmark-in{from{opacity:0;letter-spacing:.04em;filter:blur(20px)}to{opacity:1}}
+:root[data-theme="midnight"] .first-head h1{font-size:20px;font-weight:600;line-height:28px;color:var(--soft)}
+:root[data-theme="midnight"] .player.first,:root[data-theme="midnight"] .player.idle{background:rgba(2,3,10,.45);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)}
+:root[data-theme="midnight"] .steps{gap:20px}
+:root[data-theme="midnight"] .steps li{min-height:168px;padding:22px;border-radius:18px;animation:plate-float 9s ease-in-out infinite}
+:root[data-theme="midnight"] .steps li:nth-child(2){animation-delay:-3s}
+:root[data-theme="midnight"] .steps li:nth-child(3){animation-delay:-6s}
+@keyframes plate-float{0%,100%{translate:0 0}50%{translate:0 -6px}}
+:root[data-theme="midnight"] .steps li.on{background:var(--glass-lit);box-shadow:inset 0 0 0 1px rgba(170,140,255,.35),inset 0 1px 0 rgba(236,240,255,.16),0 30px 80px -24px rgba(138,92,255,.55)}
+:root[data-theme="midnight"] .steps span{background:rgba(158,172,255,.08);box-shadow:var(--hair)}
+:root[data-theme="midnight"] .steps li.on span{background:var(--accent);color:#fff;box-shadow:0 0 18px rgba(138,92,255,.8)}
+@media (prefers-reduced-motion:reduce){:root[data-theme="midnight"] .wordmark,:root[data-theme="midnight"] .steps li{animation:none}}

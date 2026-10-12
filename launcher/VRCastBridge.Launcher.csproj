@@ -7,9 +7,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>VRCast Bridge</AssemblyName>
     <RootNamespace>VRCastBridge.Launcher</RootNamespace>
-    <Version>0.60.5</Version>
-    <FileVersion>0.60.5.0</FileVersion>
-    <AssemblyVersion>0.60.5.0</AssemblyVersion>
+    <Version>0.61.0</Version>
+    <FileVersion>0.61.0.0</FileVersion>
+    <AssemblyVersion>0.61.0.0</AssemblyVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
@@ -26,19 +26,13 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" />
-    <EmbeddedResource Include="..\src\server.js" LogicalName="VRCast.Payload.server.js" />
-    <EmbeddedResource Include="..\src\anime.js" LogicalName="VRCast.Payload.anime.js" />
-    <EmbeddedResource Include="..\server\install.sh" LogicalName="VRCast.Payload.install.sh" />
-    <EmbeddedResource Include="..\public\index.html" LogicalName="VRCast.Payload.index.html" />
-    <EmbeddedResource Include="..\public\styles.css" LogicalName="VRCast.Payload.styles.css" />
-    <EmbeddedResource Include="..\public\ui.css" LogicalName="VRCast.Payload.ui.css" />
-    <EmbeddedResource Include="..\public\app.js" LogicalName="VRCast.Payload.app.js" />
-    <EmbeddedResource Include="..\public\vendor\hls.min.js" LogicalName="VRCast.Payload.hls.min.js" />
+    <!-- Файлы программы — по маске: новый модуль или страница попадают в EXE сами. -->
+    <EmbeddedResource Include="..\src\**\*.js" LogicalName="VRCast.Payload.file/src/%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\public\**\*" LogicalName="VRCast.Payload.file/public/%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\server\install.sh" LogicalName="VRCast.Payload.file/server/install.sh" />
     <EmbeddedResource Include="..\tools\VRCast.AudioCapture.exe" LogicalName="VRCast.Payload.AudioCapture.exe" />
     <EmbeddedResource Include="..\tools\VRCast.WindowCapture.exe" LogicalName="VRCast.Payload.WindowCapture.exe" />
     <EmbeddedResource Include="..\tools\plink.exe" LogicalName="VRCast.Payload.Plink.exe" />
     <EmbeddedResource Include="assets\vrcast-icon.ico" LogicalName="VRCast.Payload.icon.ico" />
-    <EmbeddedResource Include="..\public\logo.png" LogicalName="VRCast.Payload.logo.png" />
-    <EmbeddedResource Include="..\public\standby.png" LogicalName="VRCast.Payload.standby.png" />
   </ItemGroup>
 </Project>

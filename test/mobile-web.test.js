@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { isPrivateAddress } from '../src/lan.js';
 import { spawn } from 'node:child_process';
 import { request } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -7,7 +8,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const lanIp = Object.values(networkInterfaces()).flat().find(item => item && item.family === 'IPv4' && !item.internal)?.address;
+const lanIp = Object.values(networkInterfaces()).flat().find(item => item && item.family === 'IPv4' && !item.internal && isPrivateAddress(item.address))?.address;
 const port = Number(process.env.VRCAST_TEST_PORT || 48717) + 500;
 const call = (path, { method = 'GET', body, headers = {}, host = lanIp } = {}) => new Promise((resolve, reject) => {
   const req = request({ host, port, path, method, headers: { Host: `${host}:${port}`, 'Content-Type': 'application/json', ...headers } }, res => {
@@ -32,8 +33,8 @@ test('пульт в браузере телефона: страница откр
     assert.match(page.text, /VRCast/);
     assert.equal((await call('/m/m.js')).status, 200);
     assert.equal((await call('/m/m.css')).status, 200);
-    assert.equal((await call('/')).status, 403, 'главная страница программы по сети не открывается');
-    assert.equal((await call('/app.js')).status, 403);
+    assert.ok([401, 403].includes((await call('/')).status), 'главная страница программы по сети не открывается');
+    assert.ok([401, 403].includes((await call('/app.js')).status));
 
     // Код привязки показан на компьютере (в QR): браузер меняет его на ключ.
     const pin = JSON.parse((await call('/api/pair/pin', { host: '127.0.0.1' })).text).pin;
@@ -50,7 +51,8 @@ test('пульт в браузере телефона: страница откр
     assert.notEqual(withKey.status, 403);
     assert.equal((await call('/api/shutdown', { method: 'POST', body: {}, headers: { 'X-VRCast-Token': token } })).status, 403, 'выключить программу с телефона нельзя');
 
-    const state = JSON.parse((await call('/api/status?logs=0')).text);
+    assert.equal((await call('/api/status?logs=0')).status, 401, 'без привязки статус закрыт');
+    const state = JSON.parse((await call('/api/status?logs=0', { headers: { 'X-VRCast-Token': token } })).text);
     assert.ok(Array.isArray(state.queue));
     const list = JSON.parse((await call('/api/status?logs=0', { host: '127.0.0.1' })).text).config.pairedPhones;
     assert.equal(list[0].kind, 'web');

@@ -32,13 +32,17 @@ test('маршруты для сети: управление можно, нас�
     assert.ok(!lanRouteAllowed(method, path), `${method} ${path}`);
 });
 
-const lanIp = Object.values(networkInterfaces()).flat().find(item => item && item.family === 'IPv4' && !item.internal)?.address;
+const lanIp = Object.values(networkInterfaces()).flat().find(item => item && item.family === 'IPv4' && !item.internal && isPrivateAddress(item.address))?.address;
 const port = Number(process.env.VRCAST_TEST_PORT || 48717) + 100;
 let server, dataDirectory;
 
 // Запрос с заданным Host: fetch не даёт его подменить, поэтому http.request.
+// Из сети всё, кроме имени ПК, ввода кода и потока, — только привязанным.
+// Запросы из сети по умолчанию идут с ключом привязки; без него — явно пустой заголовок.
+let netToken = '';
 const call = (host, path, { method = 'GET', body, headers = {}, to = host.split(':')[0], collect = true } = {}) => new Promise((resolve, reject) => {
-  const req = request({ host: to, port, path, method, headers: { Host: host, 'Content-Type': 'application/json', ...headers } }, res => {
+  const withToken = netToken && !host.startsWith('127.0.0.1') && !Object.keys(headers).some(name => name.toLowerCase() === 'x-vrcast-token');
+  const req = request({ host: to, port, path, method, headers: { Host: host, 'Content-Type': 'application/json', ...(withToken ? { 'X-VRCast-Token': netToken } : {}), ...headers } }, res => {
     if (!collect) return resolve({ status: res.statusCode, res });
     let text = ''; res.setEncoding('utf8'); res.on('data', chunk => { text += chunk; });
     res.on('end', () => resolve({ status: res.statusCode, text }));
@@ -46,6 +50,11 @@ const call = (host, path, { method = 'GET', body, headers = {}, to = host.split(
   req.on('error', reject); req.end(body ? JSON.stringify(body) : undefined);
 });
 const local = (path, options) => call(`127.0.0.1:${port}`, path, options);
+async function pairNet() {
+  const { pin } = JSON.parse((await local('/api/pair/pin')).text);
+  const paired = await call(`${lanIp}:${port}`, '/api/pair', { method: 'POST', body: { code: pin, name: 'Тест' }, headers: { 'X-VRCast-Token': '' } });
+  netToken = JSON.parse(paired.text).token;
+}
 
 test.before(async () => {
   dataDirectory = await mkdtemp(join(tmpdir(), 'vrcast-lan-'));
@@ -74,8 +83,11 @@ test('включённый пульт: статус и управление до
   const enabled = await local('/api/config', { method: 'POST', body: { lanAccess: true } });
   assert.equal(enabled.status, 200);
   let ok = false;
-  for (let i = 0; i < 40 && !ok; i++) { await new Promise(r => setTimeout(r, 150)); ok = await call(`${lanIp}:${port}`, '/api/status?logs=0').then(r => r.status === 200, () => false); }
-  assert.ok(ok, 'статус должен открыться по LAN-IP');
+  for (let i = 0; i < 40 && !ok; i++) { await new Promise(r => setTimeout(r, 150)); ok = await call(`${lanIp}:${port}`, '/api/lan-info').then(r => r.status === 200, () => false); }
+  assert.ok(ok, 'пульт должен открыться по LAN-IP');
+  assert.equal((await call(`${lanIp}:${port}`, '/api/status?logs=0')).status, 401, 'без привязки статус закрыт');
+  assert.equal((await call(`${lanIp}:${port}`, '/api/playback', { method: 'POST', body: { action: 'toggle' } })).status, 401, 'без привязки управление закрыто');
+  await pairNet();
 
   const host = `${lanIp}:${port}`;
   const state = JSON.parse((await call(host, '/api/status?logs=0')).text);
@@ -86,10 +98,10 @@ test('включённый пульт: статус и управление до
 
   for (const [method, path] of [['POST', '/api/shutdown'], ['GET', '/api/servers'], ['POST', '/api/logs/open']])
     assert.equal((await call(host, path, { method, body: method === 'POST' ? {} : undefined })).status, 403, `${method} ${path}`);
-  assert.equal((await call(host, '/api/config', { method: 'POST', body: {} })).status, 401, 'настройки эфира — только после привязки');
+  assert.equal((await call(host, '/api/config', { method: 'POST', body: {}, headers: { 'X-VRCast-Token': '' } })).status, 401, 'настройки эфира — только после привязки');
   assert.equal((await call(`evil.example.com:${port}`, '/api/status', { to: lanIp })).status, 403, 'чужое имя в Host');
   assert.equal((await call(host, '/api/status', { headers: { Origin: 'http://evil.example.com' } })).status, 403, 'чужой Origin');
-  assert.equal((await call(`abc.trycloudflare.com`, '/api/status', { to: lanIp })).status, 404, 'туннель видит только поток');
+  assert.equal((await call(`abc.trycloudflare.com`, '/api/status', { to: lanIp })).status, 403, 'имя туннеля из сети не помогает');
 });
 
 test('события: статус приходит сразу и обновляется после команды', { skip: !lanIp && 'нет сетевого интерфейса' }, async () => {
@@ -120,7 +132,7 @@ test('загрузка с телефона: файл попадает в оче�
   const bytes = readFileSync(sample);
   const send = (name, body) => new Promise((resolve, reject) => {
     const req = request({ host: lanIp, port, path: `/api/queue/upload?name=${encodeURIComponent(name)}`, method: 'POST',
-      headers: { Host: host, 'Content-Type': 'application/octet-stream', 'Content-Length': body.length } }, res => {
+      headers: { Host: host, 'Content-Type': 'application/octet-stream', 'Content-Length': body.length, 'X-VRCast-Token': netToken } }, res => {
       let text = ''; res.setEncoding('utf8'); res.on('data', c => { text += c; }); res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(text || '{}') }));
     });
     req.on('error', reject); req.end(body);
@@ -145,10 +157,14 @@ test('загрузка с телефона: файл попадает в оче�
 
 test('экран телефона: поток с телефона становится эфиром, обрыв потока останавливает эфир', { skip: !lanIp && 'нет сетевого интерфейса', timeout: 150000 }, async () => {
   const host = `${lanIp}:${port}`;
+  // Публиковать экран можно только с паролем, который выдают привязанному устройству.
+  const auth = JSON.parse((await call(host, '/api/lan-info')).text).phonePublishAuth;
+  assert.ok(auth, 'привязанному устройству выдаётся пароль публикации');
+  const [user, pass] = Buffer.from(auth.replace(/^Basic /, ''), 'base64').toString().split(':');
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const publish = () => spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-re', '-f', 'lavfi', '-i', 'testsrc2=size=360x640:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=500',
     '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-t', '120', '-f', 'rtsp', '-rtsp_transport', 'tcp',
-    `rtsp://127.0.0.1:${port + 1}/phone`], { stdio: 'ignore' });
+    `rtsp://${user}:${pass}@127.0.0.1:${port + 1}/phone`], { stdio: 'ignore' });
   let publisher = publish();
   try {
     // MediaMTX докачивается и перезапускается при включении пульта — пробуем, пока не поднимется.
@@ -178,11 +194,13 @@ test('экран телефона: поток с телефона станови
 
 test('привязка телефона: настройки эфира только по коду, лишнего в настройках не меняется', { skip: !lanIp && 'нет сетевого интерфейса' }, async () => {
   const host = `${lanIp}:${port}`;
+  netToken = ''; // этот тест сам проверяет запросы без привязки
+  await local('/api/pair/clear', { method: 'POST', body: {} });
   const post = (path, body, headers = {}) => call(host, path, { method: 'POST', body, headers });
   const noToken = await post('/api/config', { fps: 60 });
   assert.equal(noToken.status, 401);
   assert.equal(JSON.parse(noToken.text).code, 'pairing');
-  assert.equal((await call(host, '/api/pair/pin')).status, 403, 'код видно только на самом ПК');
+  assert.ok([401, 403].includes((await call(host, '/api/pair/pin')).status), 'код видно только на самом ПК');
 
   const { pin } = JSON.parse((await local('/api/pair/pin')).text);
   assert.match(pin, /^\d{6}$/);
@@ -214,9 +232,9 @@ test('привязка телефона: настройки эфира толь�
   assert.equal((await call(host, '/api/servers/export')).status, 401, 'без привязки серверы не выдаются');
   const exported = JSON.parse((await call(host, '/api/servers/export', { headers: auth })).text).servers;
   assert.deepEqual(exported, [{ id: 's1', name: 'Тестовый сервер', host: '203.0.113.9', rtspPort: 8554, publishKey: 'secret-key' }]);
-  const shared = (await call(host, '/api/status?logs=0')).text;
+  const shared = (await call(host, '/api/status?logs=0', { headers: auth })).text;
   assert.ok(!shared.includes('secret-key') && !shared.includes('203.0.113.9'), 'ни ключа, ни адреса сервера в общем статусе');
-  assert.deepEqual(JSON.parse(shared).config.servers.map(item => item.name), ['Тестовый сервер'], 'названия серверов видны всем в сети');
+  assert.deepEqual(JSON.parse(shared).config.servers.map(item => item.name), ['Тестовый сервер'], 'привязанным в сети видны только названия серверов');
 
   // Обратная сторона: серверы телефона попадают на ПК (без привязки нельзя), ключ обновляется, активный сервер не меняется.
   const phoneList = { servers: [{ name: 'Сервер с телефона', host: '198.51.100.20', rtspPort: 9554, publishKey: 'phone-key' },
@@ -305,9 +323,11 @@ test('имя ПК и PIN: имя видно в сети, при PIN без кл�
     assert.ok(ended, 'поток событий отвязанного устройства должен закрыться');
     assert.equal((await call(host, '/api/status?logs=0', { headers: auth })).status, 401, 'отвязанное устройство снова просит PIN');
 
-    // выключаем PIN — доступ как раньше
+    // выключаем PIN — без привязки всё равно только имя ПК и ввод кода
     await setLocal({ accessPin: '' });
-    assert.equal((await call(host, '/api/status?logs=0')).status, 200);
+    const unpaired = await call(host, '/api/status?logs=0');
+    assert.equal(unpaired.status, 401);
+    assert.equal(JSON.parse(unpaired.text).code, 'pairing');
   } finally { await setLocal({ accessPin: '', deviceName: '' }); }
 });
 

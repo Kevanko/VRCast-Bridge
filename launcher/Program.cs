@@ -10,7 +10,21 @@ namespace VRCastBridge.Launcher;
 
 internal static class Program
 {
-    internal const string AppUrl = "http://127.0.0.1:4717/";
+    // Порт меняют в настройках на ходу, поэтому адрес считается каждый раз —
+    // тем же порядком, что и у сервера: VRCAST_PORT, порт из настроек, 4717.
+    internal static string AppUrl => $"http://127.0.0.1:{CurrentPort()}/";
+    private static int CurrentPort()
+    {
+        if (int.TryParse(Environment.GetEnvironmentVariable("VRCAST_PORT"), out var fromEnv) && fromEnv is >= 1024 and <= 65400) return fromEnv;
+        try
+        {
+            var file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "config.json");
+            using var document = JsonDocument.Parse(File.ReadAllText(file));
+            if (document.RootElement.TryGetProperty("port", out var port) && port.TryGetInt32(out var saved) && saved is >= 1024 and <= 65400) return saved;
+        }
+        catch { }
+        return 4717;
+    }
     // Версию берём у самой сборки. Раньше она стояла здесь числом и однажды
     // разошлась с номером сборки: программа распаковывалась в папку старой
     // версии, а готовность сервера проверялась сравнением версий — совпадения
@@ -132,22 +146,17 @@ internal static class Program
         var runtimeDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VRCastBridge", "runtime", AppVersion);
         var resources = new Dictionary<string, string>
         {
-            ["VRCast.Payload.server.js"] = Path.Combine("src", "server.js"),
-            ["VRCast.Payload.anime.js"] = Path.Combine("src", "anime.js"),
-            ["VRCast.Payload.install.sh"] = Path.Combine("server", "install.sh"),
-            ["VRCast.Payload.index.html"] = Path.Combine("public", "index.html"),
-            ["VRCast.Payload.styles.css"] = Path.Combine("public", "styles.css"),
-            ["VRCast.Payload.ui.css"] = Path.Combine("public", "ui.css"),
-            ["VRCast.Payload.app.js"] = Path.Combine("public", "app.js"),
-            ["VRCast.Payload.hls.min.js"] = Path.Combine("public", "vendor", "hls.min.js"),
             ["VRCast.Payload.AudioCapture.exe"] = Path.Combine("tools", "VRCast.AudioCapture.exe"),
             ["VRCast.Payload.WindowCapture.exe"] = Path.Combine("tools", "VRCast.WindowCapture.exe"),
-            ["VRCast.Payload.Plink.exe"] = Path.Combine("tools", "plink.exe"),
-            ["VRCast.Payload.logo.png"] = Path.Combine("public", "logo.png"),
-            ["VRCast.Payload.standby.png"] = Path.Combine("public", "standby.png")
+            ["VRCast.Payload.Plink.exe"] = Path.Combine("tools", "plink.exe")
         };
 
         var assembly = typeof(Program).Assembly;
+        // Файлы программы встроены по маске (csproj): имя ресурса — их путь.
+        const string filePrefix = "VRCast.Payload.file/";
+        foreach (var name in assembly.GetManifestResourceNames())
+            if (name.StartsWith(filePrefix, StringComparison.Ordinal))
+                resources[name] = Path.Combine(name[filePrefix.Length..].Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries));
         foreach (var resource in resources)
         {
             var destination = Path.Combine(runtimeDirectory, resource.Value);
@@ -323,7 +332,7 @@ internal static class Program
                 await Task.Delay(100);
             if (await GetServerVersion() is not null)
             {
-                ShowError("Порт 4717 занят старой версией VRCast Bridge. Закройте её через Диспетчер задач и повторите запуск.");
+                ShowError($"Порт {CurrentPort()} занят старой версией VRCast Bridge. Закройте её через Диспетчер задач и повторите запуск.");
                 return null;
             }
         }

@@ -6,7 +6,7 @@ import { basename, delimiter, dirname, extname, join, normalize, resolve, sep } 
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { connect as netConnect, createServer as netCreateServer } from 'node:net';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { findKodikOnPage, inspectAnime, isAnimeUrl, listAnime, resolveAnime } from './anime.js';
@@ -16,7 +16,7 @@ import { hideMemberSource, sanitizeContribution, sharedQueueItem, sharedServer, 
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
 // VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
-const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.60.5';
+const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.61.0';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -178,6 +178,10 @@ const rtspPushProcesses = new Map();
 let lastRemotePushError = '';
 const rtspPushTimers = new Map();
 const rtspPublishPass = crypto.randomBytes(12).toString('hex');
+// Экран телефона в эфир: пароль выдаётся только привязанным устройствам (/api/lan-info).
+// Раньше путь phone был открыт всей сети — любой в той же Wi-Fi мог подменить эфир.
+const phonePublishPass = crypto.randomBytes(12).toString('hex');
+const phonePublishAuth = () => `Basic ${Buffer.from(`phone:${phonePublishPass}`).toString('base64')}`;
 let tunnelProcess = null;
 let tunnelCandidates = new Set();
 let tunnelUrl = '';
@@ -2246,13 +2250,17 @@ function getLanAddresses() {
   // адреса 192.168.x, и «ссылка для своей сети» бралась с адаптера VirtualBox —
   // друзьям в той же сети она не открывалась. Настоящие карты ставим первыми;
   // виртуальные не выбрасываем — бывает, что других нет.
-  const виртуальный = (name, mac) => /virtualbox|vmware|vethernet|hyper-v|wsl|loopback|radmin|hamachi|zerotier|tailscale|wireguard|openvpn|tap-|tun/i.test(name)
+  const виртуальный = (name, mac) => /virtualbox|vmware|vethernet|hyper-v|wsl|loopback|radmin|hamachi|zerotier|tailscale|wireguard|openvpn|tap-|tun|mihomo|clash|meta|sing-box|koala/i.test(name)
     || /^(0a:00:27|00:50:56|00:0c:29|00:05:69|00:15:5d)/i.test(String(mac || ''));
   lanAddresses = Object.entries(networkInterfaces())
     .flatMap(([name, list]) => (list || []).map(item => ({ ...item, virtual: виртуальный(name, item.mac) })))
     .filter(item => item.family === 'IPv4' && !item.internal)
     .sort((a, b) => Number(a.virtual) - Number(b.virtual))
     .map(item => item.address);
+  // VPN в режиме TUN (Koala Clash и т. п.) даёт адрес 198.18.x — с телефона он
+  // недоступен, а попадал в QR-код. Оставляем частные адреса, если они есть.
+  const частные = lanAddresses.filter(isPrivateAddress);
+  if (частные.length) lanAddresses = частные;
   lanAddressesAt = Date.now();
   return lanAddresses;
 }
@@ -3373,9 +3381,9 @@ function startMediaMtx() {
     'authInternalUsers:',
     '- user: any', '  permissions:', '  - action: read',
     // Экран телефона: публиковать на путь phone можно только из своей сети и только при включённом пульте.
-    ...(config.lanAccess === true ? ['- user: any', "  ips: ['127.0.0.1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16']", '  permissions:', '  - action: publish', '    path: phone'] : []),
+    ...(config.lanAccess === true ? ['- user: phone', `  pass: ${phonePublishPass}`, "  ips: ['127.0.0.1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16']", '  permissions:', '  - action: publish', '    path: phone'] : []),
     `- user: vrcast`, `  pass: ${rtspPublishPass}`, `  ips: ['127.0.0.1']`, '  permissions:', '  - action: publish',
-    'paths:', '  live: {}', '  phone: {}', '',
+    'paths:', '  live: {}', '  phone:', '    overridePublisher: no', '',
   ].join('\n'), 'utf8');
   // MediaMTX пишет свои ошибки в stdout, а не в stderr. Раньше stdout
   // выбрасывался, и при падении в журнале стояло «Причина: не сообщил» — хотя
@@ -5664,6 +5672,9 @@ function stopActive(clearCurrent = true, keepTunnel = true, keepRelay = true) {
   // Пока он висел до следующего запуска, после «Остановить» программа теряла
   // способность чинить себя: окно открыто, «Готово» горит, а поток мёртв.
   stopping = false;
+  // Отложенный перезапуск RTSP-сервера — только если эфир и правда закончился, а
+  // не переключается (переключение тоже проходит через stopActive).
+  if (перезапускMtxОтложен) setTimeout(() => { if (перезапускMtxОтложен && !activeKind) { перезапускMtxОтложен = false; restartMediaMtx(); } }, 1500);
 }
 
 function currentSourcePosition() {
@@ -6424,8 +6435,16 @@ async function receiveUpload(req, rawName) {
   if (size && size > free - 2 * 1024 ** 3) throw new Error('На компьютере не хватает места для этого файла.');
   const target = join(UPLOAD_DIR, `${crypto.randomUUID().slice(0, 8)}-${name}`);
   const partial = `${target}.part`;
+  // Без Content-Length (chunked) размер заранее не виден — считаем на лету и
+  // обрываем, как только файл перестаёт помещаться: иначе он забил бы диск.
+  const предел = Math.max(0, free - 2 * 1024 ** 3);
+  let пришло = 0;
+  const счётчик = new Transform({ transform(chunk, _enc, done) {
+    пришло += chunk.length;
+    done(пришло > предел ? new Error('На компьютере не хватает места для этого файла.') : null, chunk);
+  } });
   try {
-    await pipeline(req, createWriteStream(partial));
+    await pipeline(req, счётчик, createWriteStream(partial));
     if (size && statSync(partial).size !== size) throw new Error('Файл пришёл не полностью, попробуйте ещё раз.');
     renameSync(partial, target);
   } catch (error) { rmSync(partial, { force: true }); throw error; }
@@ -6451,7 +6470,7 @@ let тактыСобытий = 0;
 // Телефону незачем знать адреса и пользователей своих серверов: оставляем названия.
 function дляСети(state, paired = false) {
   const servers = (state.config.servers || []).map(({ id, name, reachable, permanentLink, owner }) => ({ id, name, reachable, permanentLink, owner }));
-  return { ...state, config: { ...state.config, servers, pairedPhones: undefined, accessPin: undefined, whiteIp: paired ? state.config.whiteIp : '', remoteBindAddress: '' } };
+  return { ...state, config: { ...state.config, servers, pairedPhones: undefined, accessPin: undefined, joined: undefined, deviceId: undefined, whiteIp: paired ? state.config.whiteIp : '', remoteBindAddress: '' } };
 }
 
 // Привязка телефона к ПК: шестизначный код показан в настройках программы, действует
@@ -6472,13 +6491,18 @@ function isPairedRequest(req) {
   return (config.pairedPhones || []).some(phone => sameSecret(phone.hash, hash));
 }
 
+let pairFailuresAll = [];
 function pairPhone(req, body) {
   const ip = req.socket.remoteAddress;
   const recent = (pairFailures.get(ip) || []).filter(time => Date.now() - time < 300000);
-  if (recent.length >= 5) throw Object.assign(new Error('Слишком много попыток. Подождите пять минут.'), { status: 429 });
+  // Адресов в сети много: без общего лимита код подбирался бы с десятков IP сразу.
+  pairFailuresAll = pairFailuresAll.filter(time => Date.now() - time < 300000);
+  for (const [address, times] of pairFailures) if (!times.some(time => Date.now() - time < 300000)) pairFailures.delete(address);
+  if (recent.length >= 5 || pairFailuresAll.length >= 15) throw Object.assign(new Error('Слишком много попыток. Подождите пять минут.'), { status: 429 });
   const given = String(body.code || '').replace(/\D/g, '');
   if (!sameSecret(given, currentPin()) && !(accessPinSet() && sameSecret(given, String(config.accessPin)))) {
     pairFailures.set(ip, [...recent, Date.now()]);
+    pairFailuresAll.push(Date.now());
     throw Object.assign(new Error(accessPinSet() ? 'Неверный PIN.' : 'Неверный код. Он показан в настройках программы на ПК.'), { status: 403 });
   }
   const token = crypto.randomBytes(24).toString('base64url');
@@ -6666,6 +6690,29 @@ function portIsFree(port) {
   });
 }
 // Новый порт из настроек вступает в силу сразу, без перезапуска программы. Окно и телефоны переходят сами.
+// Перезапуск MediaMTX рвёт эфир у зрителей. Во время эфира откладываем его до
+// остановки (смена порта, включение доступа по сети, переименование ПК).
+let перезапускMtxОтложен = false;
+function перезапуститьMtxКогдаМожно(причина) {
+  if (!mediaMtxProcess) return;
+  if (!activeKind) return restartMediaMtx();
+  if (!перезапускMtxОтложен) log(`${причина} — применю после остановки эфира, чтобы не оборвать зрителей`);
+  перезапускMtxОтложен = true;
+}
+// Слушать другой порт или адрес. Не вышло (занят) — возвращаемся на прежний,
+// а не роняем программу посреди эфира.
+function перепривязать(порт, адрес, прежнийПорт, прежнийАдрес) {
+  server.close();
+  server.closeAllConnections?.();
+  const откат = error => {
+    log(`Не удалось занять ${адрес}:${порт} (${error.code || error.message}) — остаюсь на ${прежнийАдрес}:${прежнийПорт}`);
+    PORT = прежнийПорт; слушаемАдрес = прежнийАдрес;
+    server.listen(прежнийПорт, прежнийАдрес);
+  };
+  server.once('error', откат);
+  server.listen(порт, адрес, () => server.off('error', откат));
+}
+
 function applyPortChange() {
   if (process.env.VRCAST_PORT) return;
   const wanted = validPort(config.port) ? Number(config.port) : 4717;
@@ -6673,30 +6720,24 @@ function applyPortChange() {
   const old = PORT;
   PORT = wanted;
   log(`Порт программы: ${old} → ${PORT}`);
-  server.close();
-  server.closeAllConnections?.();
-  server.listen(PORT, слушаемАдрес);
+  перепривязать(PORT, слушаемАдрес, old, слушаемАдрес);
   if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log, name: deviceName() });
   // Публичная ссылка ведёт на порт программы: переподнимаем туннель.
   if (tunnelProcess) { stopPublicTunnel(); if (config.outputMode === 'tunnel') setTimeout(startPublicTunnel, 500); }
   // MediaMTX считает порты от нашего. Идущий эфир не прерываем: он пересядет на новые порты при следующем запуске.
-  if (mediaMtxProcess) {
-    if (activeKind) log('Быстрые ссылки RTSP сменят порт после остановки эфира');
-    else restartMediaMtx();
-  }
+  перезапуститьMtxКогдаМожно('Быстрые ссылки RTSP сменят порт');
 }
 function applyLanAccess() {
   const wanted = config.lanAccess === true ? '0.0.0.0' : HOST;
   if (wanted !== слушаемАдрес) {
+    const прежний = слушаемАдрес;
     слушаемАдрес = wanted;
-    server.close();
-    server.closeAllConnections?.();
-    server.listen(PORT, wanted);
+    перепривязать(PORT, wanted, PORT, прежний);
   }
   if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log, name: deviceName() });
   else unpublishService();
   // MediaMTX читает правила публикации из своего файла: перезапускаем с новыми.
-  if (mediaMtxProcess) restartMediaMtx();
+  перезапуститьMtxКогдаМожно('Новые правила доступа к RTSP');
   log(config.lanAccess === true ? 'Доступ с других устройств включён' : 'Доступ с других устройств выключен');
 }
 
@@ -6715,8 +6756,9 @@ const server = http.createServer(async (req, res) => {
     // грузит». Заодно через неё открывался весь пульт управления, а не только
     // поток. Теперь адрес берётся у самого туннеля.
     const tunnelHost = (() => { try { return tunnelUrl ? new URL(tunnelUrl).hostname.toLowerCase() : ''; } catch { return ''; } })();
-    const publicTunnelHost = (tunnelHost && requestHost === tunnelHost)
-      || /\.(trycloudflare\.com|pinggy-free\.link|free\.pinggy\.net|lhr\.life|serveo\.net|serveousercontent\.com)$/.test(requestHost);
+    // Туннель приходит к нам с этого же ПК; подставленный Host из сети — не туннель.
+    const publicTunnelHost = isLoopbackAddress(req.socket.remoteAddress) && Boolean((tunnelHost && requestHost === tunnelHost)
+      || /\.(trycloudflare\.com|pinggy-free\.link|free\.pinggy\.net|lhr\.life|serveo\.net|serveousercontent\.com)$/.test(requestHost));
     if (publicTunnelHost && !url.pathname.startsWith('/stream/') && !url.pathname.startsWith('/media/')) {
       return json(res, 404, { error: 'Через публичную ссылку доступен только медиапоток.' });
     }
@@ -6734,9 +6776,12 @@ const server = http.createServer(async (req, res) => {
       }
       res.forNetwork = true;
       res.paired = isPairedRequest(req);
-      // PIN включён: без ключа привязки доступно только узнать имя ПК и ввести PIN.
-      if (accessPinSet() && !res.paired && !lanRouteOpenWithPin(req.method, url.pathname)) {
-        return json(res, 401, { error: 'Нужен PIN этого ПК.', code: 'pin' });
+      // Без привязки — только узнать имя ПК, открыть пульт, ввести код и смотреть поток.
+      // Раньше без PIN любой в той же Wi-Fi управлял эфиром и читал файлы очереди.
+      if (!res.paired && !lanRouteOpenWithPin(req.method, url.pathname)) {
+        return accessPinSet()
+          ? json(res, 401, { error: 'Нужен PIN этого ПК.', code: 'pin' })
+          : json(res, 401, { error: 'Нужна привязка к ПК: введите код из настроек программы.', code: 'pairing' });
       }
       if (!lanRouteAllowed(req.method, url.pathname)) {
         if (!lanRoutePaired(req.method, url.pathname)) return json(res, 403, { error: 'Это действие доступно только на самом компьютере.' });
@@ -6974,7 +7019,8 @@ const server = http.createServer(async (req, res) => {
       const { rtsp, playbackUrl } = status(false);
       if (!config.deviceId) saveConfig({ deviceId: crypto.randomUUID() });
       return json(res, 200, { id: config.deviceId, kind: 'pc', name: deviceName(), version: APP_VERSION, port: PORT, webrtcPort: WEBRTC_PORT, rtspPort: RTSP_PORT, lanAccess: config.lanAccess === true, pinRequired,
-        addresses: getLanAddresses().map(address => `http://${address}:${PORT}`), playbackUrl, rtspLanUrls: rtsp?.lanUrls || [] });
+        addresses: getLanAddresses().map(address => `http://${address}:${PORT}`), playbackUrl, rtspLanUrls: rtsp?.lanUrls || [],
+        ...(isPairedRequest(req) ? { phonePublishAuth: phonePublishAuth() } : {}) });
     }
     if (req.method === 'GET' && url.pathname === '/api/events') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
@@ -7436,9 +7482,12 @@ server.listen(PORT, слушаемАдрес, () => {
   if (config.outputMode === 'tunnel') setTimeout(startPublicTunnel, 250);
 });
 server.on('error', error => {
-  if (error.code === 'EADDRINUSE') { console.error(`Порт ${PORT} уже занят.`); process.exit(1); }
-  throw error;
+  // Занятый порт смертелен только при запуске; при смене порта на ходу откатываемся (перепривязать).
+  if (error.code === 'EADDRINUSE' && !server.listening && !первыйЗапускПрошёл) { console.error(`Порт ${PORT} уже занят.`); process.exit(1); }
+  log(`Сервер программы: ${error.message}`);
 });
+let первыйЗапускПрошёл = false;
+server.once('listening', () => { первыйЗапускПрошёл = true; });
 // Необработанная ошибка не должна уносить весь сервер: окно остаётся живым,
 // а страница молча теряет связь с ним — это и был тот самый «Failed to fetch».
 // Записываем причину и продолжаем работать; действительно смертельное всё
