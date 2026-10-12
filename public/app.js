@@ -920,7 +920,10 @@ function render(state) {
   // «10:42:17»: длинное время переносилось на три строки в подвале очереди.
   const часы=Math.floor(всегоСекунд/3600), минуты=Math.round((всегоСекунд%3600)/60);
   const всего=всегоСекунд?(часы?`${часы} ч${минуты?` ${минуты} мин`:''}`:`${Math.max(1,минуты)} мин`):'';
-  setHtml($('#queueSummary'),`${штук(state.queue.length,['видео','видео','видео'])}${всего?` · <b>${всего}</b>`:''}`);
+  // Пока длительность серий ещё считается, сумма неполная — говорим об этом, а не занижаем.
+  const безДлины=state.queue.filter(item=>!item.live&&!(Number(item.duration)>0)).length;
+  const итог=безДлины?(всего?`≥ ${всего}, считаю ещё ${безДлины}`:'считаю длительность'):всего;
+  setHtml($('#queueSummary'),`${штук(state.queue.length,['видео','видео','видео'])}${итог?` · <b>${итог}</b>`:''}`);
   setTitle($('#queueSummary'),всегоСекунд?`Всего ${formatTime(всегоСекунд)}`:'');
   setHidden($('#pickLocal'),!state.queue.length);
   setDisabled($('#clearQueue'),!state.queue.length);

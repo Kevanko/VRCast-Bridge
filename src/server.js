@@ -5899,11 +5899,12 @@ async function addAnime(rawUrl, choice = {}) {
   if (серии.length > 2000) throw new Error('Слишком много серий за раз — добавьте по сезонам.');
   const added = серии.map(серия => ({ id: crypto.randomUUID(), title: серия.title, sourceUrl: серия.sourceUrl,
     duration: null, thumbnail: серия.thumbnail || '', local: false, hasVideo: true, hasAudio: true, anime: true }));
+  const известные = new Map([...queue, ...templates.flatMap(list => list.items || [])].filter(entry => entry.anime).map(entry => [entry.sourceUrl, entry]));
+  for (const item of added) { const был = известные.get(item.sourceUrl); if (был?.duration) item.duration = был.duration; if (был && !нетКадра(был)) item.thumbnail = был.thumbnail; }
   queue.push(...added);
   saveQueue();
   log(`Добавлено серий: ${added.length}${added.length === 1 ? ` — ${added[0].title}` : ''}`);
   prefetchQueue(0);
-  дозаполнитьДлительности();
   кадрыДляСерий(added);
   return added;
 }
@@ -5911,23 +5912,9 @@ async function addAnime(rawUrl, choice = {}) {
 // Длительность серий — без скачивания: из плейлиста потока (два запроса к
 // сайту на серию). По одной и с паузой, чтобы 366 серий не легли пачкой
 // запросов на сайт и не тормозили эфир; очередь сразу показывает 24:26.
-let длительностиИдут = false;
-const длительностьПробовали = new Set();
-async function дозаполнитьДлительности() {
-  if (длительностиИдут) return;
-  длительностиИдут = true;
-  try {
-    for (;;) {
-      const item = queue.find(entry => entry.anime && !entry.duration && !длительностьПробовали.has(entry.id));
-      if (!item || shuttingDown) return;
-      длительностьПробовали.add(item.id);
-      try {
-        const { duration } = await resolveAnime(item.sourceUrl);
-        if (duration && queue.includes(item)) { item.duration = duration; saveQueueSoon(); }
-      } catch {}
-      await new Promise(resolve => setTimeout(resolve, 700));
-    }
-  } finally { длительностиИдут = false; }
+let сохранениеСписков = null;
+function saveTemplatesSoon() {
+  сохранениеСписков ||= setTimeout(() => { сохранениеСписков = null; saveTemplates(); }, 3000);
 }
 let сохранениеОчереди = null;
 function saveQueueSoon() {
@@ -6158,11 +6145,10 @@ function качатьПревью() {
         if (code === 0) {
           const кадр = `/thumbs/${item.id}.jpg?v=${Date.now()}`;
           // Серия могла лежать и в очереди, и в сохранённом списке.
-          for (const entry of queue) if (entry.id === item.id) entry.thumbnail = кадр;
-          // В списках у серии другой id (при открытии списка id новые) — ищем по ссылке.
-          for (const entry of templates.flatMap(list => list.items || [])) if (entry.id === item.id || (item.anime && entry.sourceUrl === item.sourceUrl)) entry.thumbnail = кадр;
           item.thumbnail = кадр;
-          saveQueue(); saveTemplates();
+          // В списках у серии другой id (при открытии списка id новые) — ищем по ссылке.
+          if (item.anime) запомнитьОСерии(item.sourceUrl, { thumbnail: кадр });
+          else { for (const entry of queue) if (entry.id === item.id) entry.thumbnail = кадр; saveQueue(); }
         }
         готово();
       });
@@ -6171,23 +6157,37 @@ function качатьПревью() {
   }
 }
 
-// Серии аниме: у площадки одна обложка на весь тайтл, и в списке все серии
-// были одинаковыми. Свой кадр каждой серии — из скачанного файла, если он
-// есть, иначе из потока; по одной серии в фоне, только для тех, у кого кадра нет.
+// Серии аниме: у площадки одна обложка на весь тайтл и нет длительности.
+// Каждую серию разбираем один раз — длительность и свой кадр из середины (из
+// скачанного файла, если он есть, иначе из потока) — и пишем и в очередь, и
+// во все списки с этой серией: при следующем открытии ничего не грузится заново.
 const кадрыСерий = [];
 let кадрыИдут = false;
+const нетКадра = item => !String(item.thumbnail || '').startsWith('/thumbs/') || thumbFileMissing(item);
+const нуженРазбор = item => item.anime && (нетКадра(item) || !item.duration);
+
+function запомнитьОСерии(sourceUrl, поля) {
+  for (const entry of [...queue, ...templates.flatMap(list => list.items || [])]) if (entry.sourceUrl === sourceUrl) Object.assign(entry, поля);
+  saveQueueSoon(); saveTemplatesSoon();
+}
+
 function кадрыДляСерий(items) {
-  const нужен = item => item.anime && (!String(item.thumbnail || '').startsWith('/thumbs/') || thumbFileMissing(item));
-  for (const item of items) if (нужен(item) && !кадрыСерий.some(other => other.sourceUrl === item.sourceUrl)) кадрыСерий.push(item);
+  for (const item of items) if (нуженРазбор(item) && !кадрыСерий.some(other => other.sourceUrl === item.sourceUrl)) кадрыСерий.push(item);
   if (кадрыИдут) return;
   кадрыИдут = true;
-  // Четыре серии разом, по порядку списка: видимые в начале получают кадр первыми.
+  // Четыре серии разом, по порядку списка: видимые в начале готовы первыми.
   const работник = async () => {
     for (let item; (item = кадрыСерий.shift());) {
-      if (String(item.thumbnail || '').startsWith('/thumbs/') && !thumbFileMissing(item)) continue;
+      if (shuttingDown) return;
+      if (!нуженРазбор(item)) continue;
       const файл = cachedMediaPath(cacheKey(item));
+      let media = null;
+      if (!файл || !item.duration) media = await resolveAnime(item.sourceUrl).catch(() => null);
+      if (media?.duration && !item.duration) запомнитьОСерии(item.sourceUrl, { duration: media.duration });
+      const вход = файл || media?.url;
+      if (!нетКадра(item) || !вход) continue;
       const at = Math.round((Number(item.duration) || 1440) * 0.4);
-      await new Promise(done => generateThumbnail(item, { input: файл || resolveAnime(item.sourceUrl).then(media => media.url), at, done }));
+      await new Promise(done => generateThumbnail(item, { input: вход, at, done }));
     }
   };
   Promise.all(Array.from({ length: 4 }, работник)).finally(() => { кадрыИдут = false; });
@@ -7601,7 +7601,6 @@ server.listen(PORT, слушаемАдрес, () => {
   if (config.lanAccess === true) publishService({ port: PORT, version: APP_VERSION, log, name: deviceName() });
   restoreRoutedApps();
   joinGroup.resume();
-  дозаполнитьДлительности();
   startRemoteBridge();
   // Запустились в режиме своего сервера — меряем канал, пока нет эфира.
   if (config.outputMode === 'remote') setTimeout(() => замеритьКаналСервера('запуск программы').catch(() => {}), 6000);
