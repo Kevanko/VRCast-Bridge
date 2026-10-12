@@ -8,12 +8,12 @@
   <title>VRCast Bridge</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Unbounded:wght@700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Unbounded:wght@700;800&family=Playfair+Display:wght@500;600&family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css?v=0.60.0">
   <!-- Тема ставится до первой отрисовки: иначе при запуске на долю секунды
        мелькала бы палитра по умолчанию. Хранилище может быть недоступно —
        тогда просто остаётся «Ночной мир». -->
-  <script>var t='midnight';try{t=localStorage.getItem('theme')||t;if(!localStorage.getItem('theme-v2')){localStorage.setItem('theme-v2','1');if(t==='night'){t='midnight';localStorage.setItem('theme',t);}}}catch(e){}if(t!=='night')document.documentElement.dataset.theme=(t==='broadcast'||t==='projector')?t:'midnight';</script>
+  <script>var t='midnight';try{t=localStorage.getItem('theme')||t;if(!localStorage.getItem('theme-v2')){localStorage.setItem('theme-v2','1');if(t==='night'){t='midnight';localStorage.setItem('theme',t);}}}catch(e){}var known={broadcast:1,projector:1,minimal:1,'minimal-light':1,stage:1,terminal:1,matrix:1};if(t!=='night')document.documentElement.dataset.theme=known[t]?t:'midnight';</script>
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" width="0" height="0"><defs>
@@ -47,11 +47,11 @@
 <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.4a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.84 2.84l-.06-.06a1.7 1.7 0 0 0-2.92 1.22v.18a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-2.98-1.22l-.06.06a2 2 0 1 1-2.84-2.84l.06-.06a1.7 1.7 0 0 0-1.22-2.92h-.18a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.22-2.98l-.06-.06a2 2 0 1 1 2.84-2.84l.06.06a1.7 1.7 0 0 0 2.92-1.22v-.18a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.92 1.22l.06-.06a2 2 0 1 1 2.84 2.84l-.06.06a1.7 1.7 0 0 0 1.22 2.92h.18a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.54 1.04z"/></symbol>
 <symbol id="i-sound" viewBox="0 0 24 24"><path d="M5 9.4h3.2L12.6 5.6v12.8L8.2 14.6H5z"/><path d="M15.8 9.6a3.4 3.4 0 0 1 0 4.8M18.4 7a7 7 0 0 1 0 10"/></symbol>
 <symbol id="i-mute" viewBox="0 0 24 24"><path d="M5 9.4h3.2L12.6 5.6v12.8L8.2 14.6H5z"/><path d="M16.4 9.8l4.2 4.4M20.6 9.8l-4.2 4.4"/></symbol>
-<symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4z"/><path d="m13.5 6.5 4 4"/></symbol><symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7.6 10l4.4 4.4L16.4 10"/></symbol>
+<symbol id="i-palette" viewBox="0 0 24 24"><circle cx="13.5" cy="6.5" r=".6"/><circle cx="17.5" cy="10.5" r=".6"/><circle cx="8.5" cy="7.5" r=".6"/><circle cx="6.5" cy="12.5" r=".6"/><path d="M12 2a10 10 0 0 0 0 20c.9 0 1.6-.7 1.6-1.7 0-.4-.2-.8-.4-1.1-.3-.3-.5-.7-.5-1.1 0-.9.8-1.7 1.7-1.7h2c3 0 5.5-2.5 5.5-5.5C22 6 17.5 2 12 2z"/></symbol><symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/></symbol><symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/></symbol><symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4z"/><path d="m13.5 6.5 4 4"/></symbol><symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7.6 10l4.4 4.4L16.4 10"/></symbol>
 </defs></svg>
 
   <!-- Живой фон: плавный перелив цветов темы, дышит под музыку. -->
-  <div class="ambient" id="ambient" aria-hidden="true"><div class="flow"></div><div class="grid"></div><div class="sweep"></div><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><div class="grain"></div></div>
+  <div class="ambient" id="ambient" aria-hidden="true"><div class="flow"></div><div class="grid"></div><div class="sweep"></div><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><canvas class="rain" id="rain"></canvas><div class="grain"></div></div>
   <div class="app">
     <!-- Шапка: марка слева, ссылка для плеера по центру, состояние справа.
          Ссылка — главное, что человек делает с программой, поэтому она на виду всегда. -->
@@ -349,30 +349,37 @@
     </div>
   </dialog>
 
-  <!-- Настройки: всё редкое, что не нужно каждый раз. Разделы слева, одна
-       прокрутка справа. Значения живут в тех же select, что и раньше. -->
+  <!-- Настройки: разделы слева, справа — только выбранный раздел. Каждая
+       строка — одно действие: название и пояснение слева, управление справа. -->
   <dialog id="settingsDialog" aria-labelledby="settingsTitle">
     <nav class="settings-nav" aria-label="Разделы настроек">
       <b id="settingsTitle">Настройки</b>
-      <button type="button" class="on" data-section="setLook">Оформление</button>
-      <button type="button" data-section="setStream">Эфир</button>
-      <button type="button" data-section="setNet">Сеть и серверы</button>
-      <button type="button" data-section="setDisk">Скачанные видео</button>
-      <button type="button" data-section="setApp">Программа</button>
-      <button type="button" data-section="setHelp">Помощь</button>
+      <button type="button" class="on" data-section="setLook"><svg class="ic" aria-hidden="true"><use href="#i-palette"/></svg>Оформление</button>
+      <button type="button" data-section="setStream"><svg class="ic" aria-hidden="true"><use href="#i-broadcast"/></svg>Эфир</button>
+      <button type="button" data-section="setNet"><svg class="ic" aria-hidden="true"><use href="#i-link"/></svg>Ссылки и серверы</button>
+      <button type="button" data-section="setPhone"><svg class="ic" aria-hidden="true"><use href="#i-phone"/></svg>Телефон</button>
+      <button type="button" data-section="setDisk"><svg class="ic" aria-hidden="true"><use href="#i-folder"/></svg>Скачанные видео</button>
+      <button type="button" data-section="setApp"><svg class="ic" aria-hidden="true"><use href="#i-gear"/></svg>Программа</button>
+      <button type="button" data-section="setHelp"><svg class="ic" aria-hidden="true"><use href="#i-help"/></svg>Помощь</button>
     </nav>
     <div class="settings-body" id="settingsBody">
       <button class="icon-btn settings-close" id="closeSettings" type="button" title="Закрыть" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button>
+
       <section class="settings-group" id="setLook">
         <h3>Оформление</h3>
         <div class="theme-picker" role="radiogroup" aria-label="Тема">
           <button type="button" role="radio" aria-checked="true" data-theme-choice="midnight"><span class="swatch midnight"><i></i><i></i><i></i></span><b>Полночь</b></button>
+          <button type="button" role="radio" aria-checked="false" data-theme-choice="minimal"><span class="swatch minimal"><i></i><i></i><i></i></span><b>Минимализм</b></button>
+          <button type="button" role="radio" aria-checked="false" data-theme-choice="minimal-light"><span class="swatch minimal-light"><i></i><i></i><i></i></span><b>Минимализм светлая</b></button>
+          <button type="button" role="radio" aria-checked="false" data-theme-choice="stage"><span class="swatch stage"><i></i><i></i><i></i></span><b>Сцена</b></button>
+          <button type="button" role="radio" aria-checked="false" data-theme-choice="terminal"><span class="swatch terminal"><i></i><i></i><i></i></span><b>Терминал</b></button>
+          <button type="button" role="radio" aria-checked="false" data-theme-choice="matrix"><span class="swatch matrix"><i></i><i></i><i></i></span><b>Матрица</b></button>
           <button type="button" role="radio" aria-checked="false" data-theme-choice="night"><span class="swatch night"><i></i><i></i><i></i></span><b>Ночной мир</b></button>
           <button type="button" role="radio" aria-checked="false" data-theme-choice="broadcast"><span class="swatch broadcast"><i></i><i></i><i></i></span><b>Эфирная</b></button>
           <button type="button" role="radio" aria-checked="false" data-theme-choice="projector"><span class="swatch projector"><i></i><i></i><i></i></span><b>Проектор</b></button>
         </div>
         <label class="switch-row"><input type="checkbox" id="ambientToggle" checked>
-          <span class="switch-copy"><b>Живой фон и подсветка плеера</b><small>Мягкий свет в цветах темы, дышит под музыку; вокруг плеера — продолжение картинки</small></span></label>
+          <span class="switch-copy"><b>Живой фон и подсветка плеера</b><small>Фон темы двигается под музыку, вокруг плеера — продолжение картинки</small></span></label>
       </section>
 
       <section class="settings-group" id="setStream">
@@ -380,22 +387,18 @@
         <div class="setting-row"><span><b>Кто кодирует видео</b><small id="encoderNote"></small></span>
           <div class="seg" data-for="encoderMode" role="radiogroup" aria-label="Кто кодирует"></div>
           <select id="encoderMode" hidden><option value="auto" data-short="Авто">Авто</option><option value="gpu" data-short="Видеокарта">Видеокарта</option><option value="cpu" data-short="Процессор">Процессор</option></select></div>
-        <div class="setting-row"><span><b>Быстрая ссылка через</b><small id="tunnelSpeedNote">Рядом — средняя скорость сервиса по вашим замерам. За VPN выберите сетевую карту в «Сеть и серверы»</small></span>
-          <span class="row-actions"><select id="tunnelProviderSelect" aria-label="Быстрая ссылка через"><option value="auto">Авто — самый быстрый</option><option value="cloudflare">Cloudflare</option><option value="localhostrun">localhost.run</option><option value="serveo">Serveo</option></select>
-          <button class="btn" id="testTunnels" type="button" title="Поднять каждый сервис по очереди и измерить скорость">Проверить</button></span></div>
-        <div class="setting-row" id="muteDeviceRow"><span><b>«Не слышать у себя» уводит звук в</b><small id="muteDeviceNote">Выход, который никто не слушает. Звук приложения уходит туда и в программу, а не в наушники</small></span>
-          <select id="muteDevice" aria-label="Куда уводить звук приложения"></select></div>
-        <div class="setting-row"><span><b>Нет подходящего выхода?</b><small>Бесплатный VB-CABLE создаёт беззвучный выход «CABLE Input». После установки нажмите «Обновить»</small></span>
-          <span class="row-actions"><a class="btn" href="https://vb-audio.com/Cable/" target="_blank" rel="noopener">Скачать VB-CABLE</a><button class="icon-btn" id="refreshOutputs" type="button" title="Обновить список выходов" aria-label="Обновить список выходов"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></button></span></div>
+        <div class="setting-row" id="muteDeviceRow"><span><b>Куда уводить звук при «Не слышать у себя»</b><small id="muteDeviceNote">Выход, который никто не слушает: звук идёт в эфир, а не в наушники</small></span>
+          <span class="row-actions"><select id="muteDevice" aria-label="Куда уводить звук приложения"></select><button class="icon-btn edge tall" id="refreshOutputs" type="button" title="Обновить список выходов" aria-label="Обновить список выходов"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></button></span></div>
+        <p class="help">Нет подходящего выхода? Поставьте бесплатный <a class="link" href="https://vb-audio.com/Cable/" target="_blank" rel="noopener">VB-CABLE</a> и обновите список.</p>
       </section>
 
       <section class="settings-group" id="setNet">
-        <h3>Сеть и серверы</h3>
-        <div class="sub-block" id="localOutput">
-          <p class="sub-title">Для друзей в вашей сети</p>
-          <div class="direct-card" id="localLinkRow" hidden><span class="direct-caption" id="localLinkCaption" hidden>Ссылка для своей сети</span><button class="direct-copy" type="button" data-url="" title="Скопировать ссылку"><code></code><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
-          <div class="setting-row"><span><b>Белый IP, если есть</b><small id="localHint"></small></span><input id="whiteIp" type="text" inputmode="decimal" placeholder="например, 91.210.44.7" autocomplete="off"></div>
-          <div class="direct-card white" id="whiteLinkRow" hidden><span class="direct-caption" id="whiteLinkCaption" hidden>Ссылка через интернет</span><button class="direct-copy" type="button" data-url="" title="Скопировать ссылку для интернета"><code></code><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+        <h3>Ссылки и серверы</h3>
+        <div class="sub-block">
+          <p class="sub-title">Быстрая ссылка</p>
+          <div class="setting-row"><span><b>Сервис</b><small id="tunnelSpeedNote">В «Авто» программа берёт самый быстрый</small></span>
+            <span class="row-actions"><select id="tunnelProviderSelect" aria-label="Сервис быстрой ссылки"><option value="auto">Авто — самый быстрый</option><option value="cloudflare">Cloudflare</option><option value="localhostrun">localhost.run</option><option value="serveo">Serveo</option></select>
+            <button class="btn" id="testTunnels" type="button" title="Проверить все сервисы и измерить скорость">Проверить</button></span></div>
         </div>
         <div class="sub-block" id="remoteOutput">
           <p class="sub-title">Свой сервер</p>
@@ -415,10 +418,38 @@
             <div class="form-actions"><button class="btn" id="addServerCancel" type="button">Отмена</button><button class="btn primary" id="addServerSubmit" type="submit">Подключить</button></div>
           </form>
           <p class="help" id="serverHint"></p>
-          <div class="setting-row"><span><b>Сетевая карта для потока</b><small id="adapterHint">Поток на свой сервер пойдёт с неё напрямую — мимо VPN, если он включён.</small></span><select id="remoteAdapter" aria-label="Сетевая карта для потока на свой сервер"><option value="">Как в системе</option></select></div>
           <div class="setting-row"><span><b>Скорость до сервера</b><small id="serverSpeedHint">Ещё не мерили</small></span><button class="btn" id="serverSpeedTest" type="button">Замерить</button></div>
+          <div class="setting-row"><span><b>Сетевая карта</b><small id="adapterHint">Поток на свой сервер пойдёт с неё напрямую, мимо VPN</small></span><select id="remoteAdapter" aria-label="Сетевая карта для потока на свой сервер"><option value="">Как в системе</option></select></div>
+        </div>
+        <div class="sub-block" id="localOutput">
+          <p class="sub-title">В вашей сети</p>
+          <div class="direct-card" id="localLinkRow" hidden><span class="direct-caption" id="localLinkCaption" hidden>Ссылка для своей сети</span><button class="direct-copy" type="button" data-url="" title="Скопировать ссылку"><code></code><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+          <div class="setting-row"><span><b>Белый IP</b><small id="localHint"></small></span><input id="whiteIp" type="text" inputmode="decimal" placeholder="если есть" autocomplete="off"></div>
+          <div class="direct-card white" id="whiteLinkRow" hidden><span class="direct-caption" id="whiteLinkCaption" hidden>Ссылка через интернет</span><button class="direct-copy" type="button" data-url="" title="Скопировать ссылку для интернета"><code></code><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
         </div>
         <div class="sub-block" id="tunnelOutput" hidden></div>
+      </section>
+
+      <!-- Телефон: QR-код, адрес и код. Телефон запоминается после первого входа. -->
+      <section class="settings-group" id="setPhone">
+        <h3>Телефон</h3>
+        <select id="phoneAccess" hidden><option value="off">off</option><option value="on">on</option></select>
+        <div class="phone-card">
+          <span class="phone-qr" id="phoneQr" aria-label="QR-код для телефона"></span>
+          <div class="phone-copy">
+            <b>Наведите камеру телефона на код</b>
+            <small>Пульт откроется в браузере, ставить ничего не нужно. Телефон и компьютер — в одной сети Wi-Fi.</small>
+            <div class="phone-manual">
+              <span>Или откройте</span><button class="direct-copy" id="phoneLinkCopy" type="button" data-url="" title="Скопировать адрес"><code id="phoneLink">…</code><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button>
+              <span>и введите код</span><code class="phone-code" id="phonePin">--- ---</code>
+            </div>
+            <div class="row-actions"><button class="btn small" id="phonePinNew" type="button">Новый код</button></div>
+          </div>
+        </div>
+        <p class="sub-title">Запомненные устройства</p>
+        <div id="pairedList" class="paired-list"></div>
+        <p class="help" id="pairedEmpty">Пока ни одного. Устройство запомнится после первого входа по коду.</p>
+        <button class="btn" id="phoneUnpair" type="button" hidden>Забыть все устройства</button>
       </section>
 
       <section class="settings-group" id="setDisk">
@@ -434,27 +465,10 @@
         <div class="setting-row"><span><b>Крестик окна</b><small id="closeActionNote">Эфир продолжится, значок будет у часов</small></span>
           <div class="seg" data-for="closeAction" role="radiogroup" aria-label="Крестик окна"></div>
           <select id="closeAction" hidden><option value="tray" data-short="Прячет в трей">Прячет в трей</option><option value="exit" data-short="Закрывает">Закрывает программу</option></select></div>
-        <div class="setting-row"><span><b>Доступ с других устройств</b><small id="phoneAccessNote">Выключен — другие устройства в сети не увидят программу</small></span>
-          <div class="seg" data-for="phoneAccess" role="radiogroup" aria-label="Доступ с других устройств"></div>
-          <select id="phoneAccess" hidden><option value="off" data-short="Выкл">Выключен</option><option value="on" data-short="Вкл">Включён</option></select></div>
-        <div class="setting-row" id="phonePairRow" hidden><span><b>Код привязки устройства</b><small id="phonePairNote">Нужен один раз, чтобы менять настройки эфира с другого устройства</small></span>
-          <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end"><code id="phonePin" style="font-size:18px;letter-spacing:2px;white-space:nowrap">------</code>
-          <button class="btn" id="phonePinNew" type="button">Новый</button><button class="btn" id="phoneUnpair" type="button">Отвязать все</button></span></div>
-        <div class="setting-row" id="phoneQrRow" hidden><span><b>Открыть пульт на телефоне</b><small id="phoneQrNote">Наведите камеру телефона на QR-код: пульт откроется в браузере, ничего ставить не нужно. Телефон и компьютер — в одной сети Wi-Fi</small></span>
-          <span style="display:flex;flex-direction:column;gap:6px;align-items:center"><span id="phoneQr" style="width:132px;height:132px;background:#fff;border-radius:8px;padding:4px;display:block" aria-label="QR-код для телефона"></span><code id="phoneQrUrl" style="font-size:11px;max-width:210px;word-break:break-all;text-align:center"></code></span></div>
-        <div class="setting-row"><span><b>Имя этого устройства в сети</b><small>Так его увидят другие устройства. Пусто — имя компьютера</small></span>
-          <input id="deviceNameInput" type="text" maxlength="40" style="width:170px" aria-label="Имя этого устройства в сети"></div>
-        <div class="setting-row"><span><b>PIN для подключения</b><small id="accessPinNote">Необязательно. Если задан, другое устройство спросит его один раз. Поток в сети остаётся открытым</small></span>
-          <input id="accessPinInput" type="text" inputmode="numeric" maxlength="8" placeholder="нет" autocomplete="off" style="width:110px" aria-label="PIN для подключения"></div>
-        <div class="setting-row" id="pairedListRow" hidden><span><b>Привязанные устройства</b><small id="pairedListNote">Устройства, которые вошли по коду или PIN</small></span><div id="pairedList" style="display:flex;flex-direction:column;gap:6px;align-items:flex-end"></div></div>
-        <div class="setting-row" id="joinRow"><span><b>Подключиться к другому устройству</b><small id="joinNote">Адрес и код привязки с экрана настроек другого устройства (ПК или телефона): ваши файлы и серверы станут общими, пока вы подключены</small></span>
-          <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end"><input id="joinAddress" type="text" placeholder="192.168.0.5:4717" autocomplete="off" style="width:150px" aria-label="Адрес другого устройства"><input id="joinCode" type="text" inputmode="numeric" maxlength="8" placeholder="код" autocomplete="off" style="width:80px" aria-label="Код привязки"><button class="btn" id="joinGo" type="button">Подключить</button></span></div>
-        <div class="setting-row" id="joinedRow" hidden><span><b id="joinedTitle">Подключено</b><small id="joinedNote"></small></span>
-          <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end"><button class="btn" data-join="toggle" type="button" title="Пауза или продолжить">Пауза / играть</button><button class="btn" data-join="next" type="button">Далее</button><button class="btn" data-join="stop" type="button">Стоп</button><button class="btn" data-join="take" type="button" title="Дальше эфир ведёт этот компьютер">Забрать эфир</button><button class="btn" id="joinLeave" type="button">Отключиться</button></span></div>
-        <div class="setting-row"><span><b>Порт программы</b><small id="portNote">По умолчанию 4717</small></span>
-          <input id="portInput" type="number" min="1024" max="65400" step="1" inputmode="numeric" style="width:92px" aria-label="Порт программы"></div>
         <div class="setting-row"><span><b>Обновления</b><small id="updateNote">Проверяю…</small></span><button class="btn" id="checkUpdate" type="button"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg>Проверить</button></div>
-        <div class="setting-row"><span><b>Если что-то не так</b><small>Журнал поможет разобраться со сбоем</small></span><button class="btn" id="showLogs" type="button"><svg class="ic" aria-hidden="true"><use href="#i-log"/></svg>Открыть журнал</button></div>
+        <div class="setting-row"><span><b>Журнал</b><small>Поможет разобраться, если что-то пошло не так</small></span><button class="btn" id="showLogs" type="button"><svg class="ic" aria-hidden="true"><use href="#i-log"/></svg>Открыть</button></div>
+        <div class="setting-row"><span><b>Порт программы</b><small id="portNote">По умолчанию 4717</small></span>
+          <input id="portInput" type="number" min="1024" max="65400" step="1" inputmode="numeric" aria-label="Порт программы"></div>
       </section>
 
       <section class="settings-group" id="setHelp">

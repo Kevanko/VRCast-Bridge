@@ -743,7 +743,7 @@ function render(state) {
   // Любая отрисовка не из опроса (ответ на нажатие) сбрасывает сравнение:
   // следующий опрос обязан перерисовать, даже если совпал с прошлым опросом.
   ui.lastPollText='';
-  ui.status=state; ui.progressAt=Date.now(); paintPairedList(); paintJoined(state.joined); const ready=state.tools.ffmpeg&&state.tools.ytdlp;
+  ui.status=state; ui.progressAt=Date.now(); paintPairedList(); const ready=state.tools.ffmpeg&&state.tools.ytdlp;
   if(ui.seekPending&&!state.playback?.busy&&Number(state.playback?.revision)>=ui.seekRevision)ui.seekPending=false;
   const streamReady=Boolean(state.stream?.ready), streamStalled=state.stream?.state==='stalled';
   // Связь с ядром пропала — старое «В эфире»/«Готово» было бы враньём.
@@ -1800,7 +1800,7 @@ $('#capturePreview').addEventListener('error',()=>{
   ui.frameTimer=setTimeout(()=>{ if(captureFramesWanted())$('#capturePreview').src=`/api/capture-preview?time=${Date.now()}`; },1000);
 });
 
-async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#closeAction').value=state.config.closeToTray===false?'exit':'tray';paintCloseNote();$('#phoneAccess').value=state.config.lanAccess?'on':'off';paintPhoneNote();$('#portInput').value=state.config.port||state.port||4717;paintPortNote(state);$('#deviceNameInput').value=state.config.deviceName||'';$('#accessPinInput').value=state.config.accessPin||'';$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#muteLocalApp').checked=Boolean(state.config.muteLocalApp);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode,false);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
+async function init(){const state=await api('/api/status');ui.output=state.config.outputMode;chooseOutput(ui.output);$('#quality').value=state.config.quality;$('#fps').value=String(state.config.fps);$('#mediaQuality').value=state.config.mediaQuality||'720p';$('#mediaFps').value=String(state.config.mediaFps||30);$('#videoBitrate').value=String(state.config.videoBitrate??0);$('#encoderMode').value=state.config.encoderMode||'auto';$('#tunnelProviderSelect').value=state.config.tunnelProvider||'auto';$('#closeAction').value=state.config.closeToTray===false?'exit':'tray';paintCloseNote();$('#phoneAccess').value=state.config.lanAccess?'on':'off';$('#portInput').value=state.config.port||state.port||4717;paintPortNote(state);$('#captureMode').value=state.config.captureMode;$('#regionX').value=state.config.regionX;$('#regionY').value=state.config.regionY;$('#regionWidth').value=state.config.regionWidth;$('#regionHeight').value=state.config.regionHeight;$('#audioMode').value=state.config.audioMode;$('#localAppVolume').value=String(state.config.localAppVolume??1);$('#muteLocalApp').checked=Boolean(state.config.muteLocalApp);paintLoop(state.config.loopMode||'once');paintSpeed(state.config.playbackSpeed||1);$('#mediaVolume').value=String(Math.round((state.config.mediaVolume??1)*100));$('#captureVolume').value=String(Math.round((state.config.captureVolume??1.5)*100));paintVolume($('#mediaVolume'),$('#mediaVolumeValue'));paintVolume($('#captureVolume'),$('#captureVolumeValue'));chooseCaptureMode(state.config.captureMode,false);chooseAudioMode(state.config.audioMode);открытьДобавление(!state.config.servers?.length);paintPreviewToggle();buildSegments();
   ui.windowHidden=document.hidden; document.documentElement.classList.toggle('window-hidden',document.hidden);
   render(state);
   // Опрос запускаем до списка источников: тот идёт через PowerShell и может
@@ -2069,7 +2069,7 @@ $('#cacheLimit').addEventListener('change',async()=>{
 // плейлист. Окно раскрывается и закрывается с короткой анимацией; при
 // системной настройке «меньше движения» — мгновенно.
 const settingsDialog=$('#settingsDialog');
-const ТЕМЫ={midnight:'#03040a',night:'#0e0c18',broadcast:'#0f1115',projector:'#121110'};
+const ТЕМЫ={midnight:'#03040a',minimal:'#000000','minimal-light':'#ffffff',stage:'#000000',terminal:'#101010',matrix:'#010a04',night:'#0e0c18',broadcast:'#0f1115',projector:'#121110'};
 
 function применитьТему(тема){
   if(!ТЕМЫ[тема])тема='midnight';
@@ -2079,6 +2079,27 @@ function применитьТему(тема){
   for(const кнопка of $$('[data-theme-choice]'))кнопка.setAttribute('aria-checked',String(кнопка.dataset.themeChoice===тема));
 }
 применитьТему(document.documentElement.dataset.theme||'night');
+// «Цифровой дождь» для темы «Матрица». Холст маленький и рисуется 18 раз в
+// секунду — нагрузки почти нет; в других темах и в свёрнутом окне стоит.
+(function дождь(){
+  const холст=$('#rain'); if(!холст)return;
+  const ctx=холст.getContext('2d'), знаки='アイウエオカキクケコサシスセソタチツテトナニヌネノ0123456789VRCAST{}<>/=+*';
+  let колонки=[], шаг=16, таймер=0;
+  const размер=()=>{ холст.width=Math.ceil(innerWidth/2); холст.height=Math.ceil(innerHeight/2); колонки=Array.from({length:Math.ceil(холст.width/(шаг/2))},()=>Math.random()*-50); };
+  const кадр=()=>{
+    if(document.documentElement.dataset.theme!=='matrix'||document.hidden||document.body.classList.contains('window-hidden')||$('#ambient').classList.contains('off'))return;
+    ctx.fillStyle='rgba(1,10,4,.16)'; ctx.fillRect(0,0,холст.width,холст.height);
+    ctx.font=`${шаг/2}px JetBrains Mono, monospace`;
+    колонки.forEach((y,i)=>{
+      const x=i*шаг/2, ch=знаки[Math.floor(Math.random()*знаки.length)];
+      ctx.fillStyle=Math.random()<.04?'#eaffef':'#00ff6a'; ctx.fillText(ch,x,y*шаг/2);
+      колонки[i]=y*шаг/2>холст.height&&Math.random()>.975?0:y+1;
+    });
+  };
+  addEventListener('resize',()=>{ clearTimeout(таймер); таймер=setTimeout(размер,200); });
+  размер(); setInterval(кадр,55);
+})();
+
 $('.theme-picker').addEventListener('click',event=>{
   const кнопка=event.target.closest('[data-theme-choice]'); if(!кнопка)return;
   применитьТему(кнопка.dataset.themeChoice);
@@ -2103,100 +2124,53 @@ $('#closeAction').addEventListener('change',async()=>{
   catch(error){ ui.configEditUntil=0; toast(error.message,true); }
 });
 
-function paintPairedList(){
-  const phones=ui.status?.config?.pairedPhones||[], on=$('#phoneAccess').value==='on';
-  $('#pairedListRow').hidden=!on||!phones.length;
-  const box=$('#pairedList'); box.textContent='';
-  for(const phone of phones){
-    const row=document.createElement('div'); row.style.cssText='display:flex;gap:6px;align-items:center';
-    const group=ui.status?.group, member=(group?.members||[]).find(entry=>entry.id===phone.id);
-    const name=document.createElement('span');
-    name.textContent=`${phone.name} · ${member?.online?'в сети':'не в сети'}${member?.files?`, файлов: ${member.files}`:''}${group?.controller?.id===phone.id?' · ведёт эфир':''}`;
-    name.title=new Date(phone.at).toLocaleString('ru-RU');
-    const rename=document.createElement('button'); rename.className='btn'; rename.type='button'; rename.textContent='Переименовать';
-    rename.addEventListener('click',async()=>{ const value=prompt('Имя устройства',phone.name); if(!value||!value.trim()) return; try{ await api('/api/pair/rename',{method:'POST',body:JSON.stringify({id:phone.id,name:value.trim()})}); render(await api('/api/status')); }catch(error){ toast(error.message,true); } });
-    const remove=document.createElement('button'); remove.className='btn'; remove.type='button'; remove.textContent='Отвязать';
-    remove.addEventListener('click',async()=>{ try{ await api('/api/pair/remove',{method:'POST',body:JSON.stringify({id:phone.id})}); render(await api('/api/status')); toast('Устройство отвязано'); }catch(error){ toast(error.message,true); } });
-    row.append(name,rename,remove); box.append(row);
+// ─── Телефон ────────────────────────────────────────────────────────────────
+// QR-код, адрес пульта и код. Доступ из сети включается сам, когда раздел
+// открыт: без привязки по коду из сети всё равно видны только имя ПК и поток.
+let phoneQrUrl='';
+async function paintPhone(open=false){
+  if(open&&!ui.status?.config?.lanAccess){
+    $('#phoneAccess').value='on';
+    try{ render(await saveConfig(false)); }catch(error){ toast(error.message,true); return; }
   }
-}
-// QR-код для телефона: адрес пульта в браузере и текущий код привязки. Код меняется после каждой привязки, поэтому QR обновляется.
-let phoneQrAddress='';
-async function paintPhoneQr(pin){
-  const row=$('#phoneQrRow');
-  if(!row||typeof qrcode!=='function'){ if(row) row.hidden=true; return; }
-  try{
-    if(!phoneQrAddress){ const info=await api('/api/lan-info'); phoneQrAddress=(info.addresses||[])[0]||''; }
-    if(!phoneQrAddress||!pin){ row.hidden=true; return; }
-    const url=`${phoneQrAddress}/m#${pin}`;
-    if($('#phoneQrUrl').textContent===url){ row.hidden=false; return; }
-    const qr=qrcode(0,'M'); qr.addData(url); qr.make();
-    $('#phoneQr').innerHTML=qr.createSvgTag({cellSize:4,margin:0,scalable:true});
-    const svg=$('#phoneQr').querySelector('svg'); if(svg){ svg.style.width='100%'; svg.style.height='100%'; }
-    setText($('#phoneQrUrl'),url); row.hidden=false;
-  }catch{ row.hidden=true; }
-}
-setInterval(()=>{ if(!$('#phonePairRow').hidden&&settingsDialog.open) paintPhonePin(); },4000);
-async function paintPhonePin(){
-  const on=$('#phoneAccess').value==='on';
-  $('#phonePairRow').hidden=!on;
-  if(!on) $('#phoneQrRow').hidden=true;
+  if(!settingsDialog.open||ui.settingsSection!=='setPhone')return;
   paintPairedList();
-  if(!on) return;
   try{
-    const info=await api('/api/pair/pin');
-    paintPhoneQr(info.pin);
-    setText($('#phonePin'),`${info.pin.slice(0,3)} ${info.pin.slice(3)}`);
-    setText($('#phonePairNote'),info.phones?`Привязано устройств: ${info.phones}. Код меняется после каждой привязки`:'Введите этот код на другом устройстве: Настройки → Настройки эфира');
+    const [info,pin]=await Promise.all([api('/api/lan-info'),api('/api/pair/pin')]);
+    const address=(info.addresses||[])[0]||'';
+    setText($('#phonePin'),`${pin.pin.slice(0,3)} ${pin.pin.slice(3)}`);
+    setText($('#phoneLink'),address?`${address}/m`:'нет сети Wi-Fi');
+    $('#phoneLinkCopy').dataset.url=address?`${address}/m`:'';
+    const url=address?`${address}/m#${pin.pin}`:'';
+    if(url&&url!==phoneQrUrl&&typeof qrcode==='function'){
+      const qr=qrcode(0,'M'); qr.addData(url); qr.make();
+      $('#phoneQr').innerHTML=qr.createSvgTag({cellSize:4,margin:0,scalable:true});
+      phoneQrUrl=url;
+    }
   }catch{}
 }
-$('#deviceNameInput').addEventListener('change',async()=>{
-  try{ render(await api('/api/config',{method:'POST',body:JSON.stringify({deviceName:$('#deviceNameInput').value})})); toast('Имя устройства сохранено'); }
-  catch(error){ toast(error.message,true); }
-});
-$('#accessPinInput').addEventListener('change',async()=>{
-  const value=$('#accessPinInput').value.trim();
-  if(value&&!/^\d{4,8}$/.test(value)){ toast('PIN — от 4 до 8 цифр',true); $('#accessPinInput').value=ui.status?.config?.accessPin||''; return; }
-  try{ render(await api('/api/config',{method:'POST',body:JSON.stringify({accessPin:value})})); toast(value?'PIN включён':'PIN выключен'); }
-  catch(error){ toast(error.message,true); }
-});
-$('#phonePinNew').addEventListener('click',async()=>{ try{ await api('/api/pair/pin/rotate',{method:'POST',body:'{}'}); paintPhonePin(); }catch(error){ toast(error.message,true); } });
-$('#phoneUnpair').addEventListener('click',async()=>{ try{ await api('/api/pair/clear',{method:'POST',body:'{}'}); paintPhonePin(); toast('Все устройства отвязаны'); }catch(error){ toast(error.message,true); } });
-
-async function paintPhoneNote(){
-  const on=$('#phoneAccess').value==='on';
-  paintPhonePin();
-  if(!on){ setText($('#phoneAccessNote'),'Выключен — другие устройства в сети не увидят программу'); return; }
-  try{
-    const info=await api('/api/lan-info');
-    setText($('#phoneAccessNote'),`Включён. Другие устройства найдут это само, а вручную: ${info.addresses.join(', ')||'адрес не найден'}`);
-  }catch{ setText($('#phoneAccessNote'),'Включён'); }
+setInterval(()=>{ if(settingsDialog.open&&ui.settingsSection==='setPhone')paintPhone(); },4000);
+function paintPairedList(){
+  const phones=ui.status?.config?.pairedPhones||[], box=$('#pairedList');
+  setHidden($('#pairedEmpty'),phones.length>0); setHidden($('#phoneUnpair'),phones.length<2);
+  const подпись=JSON.stringify(phones.map(p=>[p.id,p.name,(ui.status?.group?.members||[]).find(m=>m.id===p.id)?.online]));
+  if(box.dataset.sig===подпись)return; box.dataset.sig=подпись; box.textContent='';
+  for(const phone of phones){
+    const online=(ui.status?.group?.members||[]).find(entry=>entry.id===phone.id)?.online;
+    const row=document.createElement('div'); row.className='paired-row';
+    const dot=document.createElement('i'); dot.className=`state-dot${online?' ready':''}`;
+    const name=document.createElement('span'); name.className='paired-name'; name.textContent=phone.name; name.title=`Привязано ${new Date(phone.at).toLocaleString('ru-RU')}`;
+    const state=document.createElement('small'); state.textContent=online?'на связи':'не на связи';
+    const rename=document.createElement('button'); rename.className='btn text small'; rename.type='button'; rename.textContent='Переименовать';
+    rename.addEventListener('click',async()=>{ const value=prompt('Имя устройства',phone.name); if(!value||!value.trim()) return; try{ await api('/api/pair/rename',{method:'POST',body:JSON.stringify({id:phone.id,name:value.trim()})}); render(await api('/api/status')); }catch(error){ toast(error.message,true); } });
+    const remove=document.createElement('button'); remove.className='btn text small danger-text'; remove.type='button'; remove.textContent='Забыть';
+    remove.addEventListener('click',async()=>{ try{ await api('/api/pair/remove',{method:'POST',body:JSON.stringify({id:phone.id})}); render(await api('/api/status')); toast(`«${phone.name}» больше не управляет программой`); }catch(error){ toast(error.message,true); } });
+    row.append(dot,name,state,rename,remove); box.append(row);
+  }
 }
-$('#phoneAccess').addEventListener('change',async()=>{
-  ui.configEditUntil=Date.now()+2500;
-  try{ render(await saveConfig(false)); toast($('#phoneAccess').value==='on'?'Доступ с других устройств включён':'Доступ с других устройств выключен'); setTimeout(paintPhoneNote,600); }
-  catch(error){ ui.configEditUntil=0; toast(error.message,true); }
-});
-
-// Подключение этого компьютера к другому устройству (как у телефона): состояние приходит в статусе.
-function paintJoined(info){
-  $('#joinRow').hidden=Boolean(info);
-  $('#joinedRow').hidden=!info;
-  if(!info) return;
-  setText($('#joinedTitle'),`Подключено к «${info.name}»`);
-  setText($('#joinedNote'),[info.online?'в сети':'нет связи'+(info.error?`: ${info.error}`:''),`отдано файлов: ${info.shared}`,info.title?`${info.running?(info.paused?'на паузе':'идёт'):'сейчас'}: ${info.title}`:(info.running?'идёт эфир':'эфир не идёт'),info.controller?`ведёт: ${info.controller}`:''].filter(Boolean).join(' · '));
-}
-$('#joinGo').addEventListener('click',async()=>{
-  const address=$('#joinAddress').value.trim(), code=$('#joinCode').value.trim();
-  if(!address||!code){ toast('Введите адрес и код другого устройства',true); return; }
-  try{ const reply=await api('/api/join',{method:'POST',body:JSON.stringify({address,code})}); $('#joinCode').value=''; paintJoined(reply.joined); toast('Подключено. Доступ из сети включён: так устройство заберёт ваши файлы'); }
-  catch(error){ toast(error.message,true); }
-});
-$('#joinLeave').addEventListener('click',async()=>{ try{ await api('/api/join/leave',{method:'POST',body:'{}'}); paintJoined(null); toast('Отключено'); }catch(error){ toast(error.message,true); } });
-for(const button of document.querySelectorAll('[data-join]')) button.addEventListener('click',async()=>{
-  try{ const reply=await api('/api/join/control',{method:'POST',body:JSON.stringify({action:button.dataset.join})}); paintJoined(reply.joined); }
-  catch(error){ toast(error.message,true); }
-});
+$('#phoneLinkCopy').addEventListener('click',()=>{ const url=$('#phoneLinkCopy').dataset.url; if(url){ navigator.clipboard?.writeText(url); toast('Адрес пульта скопирован'); } });
+$('#phonePinNew').addEventListener('click',async()=>{ try{ await api('/api/pair/pin/rotate',{method:'POST',body:'{}'}); paintPhone(); toast('Код сменился'); }catch(error){ toast(error.message,true); } });
+$('#phoneUnpair').addEventListener('click',async()=>{ try{ await api('/api/pair/clear',{method:'POST',body:'{}'}); render(await api('/api/status')); toast('Все устройства забыты'); }catch(error){ toast(error.message,true); } });
 
 function paintPortNote(state){
   const running=state?.port||ui.status?.port, chosen=Number($('#portInput').value);
@@ -2218,27 +2192,22 @@ function открытьНастройки(раздел){
     settingsDialog.classList.remove('closing');
     settingsDialog.showModal();
   }
-  const тело=$('#settingsBody');
-  if(typeof раздел==='string'&&document.getElementById(раздел)){ ui.navPinned=раздел; ui.navPinnedUntil=Date.now()+900; тело.style.scrollBehavior='auto'; тело.scrollTop=document.getElementById(раздел).offsetTop-8; тело.style.scrollBehavior=''; }
-  else тело.scrollTop=0;
-  paintSettingsNav();
+  показатьРаздел(typeof раздел==='string'&&document.getElementById(раздел)?раздел:(ui.settingsSection||'setLook'));
   // Фокус — на выбранную тему, а не на крестик: так Tab ведёт по порядку.
   if(typeof раздел!=='string')settingsDialog.querySelector('[data-theme-choice][aria-checked="true"]')?.focus();
 }
-function paintSettingsNav(){
-  const тело=$('#settingsBody'); let текущий='setLook';
-  if(Date.now()<(ui.navPinnedUntil||0)){ for(const кнопка of $$('.settings-nav [data-section]'))кнопка.classList.toggle('on',кнопка.dataset.section===ui.navPinned); return; }
-  for(const раздел of $$('.settings-group'))if(раздел.offsetTop-40<=тело.scrollTop)текущий=раздел.id;
-  if(тело.scrollTop+тело.clientHeight>=тело.scrollHeight-4)текущий=$$('.settings-group').at(-1).id;
-  for(const кнопка of $$('.settings-nav [data-section]'))кнопка.classList.toggle('on',кнопка.dataset.section===текущий);
+// Справа виден только выбранный раздел: раньше всё шло одной лентой и терялось.
+function показатьРаздел(id){
+  ui.settingsSection=id;
+  for(const раздел of $$('.settings-group'))раздел.hidden=раздел.id!==id;
+  for(const кнопка of $$('.settings-nav [data-section]')){ const on=кнопка.dataset.section===id; кнопка.classList.toggle('on',on); кнопка.setAttribute('aria-current',on?'page':'false'); }
+  $('#settingsBody').scrollTop=0;
+  if(id==='setPhone')paintPhone(true);
 }
+function paintSettingsNav(){}
 $('.settings-nav').addEventListener('click',event=>{
-  const кнопка=event.target.closest('[data-section]'); if(!кнопка)return;
-  ui.navPinned=кнопка.dataset.section; ui.navPinnedUntil=Date.now()+900;
-  $('#settingsBody').scrollTop=document.getElementById(кнопка.dataset.section).offsetTop-8;
-  paintSettingsNav();
+  const кнопка=event.target.closest('[data-section]'); if(кнопка)показатьРаздел(кнопка.dataset.section);
 });
-$('#settingsBody').addEventListener('scroll',()=>{ cancelAnimationFrame(ui.navFrame); ui.navFrame=requestAnimationFrame(paintSettingsNav); },{passive:true});
 function закрытьНастройки(сразу=false){
   if(!settingsDialog.open)return;
   if(сразу||меньшеДвижения.matches){ settingsDialog.classList.remove('closing'); settingsDialog.close(); return; }
