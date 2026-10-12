@@ -11,7 +11,9 @@ Videos, anime and your screen in a VRChat video player, with one link.
 ![Linux](https://img.shields.io/badge/Linux-X11-3b4bff?style=flat-square)
 [![MIT](https://img.shields.io/badge/license-MIT-2a2f55?style=flat-square)](LICENSE)
 
-<img src="docs/media/demo.gif" width="800" alt="VRCast Bridge: paste a link, go live, copy one link into AVPro in VRChat">
+<img src="docs/media/demo.gif" width="800" alt="VRCast Bridge: paste a playlist, go live, copy one link into AVPro in VRChat, then switch themes and fonts">
+
+<sub>In the frame: open movies by <a href="https://studio.blender.org/films/">Blender Studio</a> (CC BY)</sub>
 
 **[English](#english)** &nbsp;|&nbsp; **[Русский](#русский)**
 
