@@ -1,0 +1,104 @@
+# Проверка и выпуск.
+# Каждый push и PR: все тесты на Windows и на Linux.
+# Тег vX.Y.Z: те же тесты, затем сборка, подпись, проверка автообновления на
+# собранном EXE и релиз. Упал любой шаг — релиза нет.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - name: FFmpeg
+        run: choco install ffmpeg -y --no-progress
+      - name: Сторонние утилиты (MediaMTX, yt-dlp, plink, cloudflared)
+        run: powershell -ExecutionPolicy Bypass -File tools/fetch-tools.ps1
+      - run: npm ci
+      - name: Тесты
+        run: npm test
+
+  test-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - name: FFmpeg и виртуальный экран
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg xvfb x11-utils x11-xserver-utils pulseaudio-utils
+      - run: npm ci
+      - name: Тесты (с экраном Xvfb — проверяется и захват)
+        run: xvfb-run -a -s "-screen 0 1280x720x24" npm test
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test-windows, test-linux]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 9.0.x }
+      - name: Версия в теге совпадает с программой
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $csproj = ([xml](Get-Content launcher/VRCastBridge.Launcher.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          $server = Select-String -Path src/server.js -Pattern "APP_VERSION = .*'([0-9.]+)'" | ForEach-Object { $_.Matches[0].Groups[1].Value }
+          "tag=$tag package=$pkg launcher=$csproj server=$server"
+          if ($tag -ne $pkg -or $tag -ne $csproj -or $tag -ne $server) { throw "Версии не совпадают" }
+          if (-not (Test-Path "docs/releases/$tag.md")) { throw "Нет описания релиза docs/releases/$tag.md" }
+      - name: Сторонние утилиты
+        run: powershell -ExecutionPolicy Bypass -File tools/fetch-tools.ps1
+      - name: Сертификат подписи
+        shell: pwsh
+        env:
+          SIGN_PFX: ${{ secrets.SIGN_PFX }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: |
+          if (-not $env:SIGN_PFX) { throw "Нет секрета SIGN_PFX — без подписи обновление не примет файл" }
+          $pfx = Join-Path $env:RUNNER_TEMP 'sign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX))
+          Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:/CurrentUser/My -Password (ConvertTo-SecureString $env:SIGN_PFX_PASSWORD -AsPlainText -Force) | Out-Null
+          Remove-Item $pfx
+      - name: Помощники (звук, захват окон)
+        run: |
+          dotnet publish audio-helper/VRCast.AudioCapture.csproj -c Release -o audio-helper/bin/publish
+          copy audio-helper\bin\publish\VRCast.AudioCapture.exe tools\
+          cargo build --release --manifest-path capture-helper/Cargo.toml
+          copy capture-helper\target\release\vrcast-window-capture.exe tools\VRCast.WindowCapture.exe
+          powershell -ExecutionPolicy Bypass -File tools/sign.ps1
+      - name: Программа
+        run: |
+          dotnet publish launcher/VRCastBridge.Launcher.csproj -c Release -o launcher/bin/publish
+          copy "launcher\bin\publish\VRCast Bridge.exe" "VRCast Bridge.exe"
+          powershell -ExecutionPolicy Bypass -File tools/sign.ps1
+      - run: npm ci
+      - name: Проверка автообновления на собранном EXE
+        run: node --test test/release.test.js
+      - name: Релиз
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          gh release create $tag "VRCast Bridge.exe" --title "VRCast Bridge $($tag.TrimStart('v'))" --notes-file "docs/releases/$($tag.TrimStart('v')).md" --verify-tag
