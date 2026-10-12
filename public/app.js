@@ -70,12 +70,12 @@ function renderProgress() {
     return;
   }
   if (!state?.progress || state.activeKind !== 'queue') {
-    setText($('#elapsedTime'),'0:00'); setText($('#totalTime'),state?.activeKind==='screen'&&state.running?'LIVE':'0:00');
+    setText($('#elapsedTime'),'0:00'); setText($('#totalTime'),state?.activeKind==='screen'&&state.running?'':'0:00');
     if (!ui.seeking&&!ui.seekPending) paintSeek(0);
     return;
   }
   const position=(ui.seeking||ui.seekPending)?ui.seekDraft:progressPosition(state), total=Number(state?.progress?.duration)||0, percent=total?Math.min(100,position/total*100):0;
-  setText($('#elapsedTime'),formatTime(position)); setText($('#totalTime'),total?formatTime(total):'LIVE');
+  setText($('#elapsedTime'),formatTime(position)); setText($('#totalTime'),total?formatTime(total):'');
   if (!ui.seeking&&!ui.seekPending) paintSeek(percent);
 }
 // Полоса перемотки двигается по десятым долям процента: чаще перерисовывать
@@ -695,11 +695,8 @@ function paintMonitorTags(state){
   let текст='', класс='', пояснение='Нет эфира';
   if(!$('#firstRun').hidden){ setHidden(метка,true); setHidden(подпись,true); return; }
   if(state.running){
-    const готов=Boolean(state.stream?.ready);
-    текст=готов?'ЭФИР':'ЗАПУСК'; класс=готов?'live':'cue';
-    // Без дублей: «идёт эфир» уже говорят метка ЭФИР и строка статуса, про
-    // выключенную картинку — сам кадр. Подпись нужна, только если в эфире не то,
-    // что открыто на вкладке.
+    // Без меток на кадре: «идёт эфир» уже говорят строка статуса с часами и
+    // кнопка «Остановить эфир». Подпись — только если в эфире не то, что открыто.
     пояснение=ui.source!==(state.activeKind==='screen'?'screen':'queue')?`В эфире ${state.activeKind==='screen'?'экран':'видео'}`:'';
   } else if(кадр.classList.contains('source-preview')||кадр.classList.contains('window-paused')){
     текст='ПРЕДПРОСМОТР'; класс='cue'; пояснение=ui.captureBadge||'Эфир не запущен';
@@ -745,7 +742,7 @@ function render(state) {
   // Любая отрисовка не из опроса (ответ на нажатие) сбрасывает сравнение:
   // следующий опрос обязан перерисовать, даже если совпал с прошлым опросом.
   ui.lastPollText='';
-  ui.status=state; ui.progressAt=Date.now(); paintPairedList(); const ready=state.tools.ffmpeg&&state.tools.ytdlp;
+  ui.status=state; ui.progressAt=Date.now(); paintPairedList(); синхронТемы(state.config?.theme); const ready=state.tools.ffmpeg&&state.tools.ytdlp;
   if(ui.seekPending&&!state.playback?.busy&&Number(state.playback?.revision)>=ui.seekRevision)ui.seekPending=false;
   const streamReady=Boolean(state.stream?.ready), streamStalled=state.stream?.state==='stalled';
   // Связь с ядром пропала — старое «В эфире»/«Готово» было бы враньём.
@@ -2102,10 +2099,19 @@ function применитьТему(тема){
   размер(); setInterval(кадр,55);
 })();
 
+// Тема живёт в настройках программы: пульт в браузере телефона берёт её оттуда.
+function сохранитьТему(тема){ api('/api/config',{method:'POST',body:JSON.stringify({theme:тема})}).catch(()=>{}); }
+function синхронТемы(тема){
+  const своя=document.documentElement.dataset.theme||'night';
+  if(!тема){ if(!синхронТемы.отправлена){ синхронТемы.отправлена=true; сохранитьТему(своя); } return; }
+  // Пока выбор только что сделан и ещё летит на сервер, старый статус его не откатывает.
+  if(тема!==своя&&ТЕМЫ[тема]&&Date.now()>(синхронТемы.ждать||0)){ применитьТему(тема); положить('theme',тема); }
+}
 $('.theme-picker').addEventListener('click',event=>{
   const кнопка=event.target.closest('[data-theme-choice]'); if(!кнопка)return;
   применитьТему(кнопка.dataset.themeChoice);
   положить('theme',кнопка.dataset.themeChoice);
+  синхронТемы.ждать=Date.now()+4000; сохранитьТему(кнопка.dataset.themeChoice);
 });
 // Стрелки внутри выбора темы — как у остальных переключателей.
 $('.theme-picker').addEventListener('keydown',event=>{

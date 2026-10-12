@@ -276,7 +276,7 @@ test('имя ПК и PIN: имя видно в сети, при PIN без кл�
     // включаем PIN
     await setLocal({ accessPin: '4821' });
     const info = JSON.parse((await call(host, '/api/lan-info')).text);
-    assert.deepEqual(Object.keys(info).sort(), ['name', 'pinRequired', 'port', 'version'], 'чужому — только имя, порт и признак PIN');
+    assert.deepEqual(Object.keys(info).sort(), ['name', 'pinRequired', 'port', 'theme', 'version'], 'чужому — только имя, порт, признак PIN и тема оформления');
     assert.equal(info.pinRequired, true);
     const locked = await call(host, '/api/status?logs=0');
     assert.equal(locked.status, 401);

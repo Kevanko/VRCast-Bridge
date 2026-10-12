@@ -7049,10 +7049,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/pair/clear') { for (const phone of config.pairedPhones || []) dropMember(phone.id, 'отвязано'); saveConfig({ pairedPhones: [] }); rotatePin(); log('Все телефоны отвязаны'); return json(res, 200, { pin: pairingPin, phones: 0 }); }
     if (req.method === 'GET' && url.pathname === '/api/lan-info') {
       const pinRequired = accessPinSet();
-      if (pinRequired && !isPairedRequest(req)) return json(res, 200, { name: deviceName(), version: APP_VERSION, port: PORT, pinRequired });
+      if (pinRequired && !isPairedRequest(req)) return json(res, 200, { name: deviceName(), version: APP_VERSION, port: PORT, pinRequired, theme: config.theme || '' });
       const { rtsp, playbackUrl } = status(false);
       if (!config.deviceId) saveConfig({ deviceId: crypto.randomUUID() });
-      return json(res, 200, { id: config.deviceId, kind: 'pc', name: deviceName(), version: APP_VERSION, port: PORT, webrtcPort: WEBRTC_PORT, rtspPort: RTSP_PORT, lanAccess: config.lanAccess === true, pinRequired,
+      return json(res, 200, { id: config.deviceId, kind: 'pc', name: deviceName(), version: APP_VERSION, port: PORT, webrtcPort: WEBRTC_PORT, rtspPort: RTSP_PORT, lanAccess: config.lanAccess === true, pinRequired, theme: config.theme || '',
         addresses: getLanAddresses().map(address => `http://${address}:${PORT}`), playbackUrl, rtspLanUrls: rtsp?.lanUrls || [],
         ...(isPairedRequest(req) ? { phonePublishAuth: phonePublishAuth() } : {}) });
     }
@@ -7241,6 +7241,8 @@ const server = http.createServer(async (req, res) => {
         mediaVolume: Math.max(0, Math.min(4, Number(body.mediaVolume ?? config.mediaVolume ?? 1))),
         mediaQuality: ['480p', '720p', '1080p'].includes(body.mediaQuality) ? body.mediaQuality : (config.mediaQuality || '720p'),
         mediaFps: body.mediaFps === 60 ? 60 : (body.mediaFps === 30 ? 30 : (config.mediaFps || 30)),
+        // Тема окна — её же берёт пульт в браузере телефона.
+        theme: /^[a-z-]{1,24}$/.test(body.theme || '') ? body.theme : (config.theme || ''),
       };
       const previousOutput = config.outputMode;
       const previousConfig = { ...config };
@@ -7457,7 +7459,7 @@ const server = http.createServer(async (req, res) => {
         // Метка = версия + время изменения файлов: при одинаковой версии
         // WebView брал из кеша старые app.js и styles.css, и новый интерфейс
         // не появлялся после обновления.
-        const метка = `${APP_VERSION}-${['app.js', 'styles.css'].map(name => { try { return Math.round(statSync(join(PUBLIC_DIR, name)).mtimeMs).toString(36); } catch { return '0'; } }).join('')}`;
+        const метка = `${APP_VERSION}-${['app.js', 'styles.css', 'm/themes.css'].map(name => { try { return Math.round(statSync(join(PUBLIC_DIR, name)).mtimeMs).toString(36); } catch { return '0'; } }).join('')}`;
         const html = readFileSync(join(PUBLIC_DIR, 'index.html'), 'utf8').replace(/\?v=[0-9.]+/g, `?v=${метка}`);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(html);

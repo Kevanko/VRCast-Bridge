@@ -1,83 +1,89 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="midnight">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#03040a">
 <title>VRCast — пульт</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Unbounded:wght@700;800&family=Playfair+Display:wght@500;600&family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/m/themes.css">
 <link rel="stylesheet" href="/m/m.css">
+<!-- Тема ПК, запомненная с прошлого раза: без неё при открытии мелькала бы чужая палитра. -->
+<script>try{var t=localStorage.getItem('vrcast-m-theme');if(t==='night')document.documentElement.removeAttribute('data-theme');else if(t)document.documentElement.dataset.theme=t;}catch(e){}</script>
 </head>
 <body>
-<header><b id="devName">VRCast</b><span id="pill" class="pill">…</span></header>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.4v13.2L19 12z" fill="currentColor" stroke="none"/></symbol><symbol id="i-pause" viewBox="0 0 24 24"><rect x="7.4" y="5.6" width="3.4" height="12.8" rx="1" fill="currentColor" stroke="none"/><rect x="13.2" y="5.6" width="3.4" height="12.8" rx="1" fill="currentColor" stroke="none"/></symbol><symbol id="i-prev" viewBox="0 0 24 24"><rect x="5" y="6" width="2.4" height="12" rx="1" fill="currentColor" stroke="none"/><path d="M18.4 6.9v10.2a.8.8 0 0 1-1.2.7L9.4 12.7a.8.8 0 0 1 0-1.4l7.8-5.1a.8.8 0 0 1 1.2.7z" fill="currentColor" stroke="none"/></symbol><symbol id="i-next" viewBox="0 0 24 24"><rect x="16.6" y="6" width="2.4" height="12" rx="1" fill="currentColor" stroke="none"/><path d="M5.6 6.9v10.2a.8.8 0 0 0 1.2.7l7.8-5.1a.8.8 0 0 0 0-1.4L6.8 6.2a.8.8 0 0 0-1.2.7z" fill="currentColor" stroke="none"/></symbol><symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.2" fill="currentColor" stroke="none"/></symbol><symbol id="i-note" viewBox="0 0 24 24"><path d="M9.4 17.4V5.6l9-1.8v11.6"/><circle cx="6.9" cy="17.4" r="2.5"/><circle cx="15.9" cy="15.4" r="2.5"/></symbol><symbol id="i-broadcast" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.6"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4"/><path d="M5 19a9.9 9.9 0 0 1 0-14M19 5a9.9 9.9 0 0 1 0 14"/></symbol><symbol id="i-display" viewBox="0 0 24 24"><rect x="3" y="4.6" width="18" height="12.2" rx="2.2"/><path d="M9 20.4h6M12 16.8v3.6"/></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.6v12.8M5.6 12h12.8"/></symbol><symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3.4 6.6a1.8 1.8 0 0 1 1.8-1.8h3.6l1.9 2.4h8.1a1.8 1.8 0 0 1 1.8 1.8v8.4a1.8 1.8 0 0 1-1.8 1.8H5.2a1.8 1.8 0 0 1-1.8-1.8z"/><path d="M12 10.6v5.2M9.4 13.2h5.2"/></symbol><symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13.6a3.6 3.6 0 0 0 5.2.3l2.6-2.6a3.6 3.6 0 0 0-5.1-5.1l-1.5 1.5"/><path d="M14 10.4a3.6 3.6 0 0 0-5.2-.3l-2.6 2.6a3.6 3.6 0 0 0 5.1 5.1l1.5-1.5"/></symbol><symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.4a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.84 2.84l-.06-.06a1.7 1.7 0 0 0-2.92 1.22v.18a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-2.98-1.22l-.06.06a2 2 0 1 1-2.84-2.84l.06-.06a1.7 1.7 0 0 0-1.22-2.92h-.18a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.22-2.98l-.06-.06a2 2 0 1 1 2.84-2.84l.06.06a1.7 1.7 0 0 0 2.92-1.22v-.18a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.92 1.22l.06-.06a2 2 0 1 1 2.84 2.84l-.06.06a1.7 1.7 0 0 0 1.22 2.92h.18a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.54 1.04z"/></symbol><symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.8" y="8.8" width="11.4" height="11.4" rx="2.2"/><path d="M15.4 5.4A1.6 1.6 0 0 0 13.8 3.8H5.6A1.8 1.8 0 0 0 3.8 5.6v8.2a1.6 1.6 0 0 0 1.6 1.6"/></symbol><symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.4 6.8h15.2M9.4 6.8V4.6h5.2v2.2M6.6 6.8l.9 12.6h9l.9-12.6"/></symbol><symbol id="i-close" viewBox="0 0 24 24"><path d="M6.8 6.8l10.4 10.4M17.2 6.8L6.8 17.2"/></symbol></defs></svg>
+<header>
+  <b id="devName" class="device">VRCast</b>
+  <span id="pill" class="pill"><i></i><span id="pillText">…</span></span>
+</header>
 
 <main>
   <section id="pair" hidden>
-    <h2>Подключение</h2>
-    <p>Введите код привязки из настроек программы на компьютере (Настройки → Программа → «Доступ с других устройств»). Или просто отсканируйте QR-код оттуда.</p>
-    <form id="pairForm"><input id="pairCode" inputmode="numeric" autocomplete="off" placeholder="код привязки" maxlength="8"><button class="big">Подключить</button></form>
+    <h1>Подключите телефон</h1>
+    <p class="muted">Откройте на компьютере «Настройки → Телефон» и наведите камеру на QR-код. Или введите код оттуда.</p>
+    <form id="pairForm" class="pair-form"><input id="pairCode" inputmode="numeric" autocomplete="off" placeholder="Код с экрана ПК" maxlength="8"><button class="primary">Подключить</button></form>
     <p id="pairError" class="err"></p>
   </section>
 
   <section id="tabNow" class="tab">
-    <div class="card now">
-      <div id="cover" class="cover"></div>
-      <h2 id="title">Ничего не играет</h2>
-      <p id="sub" class="muted"></p>
-      <input id="seek" type="range" min="0" max="1000" value="0" disabled>
-      <div class="times muted"><span id="tNow">0:00</span><span id="tAll">0:00</span></div>
-      <div class="row ctl">
-        <button id="bPrev" aria-label="Назад">⏮</button>
-        <button id="bPlay" class="big" aria-label="Играть или пауза">▶</button>
-        <button id="bNext" aria-label="Далее">⏭</button>
-      </div>
-      <div class="row">
-        <button id="bStart" class="big">Начать эфир</button>
-        <button id="bStop">Стоп</button>
+    <div id="cover" class="cover"><svg class="ic"><use href="#i-note"/></svg></div>
+    <h1 id="title">Ничего не играет</h1>
+    <p id="sub" class="muted"></p>
+    <input id="seek" class="seek" type="range" min="0" max="1000" value="0" disabled aria-label="Перемотка">
+    <div class="times"><span id="tNow">0:00</span><span id="tAll"></span></div>
+    <div class="transport">
+      <button id="bPrev" class="round" aria-label="Предыдущий"><svg class="ic"><use href="#i-prev"/></svg></button>
+      <button id="bPlay" class="play" aria-label="Играть или пауза"><svg class="ic"><use id="playIcon" href="#i-play"/></svg></button>
+      <button id="bNext" class="round" aria-label="Следующий"><svg class="ic"><use href="#i-next"/></svg></button>
+    </div>
+    <button id="bStart" class="primary wide"><svg class="ic"><use href="#i-broadcast"/></svg>Начать эфир</button>
+    <button id="bStop" class="danger wide"><svg class="ic"><use href="#i-stop"/></svg>Остановить эфир</button>
+
+    <div class="panel">
+      <label class="vol"><span class="row-head"><span>Громкость в эфире</span><output id="volText"></output></span><input id="vol" type="range" min="0" max="200" value="100"></label>
+      <div class="pair-row">
+        <label>Скорость<select id="speed"><option>0.5</option><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option><option>2</option></select></label>
+        <label>Повтор<select id="loop"><option value="once">Без повтора</option><option value="one">Трек</option><option value="all">Список</option></select></label>
       </div>
     </div>
-    <div class="card">
-      <label>Громкость <span id="volText" class="muted"></span><input id="vol" type="range" min="0" max="200" value="100"></label>
-      <div class="row">
-        <label>Скорость <select id="speed"><option>0.5</option><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option><option>2</option></select></label>
-        <label>Повтор <select id="loop"><option value="once">Без повтора</option><option value="one">Трек</option><option value="all">Список</option></select></label>
-      </div>
-    </div>
-    <div class="card">
-      <button id="bScreen" class="wide">Транслировать экран ПК</button>
-      <p class="muted small">Экран компьютера пойдёт в тот же эфир. Остановить — кнопкой «Стоп». Экран самого телефона из браузера транслировать нельзя: для этого есть приложение.</p>
+    <div class="panel">
+      <button id="bScreen" class="wide"><svg class="ic"><use href="#i-display"/></svg>Транслировать экран ПК</button>
+      <p class="muted small">Экран компьютера пойдёт в тот же эфир. Свой экран телефон показывает через приложение VRCast.</p>
     </div>
   </section>
 
   <section id="tabQueue" class="tab" hidden>
-    <div class="card">
-      <form id="addForm" class="row"><input id="addUrl" type="url" placeholder="Ссылка: YouTube, Rutube, VK, mp4…" autocomplete="off"><button class="big">Добавить</button></form>
-      <label class="file">Или файлы с телефона<input id="addFiles" type="file" accept="video/*,audio/*" multiple></label>
-      <div id="upload" class="muted small"></div>
-    </div>
+    <form id="addForm" class="pair-form"><input id="addUrl" type="url" placeholder="YouTube, Rutube, VK, mp4…" autocomplete="off"><button class="primary" aria-label="Добавить"><svg class="ic"><use href="#i-plus"/></svg></button></form>
+    <label class="file"><svg class="ic"><use href="#i-folder-plus"/></svg>Добавить файлы с телефона<input id="addFiles" type="file" accept="video/*,audio/*" multiple></label>
+    <div id="upload" class="muted small"></div>
     <ul id="queue" class="queue"></ul>
   </section>
 
   <section id="tabLinks" class="tab" hidden>
-    <div class="card" id="links"></div>
+    <div id="links"></div>
   </section>
 
   <section id="tabMore" class="tab" hidden>
-    <div class="card">
-      <label>Качество <select id="quality"><option>480p</option><option>720p</option><option>1080p</option></select></label>
-      <label>Кадры в секунду <select id="fps"><option>30</option><option>60</option></select></label>
-      <label>Куда идёт эфир <select id="output"><option value="local">Локально (в этой сети)</option><option value="tunnel">Публичная ссылка</option><option value="remote">Свой сервер</option></select></label>
+    <div class="panel">
+      <label>Качество<select id="quality"><option>480p</option><option>720p</option><option>1080p</option></select></label>
+      <label>Кадров в секунду<select id="fps"><option>30</option><option>60</option></select></label>
+      <label>Куда идёт эфир<select id="output"><option value="local">В этой сети</option><option value="tunnel">Публичная ссылка</option><option value="remote">Свой сервер</option></select></label>
     </div>
-    <div class="card"><button id="bForget" class="wide">Забыть этот телефон</button></div>
+    <p class="muted small">Тема пульта — та же, что в программе на ПК. Меняется там: «Настройки → Оформление».</p>
+    <button id="bForget" class="wide">Забыть этот телефон</button>
   </section>
 </main>
 
 <nav>
-  <button data-tab="Now" class="on">Сейчас</button>
-  <button data-tab="Queue">Очередь</button>
-  <button data-tab="Links">Ссылки</button>
-  <button data-tab="More">Ещё</button>
+  <button data-tab="Now" class="on"><svg class="ic"><use href="#i-play"/></svg>Сейчас</button>
+  <button data-tab="Queue"><svg class="ic"><use href="#i-note"/></svg>Очередь</button>
+  <button data-tab="Links"><svg class="ic"><use href="#i-link"/></svg>Ссылки</button>
+  <button data-tab="More"><svg class="ic"><use href="#i-gear"/></svg>Ещё</button>
 </nav>
-<div id="toast"></div>
+<div id="toast" role="status"></div>
 <script src="/m/m.js"></script>
 </body>
 </html>

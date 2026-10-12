@@ -33,6 +33,10 @@ test('пульт в браузере телефона: страница откр
     assert.match(page.text, /VRCast/);
     assert.equal((await call('/m/m.js')).status, 200);
     assert.equal((await call('/m/m.css')).status, 200);
+    assert.equal((await call('/m/themes.css')).status, 200, 'цвета тем общие с окном на ПК');
+    // Тема окна на ПК приходит и на телефон; сам телефон тему не меняет.
+    await call('/api/config', { method: 'POST', host: '127.0.0.1', body: { theme: 'terminal' } });
+    assert.equal(JSON.parse((await call('/api/lan-info')).text).theme, 'terminal');
     assert.ok([401, 403].includes((await call('/')).status), 'главная страница программы по сети не открывается');
     assert.ok([401, 403].includes((await call('/app.js')).status));
 

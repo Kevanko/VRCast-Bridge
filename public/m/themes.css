@@ -1,0 +1,90 @@
+/* Цвета тем — общие для окна на ПК и пульта в браузере телефона (/m).
+   Темы переопределяют одни и те же имена, поэтому перекрашивается всё сразу. */
+:root{
+  --bg:#0e0c18;--bar:#110f1f;--side:#120f22;--surface:#17142b;--raise:#1e1a36;--sel:#2a2450;--menu:#1a1630;
+  --edge:#2c2650;--edge-strong:#3d3566;
+  --text:#f4f1ff;--soft:#d8d2f2;--muted:#a8a0cc;--faint:#8a83ad;
+  --accent:#8f6bff;--accent-strong:#b9a3ff;--accent-soft:rgba(143,107,255,.14);--accent-line:rgba(143,107,255,.55);--on-accent:#0e0a1f;
+  --second:#38e1ff;--live:#ff4d6d;--live-text:#ff8098;--ok:#3ee6a3;--ok-text:#8ff0c8;--cue:#ffc15e;--danger:#ff4d6d;
+  --shade:rgba(10,9,19,.72);
+  --sw-night-1:#0e0c18;--sw-night-2:#1e1a36;--sw-night-3:#8f6bff;
+  --sw-broadcast-1:#0f1115;--sw-broadcast-2:#1e222b;--sw-broadcast-3:#4d9fff;
+  --sw-projector-1:#121110;--sw-projector-2:#252321;--sw-projector-3:#ffb547;
+  --glow-a:#8f6bff;--glow-b:#c050ff;--glow-c:#5b3dff;
+  --ease:cubic-bezier(.2,.8,.2,1);
+  --mono:"JetBrains Mono",ui-monospace,monospace;
+}
+:root[data-theme="broadcast"]{
+  --bg:#0f1115;--bar:#11141a;--side:#12151b;--surface:#161920;--raise:#1e222b;--sel:#262c38;--menu:#1a1e27;
+  --edge:#2c313c;--edge-strong:#3b4250;
+  --text:#eef1f6;--soft:#d3d8e2;--muted:#9aa3b2;--faint:#7f8796;
+  --accent:#4d9fff;--accent-strong:#8ec2ff;--accent-soft:rgba(77,159,255,.14);--accent-line:rgba(77,159,255,.55);--on-accent:#06121f;
+  --second:#4d9fff;--live:#ff4757;--live-text:#ff7f8a;--ok:#2fd98a;--ok-text:#86ecbd;--cue:#ffb020;--danger:#ff4757;
+  --shade:rgba(8,10,14,.72);
+  --glow-a:#4d9fff;--glow-b:#2c5dff;--glow-c:#3cc4ff;
+}
+:root[data-theme="projector"]{
+  --bg:#121110;--bar:#151412;--side:#161513;--surface:#1b1a18;--raise:#252321;--sel:#2f2c28;--menu:#22201d;
+  --edge:#3a3733;--edge-strong:#4c4843;
+  --text:#f5f1e8;--soft:#ddd7cb;--muted:#aaa398;--faint:#8f887f;
+  --accent:#ffb547;--accent-strong:#ffd08a;--accent-soft:rgba(255,181,71,.14);--accent-line:rgba(255,181,71,.55);--on-accent:#1a1206;
+  --second:#ffb547;--live:#ff5a4e;--live-text:#ff8a80;--ok:#6ee28f;--ok-text:#a8f0bd;--cue:#ffd166;--danger:#ff5a4e;
+  --shade:rgba(14,12,10,.72);
+  --glow-a:#ffb547;--glow-b:#ff7a3d;--glow-c:#ffd66e;
+}
+:root[data-theme="midnight"]{
+  --bg:#03040a;--bar:#070915;--side:#080a17;--surface:#0b0e1c;--raise:#141a30;--sel:#1c2244;--menu:#0c0f1f;
+  --edge:#1a2042;--edge-strong:#283063;
+  --text:#f3f5ff;--soft:#d9def5;--muted:#9aa3c8;--faint:#6f789c;
+  --accent:#8a5cff;--accent-strong:#bca4ff;--accent-soft:rgba(138,92,255,.15);--accent-line:rgba(138,92,255,.6);--on-accent:#ffffff;
+  --second:#86a8ff;--live:#ff4d6d;--live-text:#ff8aa0;--ok:#4ee0b0;--ok-text:#9cf0d2;--cue:#ffc66b;--danger:#ff4d6d;
+  --shade:rgba(3,4,10,.74);
+  --glow-a:#6a3cff;--glow-b:#2745ff;--glow-c:#2aa5ff;
+  --hair:inset 0 0 0 1px rgba(196,212,255,.09),inset 0 1px 0 rgba(232,238,255,.11);
+  --hair-strong:inset 0 0 0 1px rgba(200,214,255,.16),inset 0 1px 0 rgba(236,240,255,.18);
+  --glass:linear-gradient(180deg,rgba(158,172,255,.065),rgba(158,172,255,.022));
+  --glass-lit:linear-gradient(0deg,rgba(138,92,255,.10),rgba(138,92,255,0) 60%),linear-gradient(180deg,rgba(158,172,255,.07),rgba(158,172,255,.025));
+  --blur:blur(22px) saturate(150%);
+}
+:root[data-theme="minimal"]{
+  --bg:#000;--bar:#000;--side:#000;--surface:#070707;--raise:#141416;--sel:#1c1c1f;--menu:#0a0a0b;
+  --edge:#232326;--edge-strong:#343439;
+  --text:#f5f5f5;--soft:#d4d4d8;--muted:#a1a1aa;--faint:#71717a;
+  --accent:#f5f5f5;--accent-strong:#9281f7;--accent-soft:rgba(146,129,247,.12);--accent-line:rgba(146,129,247,.5);--on-accent:#000;
+  --second:#9281f7;--live:#ff5b6b;--live-text:#ff8a96;--ok:#4ade80;--ok-text:#86efac;--cue:#fbbf24;--danger:#ff5b6b;
+  --shade:rgba(0,0,0,.78);--glow-a:#9281f7;--glow-b:#4b3fb0;--glow-c:#2a2a33;
+  --serif:"Playfair Display",Georgia,serif;
+}
+:root[data-theme="minimal-light"]{
+  --bg:#ffffff;--bar:#ffffff;--side:#fafafa;--surface:#fafafa;--raise:#f1f1f3;--sel:#e9e9ec;--menu:#ffffff;
+  --edge:#e4e4e7;--edge-strong:#d0d0d5;
+  --text:#09090b;--soft:#27272a;--muted:#52525b;--faint:#71717a;
+  --accent:#09090b;--accent-strong:#6d5ae6;--accent-soft:rgba(109,90,230,.09);--accent-line:rgba(109,90,230,.45);--on-accent:#ffffff;
+  --second:#6d5ae6;--live:#e11d48;--live-text:#be123c;--ok:#16a34a;--ok-text:#15803d;--cue:#d97706;--danger:#e11d48;
+  --shade:rgba(255,255,255,.72);--glow-a:#6d5ae6;--glow-b:#c4b8ff;--glow-c:#e4e4e7;
+  --serif:"Playfair Display",Georgia,serif;
+}
+:root[data-theme="stage"]{
+  --bg:#000;--bar:#000;--side:#000;--surface:#060608;--raise:#121216;--sel:#19191f;--menu:#0b0b0e;
+  --edge:#141418;--edge-strong:#24242b;
+  --text:#f4f4f6;--soft:#c9c9d1;--muted:#8e8e99;--faint:#6a6a75;
+  --accent:#7a5cff;--accent-strong:#a995ff;--accent-soft:rgba(122,92,255,.14);--accent-line:rgba(122,92,255,.5);--on-accent:#ffffff;
+  --second:#ffb547;--live:#ff4d6d;--live-text:#ff8098;--ok:#5ee6a8;--ok-text:#9cf0cb;--cue:#ffb547;--danger:#ff4d6d;
+  --shade:rgba(0,0,0,.8);--glow-a:#7a5cff;--glow-b:#ffb547;--glow-c:#3b2a9a;
+}
+:root[data-theme="terminal"]{
+  --bg:#101010;--bar:#101010;--side:#131313;--surface:#171717;--raise:#212121;--sel:#2a2a2a;--menu:#161616;
+  --edge:#272727;--edge-strong:#383838;
+  --text:#eeeeee;--soft:#cfcfcf;--muted:#8f8f8f;--faint:#6b6b6b;
+  --accent:#eeeeee;--accent-strong:#ffffff;--accent-soft:rgba(238,238,238,.07);--accent-line:rgba(238,238,238,.4);--on-accent:#101010;
+  --second:#ff6a1f;--live:#ff6a1f;--live-text:#ff8f55;--ok:#3ddc84;--ok-text:#7ef0b0;--cue:#ff6a1f;--danger:#ff4b3e;
+  --shade:rgba(16,16,16,.8);--glow-a:#ff6a1f;--glow-b:#3ddc84;--glow-c:#333;
+}
+:root[data-theme="matrix"]{
+  --bg:#010a04;--bar:#020d06;--side:#020f07;--surface:#03140a;--raise:#062012;--sel:#0a2e19;--menu:#031409;
+  --edge:#0d3a20;--edge-strong:#145a31;
+  --text:#c9ffd9;--soft:#9cf2b8;--muted:#4fbf77;--faint:#2f8a52;
+  --accent:#00ff6a;--accent-strong:#5dff9c;--accent-soft:rgba(0,255,106,.1);--accent-line:rgba(0,255,106,.5);--on-accent:#001a0b;
+  --second:#00e0ff;--live:#ff2e63;--live-text:#ff6f93;--ok:#00ff6a;--ok-text:#7dffb1;--cue:#e6ff00;--danger:#ff2e63;
+  --shade:rgba(1,10,4,.8);--glow-a:#00ff6a;--glow-b:#00b34a;--glow-c:#00e0ff;
+}

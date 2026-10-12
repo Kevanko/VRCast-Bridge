@@ -6,7 +6,7 @@ try { token = localStorage.getItem(KEY) || ''; } catch {}
 let state = null, receivedAt = 0, seeking = false, abort = null;
 
 const fmt = s => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
-function toast(text, bad) { const t = $('toast'); t.textContent = text; t.style.display = 'block'; t.style.color = bad ? '#ff9b9b' : '#fff'; clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = 'none', 3200); }
+function toast(text, bad) { const t = $('toast'); t.textContent = text; t.style.display = 'block'; t.className = bad ? 'bad' : ''; clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = 'none', 3200); }
 
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, { method, headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(token ? { 'X-VRCast-Token': token } : {}) }, body: body ? JSON.stringify(body) : undefined });
@@ -17,6 +17,18 @@ async function api(path, method = 'GET', body) {
   }
   return data;
 }
+// Тема — та же, что в программе на ПК. Запоминаем, чтобы при следующем открытии не мигала чужая.
+const THEME_COLORS = { midnight: '#03040a', minimal: '#000000', 'minimal-light': '#ffffff', stage: '#000000', terminal: '#101010', matrix: '#010a04', night: '#0e0c18', broadcast: '#0f1115', projector: '#121110' };
+function applyTheme(theme) {
+  if (!THEME_COLORS[theme]) return;
+  const root = document.documentElement;
+  if (theme === 'night') root.removeAttribute('data-theme'); else if (root.dataset.theme !== theme) root.dataset.theme = theme;
+  document.querySelector('meta[name="theme-color"]').setAttribute('content', THEME_COLORS[theme]);
+  try { localStorage.setItem('vrcast-m-theme', theme); } catch {}
+}
+// Заливка дорожки ползунка до бегунка (в WebKit своей нет).
+const fill = el => el.style.setProperty('--fill', (el.value - el.min) / (el.max - el.min) * 100 + '%');
+function setPill(text, cls) { $('pillText').textContent = text; $('pill').className = 'pill ' + (cls || ''); }
 const act = (fn, ok) => async (...a) => { try { const r = await fn(...a); if (ok) toast(ok); return r; } catch (e) { toast(e.message, true); } };
 
 // ── Привязка ──
@@ -50,19 +62,20 @@ function render() {
   if (!state) return;
   const pb = state.playback || {}, p = state.progress || {}, cfg = state.config || {};
   const cur = (state.queue || []).find(q => q.id === state.currentId);
-  $('pill').textContent = !state.running ? 'эфир остановлен' : pb.buffering ? 'буферизация…' : pb.paused ? 'пауза' : 'идёт эфир';
-  $('pill').className = 'pill ' + (state.running ? 'live' : '');
+  applyTheme(cfg.theme);
+  setPill(!state.running ? 'Не в эфире' : pb.buffering ? 'Загружаю…' : pb.paused ? 'Пауза' : 'В эфире', state.running ? 'live' : '');
   $('title').textContent = state.activeKind === 'screen' ? 'Экран компьютера' : cur?.title || (state.queue?.length ? 'Ничего не играет' : 'Очередь пуста');
   $('sub').textContent = cur?.owner ? `у «${cur.owner}»` : '';
   $('cover').style.backgroundImage = cur?.thumbnail ? `url("${cur.thumbnail}")` : '';
-  $('bPlay').textContent = state.running && !pb.paused ? '⏸' : '▶';
+  $('cover').classList.toggle('art', Boolean(cur?.thumbnail));
+  $('playIcon').setAttribute('href', state.running && !pb.paused ? '#i-pause' : '#i-play');
   $('bStart').hidden = state.running; $('bStop').hidden = !state.running;
   const seek = $('seek');
   seek.disabled = !(state.running && pb.canSeek && p.duration > 0);
   if (!seeking) seek.value = p.duration ? Math.round(position() / p.duration * 1000) : 0;
   $('tNow').textContent = fmt(position()); $('tAll').textContent = p.duration ? fmt(p.duration) : '';
   if (document.activeElement !== $('vol')) { $('vol').value = Math.round((cfg.mediaVolume ?? 1) * 100); }
-  $('volText').textContent = $('vol').value + '%';
+  $('volText').textContent = $('vol').value + '%'; fill($('vol')); fill(seek);
   if (document.activeElement !== $('speed')) $('speed').value = String(pb.speed || 1);
   if (document.activeElement !== $('loop')) $('loop').value = pb.loopMode || 'once';
   if (document.activeElement !== $('quality')) $('quality').value = cfg.quality || '720p';
@@ -100,8 +113,8 @@ function renderLinks() {
   if (state.playbackUrl) add('Ссылка для плеера VRChat', state.playbackUrl);
   if (state.tunnel?.url) add('Публичная ссылка', state.tunnel.url);
   const sig = JSON.stringify(urls); if (box.dataset.sig === sig) return; box.dataset.sig = sig; box.textContent = '';
-  if (!urls.length) { box.textContent = 'Ссылка появится, когда начнётся эфир.'; box.className = 'card muted'; return; }
-  box.className = 'card';
+  if (!urls.length) { box.textContent = 'Ссылка появится, когда начнётся эфир.'; box.className = 'muted'; return; }
+  box.className = '';
   for (const [name, url] of urls) {
     const h = document.createElement('div'); h.className = 'muted small'; h.textContent = name;
     const a = document.createElement('div'); a.className = 'link'; a.textContent = url;
@@ -119,10 +132,10 @@ $('bPrev').addEventListener('click', act(() => post('previous')));
 $('bStart').addEventListener('click', act(() => api('/api/start/queue', 'POST', {})));
 $('bStop').addEventListener('click', act(() => api('/api/stop', 'POST', {})));
 $('bScreen').addEventListener('click', act(() => api('/api/start/screen', 'POST', {}), 'Экран ПК в эфире'));
-$('seek').addEventListener('input', () => { seeking = true; $('tNow').textContent = fmt($('seek').value / 1000 * (state?.progress?.duration || 0)); });
+$('seek').addEventListener('input', () => { seeking = true; fill($('seek')); $('tNow').textContent = fmt($('seek').value / 1000 * (state?.progress?.duration || 0)); });
 $('seek').addEventListener('change', act(async () => { const to = $('seek').value / 1000 * (state?.progress?.duration || 0); try { await post('seek', { position: to }); } finally { seeking = false; } }));
 $('vol').addEventListener('change', act(() => post('volume', { volume: $('vol').value / 100 })));
-$('vol').addEventListener('input', () => $('volText').textContent = $('vol').value + '%');
+$('vol').addEventListener('input', () => { $('volText').textContent = $('vol').value + '%'; fill($('vol')); });
 $('speed').addEventListener('change', act(() => post('speed', { speed: Number($('speed').value) })));
 $('loop').addEventListener('change', act(() => post('loop', { mode: $('loop').value })));
 for (const id of ['quality', 'fps', 'output']) $(id).addEventListener('change', act(() => api('/api/config', 'POST', { quality: $('quality').value, fps: Number($('fps').value), outputMode: $('output').value }), 'Сохранено'));
@@ -158,7 +171,7 @@ async function start() {
   abort?.abort(); abort = new AbortController();
   const signal = abort.signal;
   try {
-    const info = await api('/api/lan-info'); $('devName').textContent = info.name || 'VRCast';
+    const info = await api('/api/lan-info'); $('devName').textContent = info.name || 'VRCast'; applyTheme(info.theme);
     const response = await fetch('/api/events', { headers: { ...(token ? { 'X-VRCast-Token': token } : {}), Accept: 'text/event-stream' }, signal });
     if (!response.ok) { const d = await response.json().catch(() => ({})); if (d.code === 'pairing' || d.code === 'pin') return showPair(); throw new Error('нет связи'); }
     $('pair').hidden = true;
@@ -171,7 +184,7 @@ async function start() {
         if (data) { try { state = JSON.parse(data); receivedAt = Date.now(); render(); } catch {} }
       }
     }
-  } catch (err) { if (signal.aborted) return; $('pill').textContent = 'нет связи'; $('pill').className = 'pill bad'; }
+  } catch (err) { if (signal.aborted) return; setPill('Нет связи', 'bad'); }
   if (!signal.aborted) setTimeout(start, 1500);
 }
 setInterval(() => { if (state && !seeking) render(); }, 1000);
