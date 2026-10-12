@@ -982,3 +982,21 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 :root[data-theme="minimal"] :is(.btn.primary,.go-live):hover:not(:disabled){background:#d4d4d8!important;border-color:#d4d4d8!important}
 :root[data-theme="minimal-light"] :is(.btn.primary,.go-live):hover:not(:disabled){background:#3f3f46!important;border-color:#3f3f46!important}
 :root[data-theme="terminal"] :is(.btn.primary,.go-live):hover:not(:disabled){background:#ffffff!important;border-color:#ffffff!important}
+
+/* Светлая панель плеера («Минимализм светлая» и «Терминал»): главная кнопка —
+   сплошная тёмная, время и подписи — тёмные и плотные, рамки кнопок видны. */
+:root[data-theme="minimal-light"] .transport,:root[data-theme="terminal"] .transport{--deck-ink:#0b0b0d}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport .play-button{background:var(--deck-ink);border-color:var(--deck-ink);color:#fff}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport .play-button:hover:not(:disabled){background:#2a2a2e;border-color:#2a2a2e;color:#fff}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport .time{color:var(--deck-ink);font-weight:600}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport .time.total{color:#3f3f46}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.chip-button,.icon-btn){border-color:#b9b9c0;color:var(--deck-ink)}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.chip-button,.icon-btn):hover:not(:disabled){border-color:var(--deck-ink);background:rgba(0,0,0,.05)}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.vol-head,.vol-head output,.now-copy small){color:#3f3f46;opacity:1}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport .deck-volume{color:var(--deck-ink)}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.scrub,.range)::-webkit-slider-runnable-track{background:linear-gradient(90deg,var(--deck-ink) var(--seek,var(--volume,0%)),#cfcfd4 var(--seek,var(--volume,0%)))}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport .range::-webkit-slider-runnable-track{background:linear-gradient(90deg,var(--deck-ink) var(--volume,50%),#cfcfd4 var(--volume,50%))}
+:root:is([data-theme="minimal-light"],[data-theme="terminal"]) .transport :is(.scrub,.range)::-webkit-slider-thumb{background:var(--deck-ink)}
+/* В «Терминале» время — зелёная метрика, но тёмно-зелёная, чтобы читалась на светлом. */
+:root[data-theme="terminal"] .transport .time{color:#08743c}
+:root[data-theme="terminal"] .transport .vol-head output{color:#08743c;font-weight:600}
