@@ -304,7 +304,7 @@
     </footer>
   </div>
 
-  <dialog id="logDialog" aria-labelledby="logTitle"><div class="dialog-head"><b id="logTitle">Журнал</b><button class="btn small" id="copyLogs" type="button" title="Скопировать весь журнал"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg>Скопировать</button><button class="btn small" id="openLogFolder" type="button" title="Открыть папку с журналом"><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg>Папка</button><button class="icon-btn" id="closeLogs" type="button" title="Закрыть" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div><pre id="logs">Запуск…</pre></dialog>
+  <dialog id="logDialog" aria-labelledby="logTitle"><div class="dialog-head"><b id="logTitle">Журнал</b><button class="btn small" id="copyLogs" type="button" title="Скопировать весь журнал"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg>Скопировать</button><button class="btn small" id="openLogFolder" type="button" title="Открыть папку с журналом"><svg class="ic" aria-hidden="true"><use href="#i-folder-plus"/></svg>Папка</button><button class="icon-btn" id="closeLogs" type="button" title="Закрыть" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div><pre id="logs" translate="no">Запуск…</pre></dialog>
 
   <dialog id="serverDialog" aria-labelledby="serverDialogTitle">
     <div class="dialog-head"><b id="serverDialogTitle">Сервер</b><button class="icon-btn" id="serverDialogClose" type="button" aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div>
@@ -368,6 +368,12 @@
 
       <section class="settings-group" id="setLook">
         <h3>Оформление</h3>
+        <div class="setting-row"><span><b>Язык</b><small>«Авто» — как в Windows</small></span>
+          <div class="seg" id="uiLang" role="radiogroup" aria-label="Язык" translate="no">
+            <button type="button" role="radio" aria-checked="true" data-lang="auto">Авто · Auto</button>
+            <button type="button" role="radio" aria-checked="false" data-lang="ru">Русский</button>
+            <button type="button" role="radio" aria-checked="false" data-lang="en">English</button>
+          </div></div>
         <div class="theme-picker" role="radiogroup" aria-label="Тема">
           <button type="button" role="radio" aria-checked="true" data-theme-choice="midnight"><span class="swatch midnight"><i></i><i></i><i></i></span><b>Полночь</b></button>
           <button type="button" role="radio" aria-checked="false" data-theme-choice="minimal"><span class="swatch minimal"><i></i><i></i><i></i></span><b>Минимализм</b></button>
@@ -524,6 +530,8 @@
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/vendor/hls.min.js?v=0.29.0"></script>
   <script src="/vendor/qrcode.js"></script>
+  <script src="/m/en.js?v=0.60.0"></script>
+  <script src="/m/i18n.js?v=0.60.0"></script>
   <script type="module" src="/app.js?v=0.60.0"></script>
 </body>
 </html>

@@ -541,7 +541,7 @@ function renderTemplates(state) {
   if($('#templateList').querySelector('.t-name input'))return;
   const html=templates.length?templates.map(item=>{const открыт=текущий?.id===item.id;return `<div class="template-row${открыт?' current':''}" data-template="${escapeHtml(item.id)}">`
     +`<span class="t-cover">${item.cover?`<img src="${escapeHtml(item.cover)}" alt="" loading="lazy" decoding="async" onerror="this.remove()">`:''}${icon('log')}</span>`
-    +`<span class="t-name"><span class="t-title"><b title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</b><button class="icon-btn t-rename" type="button" data-t="rename" title="Переименовать" aria-label="Переименовать список">${icon('pencil')}</button></span><small>${штук(Number(item.count)||0,['ролик','ролика','роликов'])}${открыт?(текущий.dirty?' · открыт, есть изменения':' · открыт'):''}</small></span>`
+    +`<span class="t-name"><span class="t-title"><b translate="no" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</b><button class="icon-btn t-rename" type="button" data-t="rename" title="Переименовать" aria-label="Переименовать список">${icon('pencil')}</button></span><small>${штук(Number(item.count)||0,['ролик','ролика','роликов'])}${открыт?(текущий.dirty?' · открыт, есть изменения':' · открыт'):''}</small></span>`
     +`<span class="t-actions">${открыт?`<button class="btn small" type="button" disabled title="Этот список уже открыт в очереди">${icon('check')}Открыто</button>`:`<button class="btn small primary" type="button" data-t="open" title="Заменить текущую очередь этим списком">${icon('play')}Открыть</button>`}`
     +`<button class="btn small" type="button" data-t="append" title="Добавить ролики списка в конец текущей очереди">${icon('plus')}В конец</button>`
     +`<button class="btn small" type="button" data-t="update" title="Заменить содержимое этого списка текущей очередью">${icon('refresh')}Перезаписать</button>`
@@ -599,7 +599,7 @@ function queueRowHtml(item,index,state,{готовые,качаются,unityВ�
     +`<span class="q-grip" aria-hidden="true">${icon('grip')}</span>`
     // При наведении поверх превью — кнопка «играть»: сразу видно, что клик включит ролик.
     +`<span class="queue-art">${item.thumbnail?`<img src="${escapeHtml(item.thumbnail)}" alt="" loading="lazy" decoding="async" onerror="this.remove()">`:icon('note')}${длина?`<span class="q-dur">${длина}</span>`:''}${играет?'':`<span class="q-play">${icon('play')}</span>`}</span>`
-    +`<span class="queue-title"><b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small><span>${escapeHtml(источник(item))}</span><i></i>${метка}</small></span></button>`
+    +`<span class="queue-title"><b translate="no" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b><small><span>${escapeHtml(источник(item))}</span><i></i>${метка}</small></span></button>`
     +`<button type="button" class="remove-item" aria-label="Убрать из очереди" title="Убрать из очереди">${icon('close')}</button></div>`;
 }
 // Пустая очередь — приглашение, а не пустота: куда перетащить и что можно вставить.
@@ -2137,6 +2137,16 @@ function синхронВида(config){
   if(шрифт!==(document.documentElement.dataset.font||'')){ применитьШрифт(шрифт); положить('ui-font',шрифт); }
   if(масштаб!==(Number(getComputedStyle(document.documentElement).getPropertyValue('--ui-scale'))||1)){ применитьМасштаб(масштаб); положить('ui-scale',масштаб); }
 }
+// Язык: «Авто» — по Windows. Выбор хранится в окне и в настройках (для пульта телефона).
+function рисоватьЯзык(){ const выбор=window.vrcastLang?.choice||'auto'; for(const кнопка of $$('[data-lang]'))кнопка.setAttribute('aria-checked',String(кнопка.dataset.lang===выбор)); }
+рисоватьЯзык();
+$('#uiLang').addEventListener('click',event=>{
+  const кнопка=event.target.closest('[data-lang]'); if(!кнопка)return;
+  сохранитьВид({uiLang:кнопка.dataset.lang});
+  // Перезагрузка — только после того, как настройка ушла на сервер.
+  setTimeout(()=>window.vrcastLang?.set(кнопка.dataset.lang),250);
+  рисоватьЯзык();
+});
 $('.font-picker').addEventListener('click',event=>{
   const кнопка=event.target.closest('[data-font-choice]'); if(!кнопка)return;
   применитьШрифт(кнопка.dataset.fontChoice); положить('ui-font',кнопка.dataset.fontChoice);

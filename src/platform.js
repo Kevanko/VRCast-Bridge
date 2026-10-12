@@ -26,22 +26,27 @@ export function which(name, pathValue = process.env.PATH || '') {
 
 const ARM = arch() === 'arm64';
 
-// Откуда докачивать утилиты, если их нет ни рядом, ни в системе.
+// Откуда докачивать утилиты, если их нет ни рядом, ни в системе. Только прямые
+// ссылки: запросы к API GitHub упираются в его лимит (60 в час на адрес), и на
+// общих адресах (CI, провайдер, VPN) MediaMTX и FFmpeg не скачивались вовсе.
+// MediaMTX — закреплённая версия, та же, что ставит server/install.sh.
+const MEDIAMTX = 'https://github.com/bluenviron/mediamtx/releases/download/v1.20.1/mediamtx_v1.20.1';
+const FFMPEG = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest';
 export function toolSources() {
   if (IS_WIN) return {
     'yt-dlp.exe': { label: 'загрузчик видео', url: 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' },
     'cloudflared.exe': { label: 'публичные ссылки', url: 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' },
-    'mediamtx.exe': { label: 'мгновенный канал', github: 'bluenviron/mediamtx', asset: /windows_amd64\.zip$/i, unpack: ['mediamtx.exe'] },
+    'mediamtx.exe': { label: 'мгновенный канал', url: `${MEDIAMTX}_windows_amd64.zip`, unpack: ['mediamtx.exe'] },
     // ffmpeg тянем с GitHub, а не с gyan.dev: за VPN gyan отдаёт свои 100+ МБ по
     // 0.2 МБ/с (минуты и таймаут), а GitHub-зеркало — 8 МБ/с. Нужна сборка gpl:
     // в ней есть libx264, на который откатывается кодирование на процессоре.
-    'ffmpeg.exe': { label: 'кодировщик', github: 'BtbN/FFmpeg-Builds', tag: 'latest', asset: /win64-gpl\.zip$/i, unpack: ['ffmpeg.exe', 'ffprobe.exe'] },
+    'ffmpeg.exe': { label: 'кодировщик', url: `${FFMPEG}-win64-gpl.zip`, unpack: ['ffmpeg.exe', 'ffprobe.exe'] },
   };
   return {
     'yt-dlp': { label: 'загрузчик видео', url: `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux${ARM ? '_aarch64' : ''}` },
     'cloudflared': { label: 'публичные ссылки', url: `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARM ? 'arm64' : 'amd64'}` },
-    'mediamtx': { label: 'мгновенный канал', github: 'bluenviron/mediamtx', asset: ARM ? /linux_arm64\.tar\.gz$/i : /linux_amd64\.tar\.gz$/i, unpack: ['mediamtx'] },
-    'ffmpeg': { label: 'кодировщик', github: 'BtbN/FFmpeg-Builds', tag: 'latest', asset: ARM ? /linuxarm64-gpl\.tar\.xz$/i : /linux64-gpl\.tar\.xz$/i, unpack: ['ffmpeg', 'ffprobe'] },
+    'mediamtx': { label: 'мгновенный канал', url: `${MEDIAMTX}_linux_${ARM ? 'arm64' : 'amd64'}.tar.gz`, unpack: ['mediamtx'] },
+    'ffmpeg': { label: 'кодировщик', url: `${FFMPEG}-${ARM ? 'linuxarm64' : 'linux64'}-gpl.tar.xz`, unpack: ['ffmpeg', 'ffprobe'] },
   };
 }
 

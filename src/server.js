@@ -7397,6 +7397,7 @@ const server = http.createServer(async (req, res) => {
         mediaFps: body.mediaFps === 60 ? 60 : (body.mediaFps === 30 ? 30 : (config.mediaFps || 30)),
         // Тема окна — её же берёт пульт в браузере телефона.
         theme: /^[a-z-]{1,24}$/.test(body.theme || '') ? body.theme : (config.theme || ''),
+        uiLang: ['auto', 'ru', 'en'].includes(body.uiLang) ? body.uiLang : (config.uiLang || 'auto'),
         uiFont: ['', 'unbounded', 'exo', 'rubik', 'comfortaa', 'serif', 'lora', 'mono', 'pixel'].includes(body.uiFont) ? body.uiFont : (config.uiFont || ''),
         uiScale: [0.9, 1, 1.1, 1.2].includes(Number(body.uiScale)) ? Number(body.uiScale) : (Number(config.uiScale) || 1),
       };
@@ -7615,7 +7616,7 @@ const server = http.createServer(async (req, res) => {
         // Метка = версия + время изменения файлов: при одинаковой версии
         // WebView брал из кеша старые app.js и styles.css, и новый интерфейс
         // не появлялся после обновления.
-        const метка = `${APP_VERSION}-${['app.js', 'styles.css', 'm/themes.css'].map(name => { try { return Math.round(statSync(join(PUBLIC_DIR, name)).mtimeMs).toString(36); } catch { return '0'; } }).join('')}`;
+        const метка = `${APP_VERSION}-${['app.js', 'styles.css', 'm/themes.css', 'm/en.js', 'm/i18n.js'].map(name => { try { return Math.round(statSync(join(PUBLIC_DIR, name)).mtimeMs).toString(36); } catch { return '0'; } }).join('')}`;
         const html = readFileSync(join(PUBLIC_DIR, 'index.html'), 'utf8').replace(/\?v=[0-9.]+/g, `?v=${метка}`);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(html);

@@ -63,6 +63,8 @@ function render() {
   const pb = state.playback || {}, p = state.progress || {}, cfg = state.config || {};
   const cur = (state.queue || []).find(q => q.id === state.currentId);
   applyTheme(cfg.theme);
+  // Язык пульта — как выбран в программе на ПК (по умолчанию — язык телефона).
+  if (cfg.uiLang && window.vrcastLang && cfg.uiLang !== window.vrcastLang.choice) window.vrcastLang.set(cfg.uiLang);
   const font = cfg.uiFont || '';
   if ((document.documentElement.dataset.font || '') !== font) { if (font) document.documentElement.dataset.font = font; else delete document.documentElement.dataset.font; try { localStorage.setItem('vrcast-m-font', font); } catch {} }
   setPill(!state.running ? 'Не в эфире' : pb.buffering ? 'Загружаю…' : pb.paused ? 'Пауза' : 'В эфире', state.running ? 'live' : '');
