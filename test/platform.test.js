@@ -137,6 +137,8 @@ test('exe, which и источники утилит', { skip: !IS_LINUX && 'то
   assert.equal(which('faketool', `/nonexistent:${directory}`), tool);
   const sources = toolSources();
   assert.deepEqual(Object.keys(sources).sort(), ['cloudflared', 'ffmpeg', 'mediamtx', 'yt-dlp']);
-  assert.ok(sources.mediamtx.asset.test(`mediamtx_v1.9.0_linux_${process.arch === 'arm64' ? 'arm64' : 'amd64'}.tar.gz`));
+  // Только прямые ссылки: API GitHub упирается в лимит запросов на общих адресах.
+  for (const source of Object.values(sources)) assert.ok(source.url?.startsWith('https://github.com/') && !source.github, JSON.stringify(source));
+  assert.match(sources.mediamtx.url, new RegExp(`mediamtx_v[\\d.]+_linux_${process.arch === 'arm64' ? 'arm64' : 'amd64'}\\.tar\\.gz$`));
   assert.deepEqual(sources.ffmpeg.unpack, ['ffmpeg', 'ffprobe']);
 });
