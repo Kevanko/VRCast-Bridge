@@ -19,7 +19,7 @@ import { hideMemberSource, sanitizeContribution, sharedQueueItem, sharedServer, 
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
 // VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
-const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.61.5';
+const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.61.6';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -377,13 +377,22 @@ function spawnCollect(command, args, timeout = 10000, options = {}) {
   });
 }
 
-function encoderWorks(name) {
+// AMD: без -forced_idr кодировщик выдаёт обычные I-кадры, а IDR — только в
+// самом начале потока. HLS режет сегменты по ключевым кадрам и вставал («поток
+// встал» каждые 45 с), а картинка после любой потери оставалась зелёной до
+// конца эфира — фото и журнал друга, 14.10.2026. -header_spacing повторяет
+// SPS/PPS у каждого ключевого кадра: без них не начнёт и зритель, зашедший позже.
+// Параметры есть с FFmpeg 7.0; на старой сборке без них (проба ниже).
+let amfIdr = false;
+const amfIdrArgs = keyframes => (amfIdr ? ['-forced_idr', '1', '-header_spacing', String(keyframes)] : []);
+
+function encoderWorks(name, extra = []) {
   // Наличие ffmpeg уже известно из tools: раньше на каждый вариант кодировщика
   // запускался ещё и «ffmpeg -version» — три лишних синхронных запуска на старте.
   if (!tools.ffmpeg) return false;
   // format=nv12 обязателен для Intel QuickSync и не мешает остальным: без
   // него проба QSV падает даже там, где кодировщик есть.
-  const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=s=640x360:d=0.1', '-frames:v', '1', '-vf', 'format=nv12', '-c:v', name, '-f', 'null', '-'], {
+  const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=s=640x360:d=0.1', '-frames:v', '1', '-vf', 'format=nv12', '-c:v', name, ...extra, '-f', 'null', '-'], {
     windowsHide: true, encoding: 'utf8', timeout: 10000,
   });
   return !result.error && result.status === 0;
@@ -452,7 +461,8 @@ function detectHardwareEncoder() {
   ];
   hardwareEncoder = null;
   for (const вариант of варианты) {
-    if (encoderWorks(вариант.name)) { hardwareEncoder = { ...вариант, hardware: true }; break; }
+    if (вариант.family === 'amf' && encoderWorks(вариант.name, ['-forced_idr', '1', '-header_spacing', '15'])) amfIdr = true;
+    if (amfIdr || encoderWorks(вариант.name)) { hardwareEncoder = { ...вариант, hardware: true }; break; }
   }
   return hardwareEncoder;
 }
@@ -2166,7 +2176,7 @@ async function ensureTools() {
     addToolDirToPath();
     await refreshToolsAsync();
     if (tools.mediamtx && !mediaMtxProcess) startMediaMtx();
-    if (tools.ffmpeg && !relayProcess) { try { ensureRelay(streamProfile('queue')); } catch {} }
+    if (tools.ffmpeg && !relayProcess) { try { ensureRelay(профильКанала()); } catch {} }
   };
   await Promise.all(важное.map(name => downloadTool(name)));
   if (важное.length) await поднять();
@@ -2685,7 +2695,7 @@ function autoReduceQuality(state) {
   отставаний = 0;
   последнееСнижение = Date.now();
   log(`Поток не успевает — снижаю нагрузку: ${подпись} (до конца эфира, настройки не меняются)`);
-  try { restartRelaySession(streamProfile(activeKind)); } catch (error) { log(`Снижение качества: ${error.message}`); }
+  try { restartRelaySession(профильКанала()); } catch (error) { log(`Снижение качества: ${error.message}`); }
 }
 
 // Раз в 30 с во время эфира — состояние всего тракта в подробный журнал. По
@@ -2708,10 +2718,11 @@ function загрузкаПроцессора() {
 function снимокЭфира(state) {
   if (!activeKind || Date.now() - последнийСнимок < 30000) return;
   последнийСнимок = Date.now();
+  queueMicrotask(() => { ключевыхКадров = 0; });
   const p = streamProfile(activeKind), цп = загрузкаПроцессора();
   logDetail(`[состояние] ${activeKind}${queuePaused ? ' (пауза)' : ''} · ${p.quality}/${p.fps} ${bitrateKbps(p)} кбит/с · ${encoder.label}`
     + ` · сегмент ${Number(state.segmentAge || 0).toFixed(1)} с, темп ${Number(state.realtimeRatio || 0).toFixed(2)}`
-    + ` · продюсер молчит ${((Date.now() - последниеДанныеПродюсера) / 1000).toFixed(1)} с · релей ${relayProcess ? `очередь ${relayProcess.stdin?.writableLength || 0} Б` : 'нет'}`
+    + ` · продюсер молчит ${((Date.now() - последниеДанныеПродюсера) / 1000).toFixed(1)} с · ключевых кадров ${ключевыхКадров}${encoder.family === 'amf' ? ` (IDR AMD ${amfIdr ? 'включены' : 'не поддерживаются этим FFmpeg'})` : ''} · релей ${relayProcess ? `очередь ${relayProcess.stdin?.writableLength || 0} Б` : 'нет'}`
     + ` · вывод ${config.outputMode}${config.outputMode === 'remote' ? ` (сервер ${remoteChannelLive ? 'принимает' : 'не принимает'}, хвост ${remoteBacklogSec.toFixed(1)} с, бюджет ${remoteBudgetKbps || '—'}, канал ${remoteCapacityKbps || '—'} кбит/с)` : ''}`
     + `${config.outputMode === 'tunnel' ? ` (${tunnelProvider || 'ссылки нет'}, ${tunnelServes ? 'отдаёт' : 'не отдаёт'})` : ''}`
     + ` · процессор ${цп ?? '?'}% · память свободно ${(freemem() / 1024 ** 3).toFixed(1)} ГБ · программа ${Math.round(process.memoryUsage().rss / 1024 ** 2)} МБ`);
@@ -2752,7 +2763,7 @@ function watchStalledStream(state) {
     зависанийПодряд = 0;
     log(`${encoder.label} перестаёт выдавать кадры раз за разом — до конца эфира декодирую и кодирую процессором`);
     encoder = CPU_ENCODER; безВидеокарты = true;
-    try { restartRelaySession(streamProfile(activeKind)); } catch (error) { log(`Переход на процессор: ${error.message}`); }
+    try { restartRelaySession(профильКанала()); } catch (error) { log(`Переход на процессор: ${error.message}`); }
     return;
   }
   try {
@@ -2863,6 +2874,20 @@ function streamProfile(kind = activeKind) {
   return { ...profile, encoderMode: config.encoderMode || 'auto', bitrateKbps: configuredBitrateKbps(profile) };
 }
 
+// Формат канала один на всё время работы программы: заставку смотрят заранее
+// (ссылку вставляют в VRChat до эфира), и перезапуск канала в другом разрешении
+// при старте эфира оставлял уже подключённого зрителя с мёртвым потоком —
+// замер 14.10.2026: 0 кадров после старта захвата 1080p на заставке 720p, в
+// VRChat зелёная или замершая картинка. Поэтому канал всегда идёт в большем из
+// качеств «Экран» и «Видео» (и с большей частотой кадров), а источник
+// подгоняется под него.
+function профильКанала() {
+  const видео = streamProfile('queue'), экран = streamProfile('screen');
+  const выше = profileHeight(экран) > profileHeight(видео) ? экран : видео;
+  const профиль = { ...выше, fps: Math.max(видео.fps, экран.fps) };
+  return { ...профиль, bitrateKbps: configuredBitrateKbps(профиль) };
+}
+
 // Один сеанс релея = один формат кадра. Любая смена разрешения/fps/SAR/каналов
 // внутри живого TS заставляет декодер AVPro переинициализироваться — плеер в
 // VRChat ломается до resync. Пока релей жив, все производители обязаны выдавать
@@ -2915,7 +2940,7 @@ function restartRelaySession(profile) {
 function reanchorRelay(keepPushers = false) {
   const вид = activeKind;
   const позиция = вид === 'queue' ? currentSourcePosition() : 0;
-  const profile = streamProfile(вид);
+  const profile = профильКанала();
   stopStandby();
   if (!keepPushers) stopRtspPush();
   const relay = relayProcess;
@@ -2982,7 +3007,7 @@ function videoEncodeArgs(profile = streamProfile()) {
   if (encoder.family === 'nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p2', '-tune', 'll', '-rc', 'cbr',
     '-b:v', rate, '-maxrate', rate, '-bufsize', rate, ...gop, '-bf', '0', '-spatial-aq', '1', '-pix_fmt', 'yuv420p'];
   if (encoder.family === 'amf') return ['-c:v', 'h264_amf', '-usage', 'lowlatency', '-rc', 'cbr',
-    '-b:v', rate, '-maxrate', rate, ...gop, '-bf', '0', '-pix_fmt', 'yuv420p'];
+    '-b:v', rate, '-maxrate', rate, ...gop, ...amfIdrArgs(keyframes), '-bf', '0', '-pix_fmt', 'yuv420p'];
   if (encoder.family === 'qsv') return ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-b:v', rate,
     '-maxrate', rate, '-bufsize', rate, ...gop, '-bf', '0', '-async_depth', '1', '-pix_fmt', 'nv12'];
   return ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-pix_fmt', 'yuv420p',
@@ -3024,7 +3049,7 @@ function producerEncodeArgs(profile = streamProfile()) {
   if (encoder.family === 'nvenc') return ['-c:v', 'h264_nvenc', '-preset', 'p3', '-tune', 'll',
     ...proff, ...rateControlArgs(rate), '-rc-lookahead', '0', ...gop, '-bf', '0', '-pix_fmt', 'yuv420p'];
   if (encoder.family === 'amf') return ['-c:v', 'h264_amf', '-usage', 'lowlatency', '-quality', 'speed',
-    ...proff, '-rc', 'cbr', '-b:v', rate, '-maxrate', rate, ...gop, '-bf', '0', '-pix_fmt', 'yuv420p'];
+    ...proff, '-rc', 'cbr', '-b:v', rate, '-maxrate', rate, ...gop, ...amfIdrArgs(keyframes), '-bf', '0', '-pix_fmt', 'yuv420p'];
   if (encoder.family === 'qsv') return ['-c:v', 'h264_qsv', '-preset', 'veryfast',
     ...proff, '-b:v', rate, '-maxrate', rate, '-bufsize', rate, ...gop, '-bf', '0', '-async_depth', '1', '-pix_fmt', 'nv12'];
   // На слабой машине даже veryfast не успевает: тогда переходим на ultrafast,
@@ -3561,7 +3586,7 @@ async function startScreenInner() {
     if (поколение !== playGeneration || shuttingDown) throw Object.assign(new Error('Запуск захвата отменён.'), { cancelled: true });
   };
   currentId = null; currentStartedAt = null; currentDuration = null;
-  const desired = streamProfile('screen');
+  const desired = профильКанала();
   if (relayProcess && !sameProfile(relayProfile, desired) && !wasLive) restartRelaySession(desired);
   ensureRelay(desired);
   const profile = sessionProfile('screen');
@@ -4259,6 +4284,9 @@ function isVideoKeyframePacket(data, offset) {
     && (data[payload + 3] & 0xf0) === 0xe0;                                  // поток видео
 }
 
+// Ключевые кадры в потоке (по локальному каналу) — в снимок состояния раз в
+// 30 с. Ноль — значит кодировщик их не даёт, и картинка после сбоя не соберётся.
+let ключевыхКадров = 0;
 function writeRemote(pusher, chunk, секунда, свой = true) {
   let gate = remoteGates.get(pusher);
   if (!gate) remoteGates.set(pusher, gate = { rest: Buffer.alloc(0), dropping: false });
@@ -4277,6 +4305,7 @@ function writeRemote(pusher, chunk, секунда, свой = true) {
     if (свой) remoteCongested();
   }
   if (свой) measureRemoteDrain(sink, 0);
+  if (!свой) for (let o = 0; o + 188 <= data.length; o += 188) if (isVideoKeyframePacket(data, o)) ключевыхКадров++;
   if (gate.dropping) {
     if (sink.writableLength > секунда * 0.3) return;
     let offset = 0;
@@ -4602,7 +4631,7 @@ function scheduleRelayRecovery() {
       if (activeKind) reanchorRelay(true);
       // Заставка, пережившая релей, писала в его мёртвый stdin, а новому
       // релею startStandby её не давал («уже идёт») — канал вставал пустым.
-      else { stopStandby(); ensureRelay(streamProfile('queue')); }
+      else { stopStandby(); ensureRelay(профильКанала()); }
     } catch (error) { log(`Восстановление канала: ${error.message}`); }
   }, Math.min(10000, 800 * relayFailures));
   relayRecoveryTimer.unref?.();
@@ -4825,7 +4854,7 @@ function startQueue(initialIndex = 0) {
   playbackRevision++;
   playGeneration++;
   try {
-    const desired = streamProfile('queue');
+    const desired = профильКанала();
     // Смена источника посреди эфира перенимает формат сессии (ноль разрывов);
     // профиль применяется только при старте из простоя.
     if (relayProcess && !sameProfile(relayProfile, desired) && !wasLive) restartRelaySession(desired);
@@ -7996,7 +8025,7 @@ server.listen(PORT, слушаемАдрес, () => {
   // вышедшую позже версию она бы так и не увидела.
   setInterval(() => { if (!updateState.available) checkForUpdate(); }, 6 * 3600 * 1000).unref();
   if (tools.mediamtx) { startMediaMtx(); log(`Мгновенный канал RTSP: rtspt://127.0.0.1:${RTSP_PORT}/live`); }
-  if (tools.ffmpeg) ensureRelay(streamProfile('queue'));
+  if (tools.ffmpeg) ensureRelay(профильКанала());
   if (config.outputMode === 'tunnel') setTimeout(startPublicTunnel, 250);
 });
 server.on('error', error => {
