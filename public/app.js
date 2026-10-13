@@ -1971,6 +1971,11 @@ document.addEventListener('click',event=>{
 });
 document.addEventListener('keydown',event=>{ if(event.key==='Escape'){ togglePlayerMenu(false); openAudienceMenu(false); openTemplateMenu(false); } });
 
+// Один файл для помощи: программа открывает папку с ним — остаётся отправить.
+$('#saveReport').addEventListener('click',async()=>{
+  try{await api('/api/report',{method:'POST'});toast('Отчёт сохранён: vrcast-report.txt — отправьте этот файл');}
+  catch(error){toast(error.message,true);}
+});
 $('#copyLogs').addEventListener('click',async()=>{
   const text=$('#logs').textContent||'';
   const ok=await copyText(text);

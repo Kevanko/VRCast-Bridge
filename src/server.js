@@ -19,7 +19,7 @@ import { hideMemberSource, sanitizeContribution, sharedQueueItem, sharedServer, 
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
 // VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
-const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.61.3';
+const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.61.4';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -334,13 +334,24 @@ function setChildPriority(child, priority) {
   if (child?.pid) { try { setPriority(child.pid, priority); } catch {} }
   return child;
 }
-const onAir = child => setChildPriority(child, ПРИОРИТЕТ_ЭФИРА);
+// Каждый процесс эфира (продюсер, релей, пушеры, туннели) — в подробный журнал:
+// чем запущен и чем кончился. Без этого по журналу не понять, кто встал первым.
+// Пароли в адресах прячет logDetail.
+function следитьЗаПроцессом(child) {
+  if (!child?.pid || child.следим) return child;
+  child.следим = true;
+  const начало = Date.now(), имя = basename(String(child.spawnfile || '?'));
+  logDetail(`[процесс ${child.pid}] ${имя} ${(child.spawnargs || []).slice(1).join(' ').slice(0, 1500)}`);
+  child.once('exit', (code, signal) => logDetail(`[процесс ${child.pid}] ${имя} завершился: код ${code ?? '—'}${signal ? `, сигнал ${signal}` : ''}, работал ${((Date.now() - начало) / 1000).toFixed(1)} с`));
+  return child;
+}
+const onAir = child => setChildPriority(следитьЗаПроцессом(child), ПРИОРИТЕТ_ЭФИРА);
 const inBackground = child => setChildPriority(child, ПРИОРИТЕТ_ФОНА);
 // Продюсеры кодируют видео. На видеокарте процессор им почти не нужен, и
 // ступень выше обычного лишь страхует темп. А libx264 занимает ядра целиком:
 // с приоритетом выше обычного он вытеснял бы саму игру. Поэтому кодирование
 // на процессоре идёт с обычным приоритетом и на половине ядер (см. X264_THREADS).
-const onAirProducer = child => setChildPriority(child,
+const onAirProducer = child => setChildPriority(следитьЗаПроцессом(child),
   encoder.hardware ? ПРИОРИТЕТ_ЭФИРА : osConstants.priority.PRIORITY_NORMAL);
 
 try { setPriority(process.pid, ПРИОРИТЕТ_ЭФИРА); } catch {}
@@ -448,7 +459,7 @@ function detectHardwareEncoder() {
 // Сведения о системе — в начало журнала каждого запуска. Без них по журналу
 // друга не понять, на чём он: видеокарта и её драйвер, Windows, VPN, обход
 // блокировок. Пароли, ключи и адреса серверов сюда не попадают.
-async function записатьСистему() {
+async function сведенияОСистеме() {
   const гб = байты => (байты / 1024 ** 3).toFixed(1);
   const ядра = cpus();
   const строки = [
@@ -472,7 +483,33 @@ async function записатьСистему() {
   строки.push(`Сеть: VPN ${vpnInterface || 'нет'} · карта для потока ${выбраннаяКарта() || 'как в системе'} · обход блокировок ${обход || 'не найден'}`);
   строки.push(`Карты: ${сетевыеКарты().map(карта => `${карта.name}${карта.vpn ? ' (VPN)' : ''}`).join(', ') || 'нет'}`);
   строки.push(`Настройки: вывод ${config.outputMode} · видео ${config.mediaQuality || '720p'}/${config.mediaFps || 30} · экран ${config.quality}/${config.fps} · битрейт ${config.videoBitrate || 'авто'} · ссылка ${config.tunnelProvider || 'auto'} · своих серверов ${allServers().length}`);
-  for (const строка of строки) logDetail(строка);
+  return строки;
+}
+async function записатьСистему() {
+  for (const строка of await сведенияОСистеме()) logDetail(строка);
+}
+
+// «Отчёт для помощи»: один файл, который человек отправляет, когда что-то не
+// работает. Сведения о системе на сейчас, состояние эфира и ссылки, события
+// качества и хвосты обоих журналов. Пароли и ключи в журналы не попадают.
+async function собратьОтчёт() {
+  const хвост = (файл, строк) => { try { return readFileSync(файл, 'utf8').split(/\r?\n/).slice(-строк).join('\n'); } catch { return '(нет файла)'; } };
+  const s = status();
+  const части = [
+    `Отчёт VRCast Bridge ${APP_VERSION} · ${new Date().toISOString()}`,
+    '', '== Система', ...(await сведенияОСистеме()),
+    '', '== Сейчас',
+    `эфир: ${activeKind || 'нет'}${queuePaused ? ' (пауза)' : ''} · вывод ${config.outputMode} · кодировщик ${encoder.label} · готово ${s.linkReady ? 'да' : 'нет'}`,
+    `ссылка: ${JSON.stringify({ state: tunnelState, provider: tunnelProvider, serves: tunnelServes, error: tunnelError, options: ссылкиПула() })}`,
+    `свой сервер: принимает ${remoteChannelLive} · достижим ${remoteReachable} · хвост ${remoteBacklogSec.toFixed(1)} с · канал ${remoteCapacityKbps || '—'} кбит/с`,
+    `HLS: ${JSON.stringify(hlsHealth)}`,
+    '', '== События эфира', ...streamEvents.map(событие => JSON.stringify(событие)),
+    '', '== Журнал (vrcast.log, последние 400 строк)', хвост(LOG_FILE, 400),
+    '', '== Подробный журнал (vrcast-errors.log, последние 2000 строк)', хвост(DETAIL_LOG_FILE, 2000),
+  ];
+  const файл = join(DATA_DIR, 'vrcast-report.txt');
+  writeFileSync(файл, скрытьПароли(части.join('\n')), 'utf8');
+  return файл;
 }
 
 // Режим выбора: auto — видеокарта, если есть, иначе процессор; gpu — только
@@ -2514,6 +2551,7 @@ async function inspectHlsHealth() {
     hlsHealth.ready = uris.length >= 3 && segmentAge < 4 && (hlsHealth.realtimeRatio === 0 || hlsHealth.realtimeRatio >= 0.72);
     if (hlsHealth.ready) streamWasReady = true;
     trackStreamQuality(segmentAge);
+    снимокЭфира(hlsHealth);
     autoReduceQuality(hlsHealth);
     watchStalledStream(hlsHealth);
   } catch {
@@ -2649,6 +2687,35 @@ function autoReduceQuality(state) {
   try { restartRelaySession(streamProfile(activeKind)); } catch (error) { log(`Снижение качества: ${error.message}`); }
 }
 
+// Раз в 30 с во время эфира — состояние всего тракта в подробный журнал. По
+// таким строкам видно, что деградировало первым: источник, кодировщик, релей,
+// канал до сервера или сам компьютер (процессор, память).
+let последнийСнимок = 0, прошлыеЯдра = null;
+function загрузкаПроцессора() {
+  const сейчас = cpus().map(ядро => ядро.times), было = прошлыеЯдра;
+  прошлыеЯдра = сейчас;
+  if (!было) return null;
+  let занято = 0, всего = 0;
+  сейчас.forEach((t, i) => {
+    const b = было[i]; if (!b) return;
+    const d = k => t[k] - b[k];
+    const сумма = d('user') + d('nice') + d('sys') + d('idle') + d('irq');
+    всего += сумма; занято += сумма - d('idle');
+  });
+  return всего ? Math.round(занято / всего * 100) : null;
+}
+function снимокЭфира(state) {
+  if (!activeKind || Date.now() - последнийСнимок < 30000) return;
+  последнийСнимок = Date.now();
+  const p = streamProfile(activeKind), цп = загрузкаПроцессора();
+  logDetail(`[состояние] ${activeKind}${queuePaused ? ' (пауза)' : ''} · ${p.quality}/${p.fps} ${bitrateKbps(p)} кбит/с · ${encoder.label}`
+    + ` · сегмент ${Number(state.segmentAge || 0).toFixed(1)} с, темп ${Number(state.realtimeRatio || 0).toFixed(2)}`
+    + ` · продюсер молчит ${((Date.now() - последниеДанныеПродюсера) / 1000).toFixed(1)} с · релей ${relayProcess ? `очередь ${relayProcess.stdin?.writableLength || 0} Б` : 'нет'}`
+    + ` · вывод ${config.outputMode}${config.outputMode === 'remote' ? ` (сервер ${remoteChannelLive ? 'принимает' : 'не принимает'}, хвост ${remoteBacklogSec.toFixed(1)} с, бюджет ${remoteBudgetKbps || '—'}, канал ${remoteCapacityKbps || '—'} кбит/с)` : ''}`
+    + `${config.outputMode === 'tunnel' ? ` (${tunnelProvider || 'ссылки нет'}, ${tunnelServes ? 'отдаёт' : 'не отдаёт'})` : ''}`
+    + ` · процессор ${цп ?? '?'}% · память свободно ${(freemem() / 1024 ** 3).toFixed(1)} ГБ · программа ${Math.round(process.memoryUsage().rss / 1024 ** 2)} МБ`);
+}
+
 // Если сегменты перестали появляться совсем, никакое снижение качества уже не
 // поможет: перезапускаем то, что сейчас в эфире, вместо бесконечной паузы у зрителя.
 let последнийПерезапуск = 0;
@@ -2746,7 +2813,8 @@ function attachProcessLogs(child, label) {
       // эти три строки на старте каждой серии ничего не значат.
       if (Date.now() - запущен < 3000 && /Invalid NAL unit size|Error splitting the input into NAL units|Decoding error: Invalid data|missing picture in access unit/i.test(text)) continue;
       были.add(text);
-      if (показано < 3) { показано++; log(`${label}: ${text}`); } else скрыто++;
+      // Раньше скрытые строки только считались, а надпись обещала их в файле.
+      if (показано < 3) { показано++; log(`${label}: ${text}`); } else { скрыто++; logDetail(`${label}: ${text}`); }
     }
   });
   child.on('close', () => { if (скрыто) log(`${label}: и ещё ${скрыто} похожих строк — полностью в vrcast-errors.log`); });
@@ -7241,6 +7309,13 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/unity/capture/stop') {
       stopUnityCaptureRecording(); return json(res, 202, status());
     }
+    if (req.method === 'POST' && url.pathname === '/api/report') {
+      const файл = await собратьОтчёт();
+      log('Отчёт для помощи сохранён: vrcast-report.txt');
+      if (IS_WIN) spawn('explorer.exe', [`/select,${файл}`], { windowsHide: true, detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+      else spawn('xdg-open', [DATA_DIR], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+      return json(res, 200, { ok: true, file: файл });
+    }
     if (req.method === 'POST' && url.pathname === '/api/logs/open') {
       // Открыть папку через проводник: копировать путь руками неудобно.
       spawn(IS_WIN ? 'explorer.exe' : 'xdg-open', [DATA_DIR], { windowsHide: true, detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
@@ -7639,6 +7714,12 @@ const server = http.createServer(async (req, res) => {
       }
       if (!process.env.VRCAST_PORT && next.port !== PORT && !(await portIsFree(next.port))) return json(res, 400, { error: `Порт ${next.port} занят другой программой` });
       saveConfig(next);
+      // Что поменяли — в подробный журнал: «перестало работать после того, как…»
+      // видно по времени. Только простые значения; ключи, пароли и списки — нет.
+      const изменения = Object.keys(config).filter(ключ => !/key|pin|secret|token|password|deviceId/i.test(ключ)
+        && ['string', 'number', 'boolean'].includes(typeof config[ключ]) && config[ключ] !== previousConfig[ключ])
+        .map(ключ => `${ключ}: ${JSON.stringify(previousConfig[ключ] ?? null)} → ${JSON.stringify(config[ключ])}`);
+      if (изменения.length) logDetail(`[настройки] ${изменения.join(' · ')}`);
       if (next.port !== previousConfig.port || next.port !== PORT) res.once('finish', () => setTimeout(applyPortChange, 80));
       if (Boolean(previousConfig.lanAccess) !== config.lanAccess || (config.lanAccess && (previousConfig.deviceName || '') !== config.deviceName)) res.once('finish', () => setTimeout(applyLanAccess, 50));
       // Сниженный под затор битрейт относится к конкретному каналу до сервера.
