@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, chmodSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
-import { availableParallelism, constants as osConstants, hostname, networkInterfaces, setPriority } from 'node:os';
+import { arch as osArch, availableParallelism, constants as osConstants, cpus, freemem, hostname, networkInterfaces, release as osRelease, setPriority, totalmem, version as osVersion } from 'node:os';
 import { basename, delimiter, dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
@@ -19,7 +19,7 @@ import { hideMemberSource, sanitizeContribution, sharedQueueItem, sharedServer, 
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
 // VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
-const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.61.2';
+const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.61.3';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -445,6 +445,36 @@ function detectHardwareEncoder() {
   }
   return hardwareEncoder;
 }
+// Сведения о системе — в начало журнала каждого запуска. Без них по журналу
+// друга не понять, на чём он: видеокарта и её драйвер, Windows, VPN, обход
+// блокировок. Пароли, ключи и адреса серверов сюда не попадают.
+async function записатьСистему() {
+  const гб = байты => (байты / 1024 ** 3).toFixed(1);
+  const ядра = cpus();
+  const строки = [
+    `Система: ${osVersion()} (${osRelease()}, ${osArch()}) · Node ${process.version} · язык ${Intl.DateTimeFormat().resolvedOptions().locale}`,
+    `Процессор: ${ядра[0]?.model?.trim() || '?'} · ${ядра.length} потоков · память ${гб(totalmem())} ГБ, свободно ${гб(freemem())} ГБ`,
+  ];
+  const видео = IS_WIN
+    ? await spawnCollect('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      // Только латиница: кириллицу консоль PowerShell портит, подписи — на нашей стороне.
+      'Get-CimInstance Win32_VideoController | ForEach-Object { "$($_.Name)|$($_.DriverVersion)|$($_.CurrentHorizontalResolution)x$($_.CurrentVerticalResolution)|$($_.CurrentRefreshRate)" }'], 10000)
+    : await spawnCollect('sh', ['-c', 'lspci 2>/dev/null | grep -iE "vga|3d|display"'], 5000);
+  for (const строка of String(видео.stdout || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean)) {
+    const [имя, драйвер, экран, гц] = строка.split('|');
+    строки.push(`Видеокарта: ${имя}${драйвер ? ` · драйвер ${драйвер}` : ''}${экран && экран !== 'x' ? ` · ${экран}${гц ? ` ${гц} Гц` : ''}` : ''}`);
+  }
+  const ffmpeg = tools.ffmpeg ? String((await spawnCollect('ffmpeg', ['-hide_banner', '-version'], 5000)).stdout || '').split(/\r?\n/)[0] : 'нет';
+  строки.push(`FFmpeg: ${ffmpeg} · кодировщик ${encoder.label} (режим ${config.encoderMode || 'auto'}, видеокарта ${hardwareEncoder?.label || 'не найдена'})`);
+  // «Запрет» и другие обходы блокировок меняют сеть под программой — их видно по процессам.
+  const процессы = IS_WIN ? await spawnCollect('tasklist', ['/FO', 'CSV', '/NH'], 8000) : await spawnCollect('ps', ['-eo', 'comm'], 5000);
+  const обход = [...new Set(String(процессы.stdout || '').match(/\b(winws|goodbyedpi|zapret|nfqws|tpws|ciadpi|byedpi|spoofdpi)\b/gi) || [])].join(', ');
+  строки.push(`Сеть: VPN ${vpnInterface || 'нет'} · карта для потока ${выбраннаяКарта() || 'как в системе'} · обход блокировок ${обход || 'не найден'}`);
+  строки.push(`Карты: ${сетевыеКарты().map(карта => `${карта.name}${карта.vpn ? ' (VPN)' : ''}`).join(', ') || 'нет'}`);
+  строки.push(`Настройки: вывод ${config.outputMode} · видео ${config.mediaQuality || '720p'}/${config.mediaFps || 30} · экран ${config.quality}/${config.fps} · битрейт ${config.videoBitrate || 'авто'} · ссылка ${config.tunnelProvider || 'auto'} · своих серверов ${allServers().length}`);
+  for (const строка of строки) logDetail(строка);
+}
+
 // Режим выбора: auto — видеокарта, если есть, иначе процессор; gpu — только
 // видеокарта (нет — откат на процессор); cpu — всегда процессор.
 function pickEncoder(mode) {
@@ -873,7 +903,15 @@ async function пингСсылки(url) {
 // (провайдер режет сервис), а зрители из других стран смотрят: замер 13.10.2026 —
 // с ноутбука Cloudflare «не отдаёт данные», с другого ПК та же ссылка 76–106 Мбит/с.
 // Спрашиваем check-host.net: три узла в разных странах, ответ за 5–15 с.
+const внешниеПроверки = new Map(); // адрес → { at, ok }
 async function снаружиОткрывается(url, путь = '/stream/ping') {
+  const ключ = url + путь, было = внешниеПроверки.get(ключ);
+  if (было && Date.now() - было.at < 120000) return было.ok;
+  const ok = await внешняяПроверка(url, путь);
+  внешниеПроверки.set(ключ, { at: Date.now(), ok });
+  return ok;
+}
+async function внешняяПроверка(url, путь) {
   try {
     const заявка = await (await fetch(`https://check-host.net/check-http?host=${encodeURIComponent(`${url}${путь}`)}&max_nodes=3`,
       { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(10000) })).json();
@@ -940,7 +978,7 @@ function готоваЗапись(запись, снаружи) {
 
 function отказЗаписи(запись, причина) {
   запись.state = 'failed'; запись.error = причина;
-  log(`Быстрая ссылка · ${запись.name}: ${причина}`);
+  (провалыПула.get(запись.key) ? logDetail : log)(`Быстрая ссылка · ${запись.name}: ${причина}`);
   // Остальное (снять с активной, перезапуск позже) сделает обработчик закрытия.
   if (запись.child && запись.child.exitCode === null && запись.child.signalCode === null) return void запись.child.kill('SIGTERM');
   закрытаЗапись(запись);
@@ -1037,6 +1075,13 @@ function проверитьВсеОтказали() {
 // Иначе ссылка мертва: переключаемся на запасную.
 async function провалАктивной(причина) {
   const запись = активнаяЗапись();
+  // Эфира нет — потока в ссылке и не должно быть (плейлист 404). Туннель жив —
+  // ссылка готова, её можно вставлять. Раньше это писалось «не отдаёт поток»
+  // сотни раз подряд (журнал друга) и каждый раз дёргало внешнюю проверку.
+  if (!activeKind && запись && await пингСсылки(запись.url)) {
+    tunnelServes = true; tunnelState = 'ready'; tunnelError = '';
+    return;
+  }
   if (запись && await снаружиОткрывается(запись.url, '/stream/live.m3u8')) {
     if (активнаяЗапись() !== запись) return;
     запись.снаружи = true; tunnelServes = true; tunnelState = 'ready'; tunnelError = '';
@@ -1328,7 +1373,7 @@ async function запуститьЗапись(ключ) {
     запись.закрыта = true;
     if (запись.state !== 'failed') {
       запись.state = 'failed'; запись.error = `отключился${code == null ? '' : ` (код ${code})`}`;
-      log(`Быстрая ссылка · ${запись.name}: ${запись.error}`);
+      (провалыПула.get(запись.key) ? logDetail : log)(`Быстрая ссылка · ${запись.name}: ${запись.error}`);
     }
     if (stopping || shuttingDown || config.outputMode !== 'tunnel') return;
     закрытаЗапись(запись);
@@ -2607,9 +2652,17 @@ function autoReduceQuality(state) {
 // Если сегменты перестали появляться совсем, никакое снижение качества уже не
 // поможет: перезапускаем то, что сейчас в эфире, вместо бесконечной паузы у зрителя.
 let последнийПерезапуск = 0;
+// Когда продюсер в последний раз отдал данные: молчит он — встал кодировщик
+// или источник; говорит, а сегментов нет — встал релей.
+let последниеДанныеПродюсера = 0;
+let зависанийПодряд = 0, последнееЗависание = 0;
 
 function watchStalledStream(state) {
   if (!activeKind || queuePaused) return;
+  // Первые секунды после старта продюсера в плейлисте ещё старые сегменты:
+  // журнал друга — «встал 581,7 с» через секунду после старта эфира и
+  // перемотка трека в начало.
+  if (Date.now() - producerStartedAt < 8000) return;
   const возраст = Number(state.segmentAge) || 0;
   // Восемь секунд вместо двенадцати: столько зритель ещё готов ждать, а
   // ложных срабатываний на этом пороге в замерах не появилось — обычный
@@ -2617,6 +2670,22 @@ function watchStalledStream(state) {
   if (возраст < 8 || Date.now() - последнийПерезапуск < 45000) return;
   последнийПерезапуск = Date.now();
   log(`Поток встал (${возраст.toFixed(1)} с без новых кадров) — перезапускаю`);
+  const молчит = (Date.now() - последниеДанныеПродюсера) / 1000;
+  logDetail(`[зависание] продюсер ${activeProcess ? 'жив' : 'нет'}, молчит ${молчит.toFixed(1)} с · релей ${relayProcess ? `жив, очередь ${relayProcess.stdin?.writableLength || 0} Б` : 'нет'} · `
+    + `пушеры ${[...rtspPushProcesses.keys()].join(', ') || 'нет'} · свой сервер ${remoteChannelLive ? 'принимает' : 'не принимает'} · кодировщик ${encoder.label} · ${activeKind}`);
+  // Продюсер молчит раз за разом сразу после перезапуска на видеокарте — значит,
+  // зависает её кодировщик (так было у друга с AMD: после каждого перезапуска
+  // ни одного сегмента, и трек перезапускался по кругу каждые 45 с). До конца
+  // эфира кодируем процессором; следующий эфир снова пробует видеокарту.
+  зависанийПодряд = Date.now() - последнееЗависание < 150000 && молчит > 5 ? зависанийПодряд + 1 : (молчит > 5 ? 1 : 0);
+  последнееЗависание = Date.now();
+  if (encoder.hardware && зависанийПодряд >= 2) {
+    зависанийПодряд = 0;
+    log(`${encoder.label} перестаёт выдавать кадры раз за разом — до конца эфира кодирую процессором`);
+    encoder = CPU_ENCODER;
+    try { restartRelaySession(streamProfile(activeKind)); } catch (error) { log(`Переход на процессор: ${error.message}`); }
+    return;
+  }
   try {
     if (activeKind === 'screen') startScreen().catch(error => log(`Перезапуск захвата: ${error.message}`));
     // sourcePosition стоит на месте последней перемотки, само воспроизведение
@@ -3833,11 +3902,13 @@ function startRtspPush() {
             if (/400 Bad Request/i.test(text)) {
               if (!remoteChannelRejected) { remoteChannelRejected = true; log('Свой сервер отклонил канал: нажмите «Настроить сервер», чтобы разрешить несколько каналов'); }
             }
-            else log(`Свой сервер: ${text.slice(0, 260)}`);
+            else ((rtspPushFailures.get('remote') || 0) >= 2 ? logDetail : log)(`Свой сервер: ${text.slice(0, 260)}`);
           }
         }
       });
       child.on('error', error => log(`Свой сервер: ${error.message}`));
+    } else if ((rtspPushFailures.get(target.id) || 0) >= 2) {
+      child.stderr.on('data', chunk => logDetail(`RTSP push: ${String(chunk).trim().slice(0, 300)}`));
     } else attachProcessLogs(child, 'RTSP push');
     const startedAt = Date.now();
     // Продержался несколько секунд — публикация пошла, счётчик быстрых падений
@@ -4368,6 +4439,7 @@ function pipeToRelay(child, first = null, firstReady = true) {
     таймер ||= setTimeout(выдать, Math.max(1, очередь[0][0] - Date.now()));
   };
   const deliver = chunk => {
+    последниеДанныеПродюсера = Date.now();
     trackRelayClock(chunk);
     кормитьЭнергию(chunk);
     // Релея может не быть те доли секунды, пока он поднимается после падения.
@@ -7805,6 +7877,8 @@ server.listen(PORT, слушаемАдрес, () => {
   log(`VRCast Bridge открыт: http://${HOST}:${PORT}`);
   log(`Кодировщик: ${encoder.label} · FFmpeg: ${tools.ffmpeg ? 'готов' : 'не найден'} · yt-dlp: ${tools.ytdlp ? 'готов' : 'не найден'}`);
   logDetail(`=== запуск VRCast Bridge ${APP_VERSION} · ffmpeg: ${tools.ffmpeg ? 'есть' : 'нет'} · yt-dlp: ${ytdlpPath()} · кодировщик: ${encoder.label} ===`);
+  // Через 5 с: к этому времени уже известны VPN и карты.
+  setTimeout(() => записатьСистему().catch(error => logDetail(`Сведения о системе: ${error.message}`)), 5000).unref?.();
   startHlsHealthMonitor();
   watchFreeSpace();
   watchRemoteServer();
