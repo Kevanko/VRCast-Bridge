@@ -18,7 +18,7 @@
   --bg:#0d0d0d;--bar:#111111;--side:#141414;--surface:#181818;--raise:#212121;--sel:#2b2b2b;--menu:#1a1a1a;
   --edge:#262626;--edge-strong:#363636;
   --text:#ececec;--soft:#d4d4d4;--muted:#a3a3a3;--faint:#737373;
-  --accent:#ececec;--accent-strong:#7cb8ff;--accent-soft:rgba(51,156,255,.12);--accent-line:rgba(51,156,255,.5);--on-accent:#0d0d0d;
+  --accent:#339cff;--accent-strong:#7cb8ff;--accent-soft:rgba(51,156,255,.14);--accent-line:rgba(51,156,255,.55);--on-accent:#ffffff;
   --second:#339cff;--live:#ff5c5c;--live-text:#ff8f8f;--ok:#4ade80;--ok-text:#86efac;--cue:#fbbf24;--danger:#ff5c5c;
   --shade:rgba(13,13,13,.78);
   --glow-a:#339cff;--glow-b:#7c5cff;--glow-c:#1a3a8f;
