@@ -19,7 +19,7 @@ import { hideMemberSource, sanitizeContribution, sharedQueueItem, sharedServer, 
 import { IS_LINUX, IS_WIN, dataBase, exe, listAudioLinux, listMonitorsX11, listWindowsX11, pulseSource, screenInput, toolSources, which } from './platform.js';
 
 // VRCAST_TEST_VERSION — только для тестов обновления: программа «старой» версии.
-const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.61.4';
+const APP_VERSION = process.env.VRCAST_TEST_VERSION || '0.61.5';
 
 // Свободное место проверяем редко и в фоне: на полном диске ffmpeg не может
 // дописывать сегменты, эфир встаёт рывками, а причина ниоткуда не видна.
@@ -2738,7 +2738,8 @@ function watchStalledStream(state) {
   последнийПерезапуск = Date.now();
   log(`Поток встал (${возраст.toFixed(1)} с без новых кадров) — перезапускаю`);
   const молчит = (Date.now() - последниеДанныеПродюсера) / 1000;
-  logDetail(`[зависание] продюсер ${activeProcess ? 'жив' : 'нет'}, молчит ${молчит.toFixed(1)} с · релей ${relayProcess ? `жив, очередь ${relayProcess.stdin?.writableLength || 0} Б` : 'нет'} · `
+  logDetail(`[зависание] продюсер ${activeProcess ? 'жив' : 'нет'}, молчит ${молчит.toFixed(1)} с`
+    + ` · ${безВидеокарты ? 'без видеокарты' : 'декодирование на видеокарте'} · релей ${relayProcess ? `жив, очередь ${relayProcess.stdin?.writableLength || 0} Б` : 'нет'} · `
     + `пушеры ${[...rtspPushProcesses.keys()].join(', ') || 'нет'} · свой сервер ${remoteChannelLive ? 'принимает' : 'не принимает'} · кодировщик ${encoder.label} · ${activeKind}`);
   // Продюсер молчит раз за разом сразу после перезапуска на видеокарте — значит,
   // зависает её кодировщик (так было у друга с AMD: после каждого перезапуска
@@ -2748,8 +2749,8 @@ function watchStalledStream(state) {
   последнееЗависание = Date.now();
   if (encoder.hardware && зависанийПодряд >= 2) {
     зависанийПодряд = 0;
-    log(`${encoder.label} перестаёт выдавать кадры раз за разом — до конца эфира кодирую процессором`);
-    encoder = CPU_ENCODER;
+    log(`${encoder.label} перестаёт выдавать кадры раз за разом — до конца эфира декодирую и кодирую процессором`);
+    encoder = CPU_ENCODER; безВидеокарты = true;
     try { restartRelaySession(streamProfile(activeKind)); } catch (error) { log(`Переход на процессор: ${error.message}`); }
     return;
   }
@@ -3533,7 +3534,7 @@ function probePhoneStream() {
 
 async function startScreenInner() {
   const wasLive = Boolean(activeKind);
-  if (!wasLive) encoder = pickEncoder(config.encoderMode);
+  if (!wasLive) { encoder = pickEncoder(config.encoderMode); безВидеокарты = false; }
   // Решаем до остановки: если настройки помощников те же, оставляем их жить.
   const текущийПрофиль = sessionProfile('screen');
   const тотЖеЗахват = wasLive && activeKind === 'screen';
@@ -4807,7 +4808,7 @@ function startQueue(initialIndex = 0) {
   phoneSource = false;
   if (!queue.length) throw new Error('Очередь пуста. Добавьте ссылку или файл.');
   const wasLive = Boolean(activeKind);
-  if (!wasLive) encoder = pickEncoder(config.encoderMode);
+  if (!wasLive) { encoder = pickEncoder(config.encoderMode); безВидеокарты = false; }
   stopActive(false, true, true);
   stopping = false;
   activeKind = 'queue';
@@ -5596,7 +5597,16 @@ async function prefetchQueue(fromIndex = queueIndex) {
 
 // Декодирование отдаём видеокарте: при неудаче ffmpeg сам возвращается к
 // программному пути, поэтому флаг безопасен для любых источников.
-const HWACCEL = ['-hwaccel', 'auto'];
+// Декодирование на видеокарте. После отката «до конца эфира без видеокарты»
+// (она перестала выдавать кадры) декодируем процессором: на части драйверов
+// AMD зависает и декодер d3d11va, а не только кодировщик.
+let безВидеокарты = false;
+const HWACCEL = () => (безВидеокарты ? [] : ['-hwaccel', 'auto']);
+// Сетевой вход: -reconnect срабатывает только на ошибку, а подвисший сегмент
+// (Rutube через VPN) FFmpeg ждал молча — кадры вставали, сторож перезапускал
+// трек каждые 45 с. Таймаут чтения 15 с превращает зависание в ошибку и
+// переподключение.
+const СЕТЕВОЙ_ВХОД = ['-rw_timeout', '15000000', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3'];
 
 // Порты для zmq берём у системы: расчёт от PORT пересекался у двух копий
 // программы, zmq не мог занять порт, и FFmpeg падал на старте трека.
@@ -5714,22 +5724,22 @@ function queueProducerArgs(media, timestampOffset, seekPosition = 0, control = n
   }
   if (media.videoUrl && media.audioUrl && media.videoUrl !== media.audioUrl) {
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
-    args.push(...headerArgs, ...очередьВхода(1024), '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', ...HWACCEL, '-i', media.videoUrl);
+    args.push(...headerArgs, ...очередьВхода(1024), ...СЕТЕВОЙ_ВХОД, ...HWACCEL(), '-i', media.videoUrl);
     videoIndex = inputIndex++;
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
-    args.push(...headerArgs, ...очередьВхода(1024), '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3', '-i', media.audioUrl);
+    args.push(...headerArgs, ...очередьВхода(1024), ...СЕТЕВОЙ_ВХОД, '-i', media.audioUrl);
     audioIndex = inputIndex++;
   } else {
     const source = media.combinedUrl || media.videoUrl || media.audioUrl;
     if (seekPosition > 0) args.push('-ss', seekPosition.toFixed(3));
     args.push(...очередьВхода(1024));
-    if (!media.cached && /^https?:/i.test(source)) args.push(...headerArgs, '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3');
+    if (!media.cached && /^https?:/i.test(source)) args.push(...headerArgs, ...СЕТЕВОЙ_ВХОД);
     // Плейлист .m3u8 бывает и живым эфиром, и обычным видео — снаружи не
     // различить. Поэтому начинаем с последнего куска (для эфира это край, для
     // видео просто игнорируется) и всегда держим темп реального времени:
     // без него готовый плейлист проглатывается вдвое быстрее и эфир уезжает.
     if (media.live) args.push('-live_start_index', '-1');
-    args.push(...HWACCEL, '-i', source);
+    args.push(...HWACCEL(), '-i', source);
     if (media.hasVideo) videoIndex = inputIndex;
     if (media.hasAudio) audioIndex = inputIndex;
     inputIndex++;

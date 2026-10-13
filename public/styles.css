@@ -119,7 +119,7 @@ option{background:var(--menu);color:var(--text)}
 
 /* ─── Каркас ────────────────────────────────────────────────────────────── */
 .app{height:100vh;display:grid;grid-template-rows:60px minmax(0,1fr) 36px}
-.topbar{position:relative;display:flex;align-items:center;gap:16px;padding:0 20px;border-bottom:1px solid var(--edge);background:var(--bar)}
+.topbar{position:relative;z-index:20;display:flex;align-items:center;gap:16px;padding:0 20px;border-bottom:1px solid var(--edge);background:var(--bar)}
 .brand{display:flex;align-items:center;gap:10px;flex:none}
 /* Марка — тот же пузырь, что у значка программы, в цвете темы; внутри эквалайзер. */
 .brand-mark{width:34px;height:34px;padding:5px 9px 12px;display:flex;align-items:flex-end;justify-content:center;gap:3px;
@@ -736,7 +736,7 @@ dialog::backdrop{background:color-mix(in srgb,var(--bg) 70%,transparent)}
 :root[data-theme="midnight"] .topbar,:root[data-theme="midnight"] .statusbar{border-color:rgba(190,205,255,.07);background:rgba(6,8,18,.55);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
 :root[data-theme="midnight"] .side{border-left-color:rgba(190,205,255,.07);background:rgba(8,10,22,.42);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
 :root[data-theme="midnight"] .deck,:root[data-theme="midnight"] .steps li,:root[data-theme="midnight"] .linkbar{border-color:transparent;background:var(--glass);box-shadow:var(--hair),0 30px 60px -30px rgba(0,0,0,.8);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
-:root[data-theme="midnight"] .menu,:root[data-theme="midnight"] dialog{border-color:transparent;background:rgba(12,15,32,.84);box-shadow:var(--hair-strong),0 40px 100px rgba(0,0,0,.7);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
+:root[data-theme="midnight"] .menu,:root[data-theme="midnight"] dialog{border-color:transparent;background:rgba(12,15,32,.96);box-shadow:var(--hair-strong),0 40px 100px rgba(0,0,0,.7);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
 :root[data-theme="midnight"] dialog::backdrop{background:rgba(3,4,10,.6);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
 :root[data-theme="midnight"] .settings-nav{border-right-color:rgba(190,205,255,.07);background:rgba(255,255,255,.015)}
 :root[data-theme="midnight"] .settings-close{background:transparent!important}
