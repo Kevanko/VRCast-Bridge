@@ -8,7 +8,9 @@ import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const port = Number(process.env.VRCAST_TEST_PORT || 48717);
+// Порты тестов — ниже 49152: выше динамический диапазон Windows, где Hyper-V
+// резервирует блоки («listen EACCES»), и тесты падали случайно.
+const port = Number(process.env.VRCAST_TEST_PORT || 38717);
 let server;
 let dataDirectory;
 
@@ -563,7 +565,7 @@ const api = (path, body) => fetch(`http://127.0.0.1:${port}${path}`, { method: '
   body: body === undefined ? undefined : JSON.stringify(body) });
 const currentStatus = () => fetch(`http://127.0.0.1:${port}/api/status`).then(response => response.json());
 
-test('«Стоп» во время запуска захвата не поднимает захват поверх остановки', async () => {
+test('«Стоп» во время запуска захвата не поднимает захват поверх остановки', { skip: process.platform === 'linux' && !process.env.DISPLAY && 'нужен X11-дисплей (DISPLAY)' }, async () => {
   // Монитор: запуск ждёт список мониторов от PowerShell — именно в это окно
   // раньше проваливался «Стоп», и захват всё равно выходил в эфир.
   await api('/api/config', { outputMode: 'local', quality: '480p', fps: 30, captureMode: 'monitor', audioMode: 'none' });

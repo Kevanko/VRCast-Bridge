@@ -6,7 +6,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // Конфиг сервера на VPS (server/install.sh) проверяем настоящим MediaMTX на локальных портах.
-const PORT = 49600, KEY = 'test-key-123', IP = '203.0.113.5';
+// Ниже 49152: выше — динамический диапазон Windows, Hyper-V резервирует там блоки портов.
+const PORT = 39600, KEY = 'test-key-123', IP = '203.0.113.5';
 const candidates = [process.env.VRCAST_TEST_MEDIAMTX, join(homedir(), '.local/share/VRCastBridge/tools/mediamtx'), '/usr/local/bin/mediamtx', '/usr/bin/mediamtx'].filter(Boolean);
 const mediamtx = candidates.find(path => existsSync(path));
 

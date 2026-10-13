@@ -15,7 +15,7 @@ import { join, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const basePort = Number(process.env.VRCAST_TEST_PORT || 48717) + 400;
+const basePort = Number(process.env.VRCAST_TEST_PORT || 38717) + 400;
 let nextPort = basePort;
 const СЕТЬ = process.env.VRCAST_TEST_NETWORK === '1';
 const СВЕЖИЙ_FFMPEG = process.env.VRCAST_TEST_FFMPEG_DIR || '';

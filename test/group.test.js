@@ -44,7 +44,7 @@ test('группа: эфиром управляет тот, кто начал п
 });
 
 // ── Живой сервер ─────────────────────────────────────────────────────────────
-const port = Number(process.env.VRCAST_TEST_PORT || 48717) + 200;
+const port = Number(process.env.VRCAST_TEST_PORT || 38717) + 200;
 let server, dataDirectory, mediaServer, mediaPort, mediaFile;
 const mediaHits = [];
 

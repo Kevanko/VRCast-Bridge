@@ -9,7 +9,7 @@ import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const lanIp = Object.values(networkInterfaces()).flat().find(item => item && item.family === 'IPv4' && !item.internal && isPrivateAddress(item.address))?.address;
-const port = Number(process.env.VRCAST_TEST_PORT || 48717) + 500;
+const port = Number(process.env.VRCAST_TEST_PORT || 38717) + 500;
 const call = (path, { method = 'GET', body, headers = {}, host = lanIp } = {}) => new Promise((resolve, reject) => {
   const req = request({ host, port, path, method, headers: { Host: `${host}:${port}`, 'Content-Type': 'application/json', ...headers } }, res => {
     let text = ''; res.setEncoding('utf8'); res.on('data', c => { text += c; }); res.on('end', () => resolve({ status: res.statusCode, text, type: res.headers['content-type'] }));

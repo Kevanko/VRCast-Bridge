@@ -7,7 +7,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const first = Number(process.env.VRCAST_TEST_PORT || 48717) + 300;
+const first = Number(process.env.VRCAST_TEST_PORT || 38717) + 300;
 const second = first + 10;
 const get = (port, path) => fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(1500) });
 const post = (port, path, body) => fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(3000) });

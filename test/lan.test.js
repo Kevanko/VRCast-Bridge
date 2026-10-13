@@ -33,7 +33,7 @@ test('маршруты для сети: управление можно, нас�
 });
 
 const lanIp = Object.values(networkInterfaces()).flat().find(item => item && item.family === 'IPv4' && !item.internal && isPrivateAddress(item.address))?.address;
-const port = Number(process.env.VRCAST_TEST_PORT || 48717) + 100;
+const port = Number(process.env.VRCAST_TEST_PORT || 38717) + 100;
 let server, dataDirectory;
 
 // Запрос с заданным Host: fetch не даёт его подменить, поэтому http.request.

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { normalizeBase } from '../src/join.js';
 
-const base = Number(process.env.VRCAST_TEST_PORT || 48717) + 400;
+const base = Number(process.env.VRCAST_TEST_PORT || 38717) + 400;
 const portA = base, portB = base + 20;
 const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
 // «fetch failed» без причины не объясняет, упал сервер или оборвалось соединение:
