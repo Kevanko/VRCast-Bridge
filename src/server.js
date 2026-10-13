@@ -5,6 +5,7 @@ import { availableParallelism, constants as osConstants, hostname, networkInterf
 import { basename, delimiter, dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { Resolver } from 'node:dns/promises';
 import { connect as netConnect, createServer as netCreateServer } from 'node:net';
 import { Readable, Transform } from 'node:stream';
 import { access, readFile, stat, statfs } from 'node:fs/promises';
@@ -191,8 +192,6 @@ let tunnelUrl = '';
 let tunnelState = 'idle';
 let tunnelError = '';
 let tunnelProvider = '';
-let tunnelDeadlineTimer = null;
-let tunnelFallbackTimer = null;
 // Реально ли публичная ссылка отдаёт поток. null — ещё проверяем, false —
 // отдаёт заглушку/ошибку (сеть блокирует туннель), true — играет. Раньше
 // «готово» ставилось по факту получения адреса, а в VRChat бывало пусто.
@@ -839,37 +838,217 @@ function recordStreamEvent(kind, detail, extra = {}, contextOverride = null) {
 
 let tunnelGeneration = 0;
 
+// Пул быстрых ссылок. Все сервисы поднимаются разом (Pinggy — только если его
+// выбрали: ссылка живёт час), и каждый проверяется так, как его увидит зритель.
+// Активной становится выбранная или самая быстрая из рабочих, остальные ждут в
+// запасе: перестала активная отдавать поток — переключаемся на запасную сразу.
+// Раньше «Авто» брал того, кто первым выдал адрес, а если поток по нему не шёл —
+// показывал ошибку и стоял.
+const пул = new Map(); // ключ → { key, name, child, url, state, kbps, ttfbMs, error, снаружи, timer }
+let выборТаймер = null;
+const активнаяЗапись = () => [...пул.values()].find(запись => запись.child && запись.child === tunnelProcess && tunnelUrl);
+
 function stopPublicTunnel() {
   tunnelGeneration++;
-  const children = new Set([...tunnelCandidates, tunnelProcess].filter(Boolean));
-  if (tunnelDeadlineTimer) clearTimeout(tunnelDeadlineTimer);
-  if (tunnelFallbackTimer) clearTimeout(tunnelFallbackTimer);
-  tunnelDeadlineTimer = null;
-  tunnelFallbackTimer = null;
+  clearTimeout(выборТаймер); выборТаймер = null;
   if (tunnelVerifyTimer) clearInterval(tunnelVerifyTimer);
-  tunnelVerifyTimer = null; tunnelServes = null; tunnelMetrics = null; tunnelBudgetKbps = 0;
+  tunnelVerifyTimer = null;
+  for (const запись of пул.values()) { clearTimeout(запись.timer); запись.child?.kill('SIGTERM'); }
+  пул.clear();
+  провалыПула.clear();
+  tunnelServes = null; tunnelMetrics = null; tunnelBudgetKbps = 0;
   tunnelProcess = null; tunnelCandidates = new Set(); tunnelUrl = ''; tunnelState = 'idle'; tunnelError = ''; tunnelProvider = '';
-  for (const child of children) child.kill('SIGTERM');
 }
 
-function activatePublicTunnel(child, provider, url) {
-  if (tunnelUrl || !tunnelCandidates.has(child)) return;
-  if (tunnelFallbackTimer) clearTimeout(tunnelFallbackTimer);
-  tunnelFallbackTimer = null;
-  if (tunnelDeadlineTimer) clearTimeout(tunnelDeadlineTimer);
-  tunnelDeadlineTimer = null;
-  tunnelProcess = child; tunnelProvider = provider; tunnelUrl = url.replace(/\/$/, ''); tunnelState = 'verifying'; tunnelError = '';
-  for (const candidate of tunnelCandidates) if (candidate !== child) candidate.kill('SIGTERM');
-  tunnelCandidates = new Set([child]);
-  log(`Публичная ссылка · ${provider} — проверяю, что она реально отдаёт поток…`);
-  // Адрес получен, но это ещё не значит, что по нему играет: проверяем сами,
-  // как это делает плеер, и перепроверяем — заглушка может появиться и позже.
-  tunnelServes = null; tunnelVerifyFails = 0;
+// Наш ли ответ идёт через ссылку: /stream/ping отдаёт «vrcast». Заглушка сервиса
+// или его ошибка так не ответит.
+async function пингСсылки(url) {
+  try {
+    const ответ = await fetch(`${url}/stream/ping`, { signal: AbortSignal.timeout(8000), headers: { 'User-Agent': 'LibVLC/3.0 VRCast' } });
+    return ответ.ok && (await ответ.text()).trim() === 'vrcast';
+  } catch { return false; }
+}
+
+// Открывается ли ссылка снаружи. Свой ПК иногда не достаёт до своей же ссылки
+// (провайдер режет сервис), а зрители из других стран смотрят: замер 13.10.2026 —
+// с ноутбука Cloudflare «не отдаёт данные», с другого ПК та же ссылка 76–106 Мбит/с.
+// Спрашиваем check-host.net: три узла в разных странах, ответ за 5–15 с.
+async function снаружиОткрывается(url, путь = '/stream/ping') {
+  try {
+    const заявка = await (await fetch(`https://check-host.net/check-http?host=${encodeURIComponent(`${url}${путь}`)}&max_nodes=3`,
+      { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(10000) })).json();
+    for (let попытка = 0; попытка < 6 && заявка.request_id; попытка++) {
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      const итог = await (await fetch(`https://check-host.net/check-result/${заявка.request_id}`,
+        { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(10000) })).json();
+      const ответы = Object.values(итог).filter(Boolean).flat();
+      if (ответы.some(ответ => ответ?.[3] === '200')) return true;
+      if (ответы.length >= Object.keys(итог).length) return false;
+    }
+  } catch {}
+  return false;
+}
+
+// Битрейт под канал активной ссылки: секундный сегмент должен доходить до зрителя
+// за полсекунды вместе с задержкой ответа, иначе плеер подвисает. Берём 60%
+// замера (остальное — запас на рывки туннеля), потолок 8 Мбит/с — это 1080p/60.
+function применитьСкорость(запись) {
+  if (!запись.kbps) return;
+  tunnelBudgetKbps = Math.max(800, Math.min(8000, Math.round(запись.kbps * 0.6 - 128)));
+  tunnelSpeedMbps = Number((запись.kbps / 1000).toFixed(2));
+  if (tunnelMetrics) tunnelMetrics.throughputMbps = tunnelSpeedMbps;
+  const p = streamProfile('queue');
+  log(`Скорость ссылки ${запись.name} ~${(запись.kbps / 1000).toFixed(1)} Мбит/с, ответ ${запись.ttfbMs} мс — эфир через неё пойдёт в ${p.quality}/${p.fps}, ${p.bitrateKbps} кбит/с`);
+}
+
+// Скорость каждой рабочей ссылки, по очереди: параллельные замеры делили бы
+// канал и врали. Во время эфира не меряем — замер отнял бы канал у зрителей.
+let очередьЗамеров = Promise.resolve();
+function замеритьЗапись(запись) {
+  очередьЗамеров = очередьЗамеров.then(async () => {
+    if (пул.get(запись.key) !== запись || запись.снаружи || activeKind) return;
+    const { rawKbps, ttfbMs } = await measureTunnelKbps(запись.url);
+    if (пул.get(запись.key) !== запись || !(rawKbps > 50)) return;
+    запись.kbps = Math.round(rawKbps); запись.ttfbMs = ttfbMs;
+    запомнитьСкоростьТуннеля(запись.key, rawKbps);
+    if (tunnelProcess === запись.child) применитьСкорость(запись);
+  }).catch(() => {});
+}
+
+// Новая ссылка: сервис мог выдать адрес раньше, чем она заработала (у Cloudflare
+// бывает и 15 с), поэтому стучимся до 40 с. Отсюда не открылась — спрашиваем
+// снаружи и только потом называем нерабочей.
+async function проверитьНовую(запись) {
+  for (const до = Date.now() + 40000; Date.now() < до;) {
+    if (пул.get(запись.key) !== запись) return;
+    if (await пингСсылки(запись.url)) return готоваЗапись(запись, false);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  if (пул.get(запись.key) !== запись) return;
+  if (await снаружиОткрывается(запись.url)) return готоваЗапись(запись, true);
+  if (пул.get(запись.key) === запись) отказЗаписи(запись, 'ссылка не открывается ни отсюда, ни снаружи');
+}
+
+function готоваЗапись(запись, снаружи) {
+  if (пул.get(запись.key) !== запись) return;
+  запись.state = 'ready'; запись.снаружи = снаружи; запись.error = '';
+  провалыПула.delete(запись.key);
+  log(`Быстрая ссылка · ${запись.name} работает${снаружи ? ' — с этого ПК не открывается (провайдер режет сервис), но снаружи открывается' : ''}`);
+  if (!снаружи) замеритьЗапись(запись);
+  if (!tunnelUrl) запланироватьВыбор();
+}
+
+function отказЗаписи(запись, причина) {
+  запись.state = 'failed'; запись.error = причина;
+  log(`Быстрая ссылка · ${запись.name}: ${причина}`);
+  // Остальное (снять с активной, перезапуск позже) сделает обработчик закрытия.
+  if (запись.child && запись.child.exitCode === null && запись.child.signalCode === null) return void запись.child.kill('SIGTERM');
+  закрытаЗапись(запись);
+}
+
+function закрытаЗапись(запись) {
+  if (tunnelProcess === запись.child) снятьАктивную(запись);
+  перезапуститьПозже(запись);
+  проверитьВсеОтказали();
+}
+
+// Упавший сервис пробуем снова: первые два раза через 10 с (с «запретом» первый
+// запрос cloudflared иногда срывается, а повтор проходит — замер 13.10.2026),
+// дальше раз в минуту: сеть могла поменяться (VPN, карта, провайдер отпустил).
+const провалыПула = new Map();
+function перезапуститьПозже(запись) {
+  clearTimeout(запись.timer);
+  const провалы = (провалыПула.get(запись.key) || 0) + 1;
+  провалыПула.set(запись.key, провалы);
+  запись.timer = setTimeout(() => {
+    if (пул.get(запись.key) === запись && config.outputMode === 'tunnel' && !stopping && !shuttingDown) запуститьЗапись(запись.key);
+  }, запись.key === 'pinggy' ? 3000 : провалы <= 2 ? 10000 : 60000); // Pinggy сам закрывается через час — сразу новый
+  запись.timer.unref?.();
+}
+
+// Какую ссылку отдать зрителям: выбранную вручную, как только она заработала
+// (пока она ещё поднимается — ждём её), иначе самую быструю из рабочих.
+// Открывающиеся только снаружи — в конце: их скорость отсюда не измерить.
+function лучшаяЗапись() {
+  const выбран = пул.get(config.tunnelProvider);
+  if (выбран?.state === 'ready') return выбран;
+  if (выбран && выбран.state !== 'failed') return null;
+  const скорость = запись => запись.kbps || Number(config.tunnelSpeeds?.[запись.key]) || 0;
+  return [...пул.values()].filter(запись => запись.state === 'ready')
+    .sort((a, b) => (a.снаружи - b.снаружи) || скорость(b) - скорость(a))[0] || null;
+}
+
+// «Авто»: первая рабочая ссылка ждёт остальных до 10 с — Cloudflare регистрируется
+// дольше SSH-сервисов, а обычно он самый быстрый. Все уже решились — выбираем сразу.
+function запланироватьВыбор() {
+  if (tunnelUrl) return;
+  const ждём = [...пул.values()].some(запись => запись.state === 'starting' || запись.state === 'verifying');
+  if (!ждём || пул.get(config.tunnelProvider)?.state === 'ready') return выбратьАктивную();
+  выборТаймер ||= setTimeout(выбратьАктивную, 10000);
+}
+
+function выбратьАктивную() {
+  clearTimeout(выборТаймер); выборТаймер = null;
+  if (tunnelUrl) return;
+  const запись = лучшаяЗапись();
+  if (запись) сделатьАктивной(запись);
+}
+
+function сделатьАктивной(запись, прежняя = '') {
+  tunnelProcess = запись.child; tunnelProvider = запись.name; tunnelUrl = запись.url;
+  tunnelServes = null; tunnelState = 'verifying'; tunnelError = ''; tunnelMetrics = null; tunnelVerifyFails = 0;
+  tunnelBudgetKbps = 0; tunnelSpeedMbps = 0;
+  log(прежняя
+    ? `Быстрая ссылка: «${прежняя}» перестала работать — переключил на ${запись.name}. Новый адрес: ${запись.url}/stream/live.m3u8`
+    : `Публичная ссылка · ${запись.name} — проверяю, что она реально отдаёт поток…`);
+  применитьСкорость(запись);
   if (tunnelVerifyTimer) clearInterval(tunnelVerifyTimer);
-  // Ссылка готова, как только реально отдаёт поток: первая проверка почти сразу.
   setTimeout(verifyTunnelServes, 800);
   tunnelVerifyTimer = setInterval(verifyTunnelServes, 30000);
   tunnelVerifyTimer.unref?.();
+}
+
+function снятьАктивную(запись) {
+  if (tunnelVerifyTimer) clearInterval(tunnelVerifyTimer);
+  tunnelVerifyTimer = null; tunnelProcess = null; tunnelUrl = ''; tunnelProvider = '';
+  tunnelServes = null; tunnelMetrics = null; tunnelBudgetKbps = 0;
+  const следующая = лучшаяЗапись();
+  if (следующая) return сделатьАктивной(следующая, запись.name);
+  tunnelState = 'starting'; tunnelError = '';
+  log(`Быстрая ссылка: «${запись.name}» перестала работать — жду, пока заработает другая`);
+}
+
+function проверитьВсеОтказали() {
+  if (tunnelUrl || !пул.size) return;
+  if ([...пул.values()].every(запись => запись.state === 'failed')) {
+    // Все отказали — последний запасной Pinggy: ссылка на час лучше, чем никакой.
+    if (!пул.has('pinggy') && туннельДоступен('pinggy')) {
+      log('Быстрая ссылка: остальные сервисы не работают — поднимаю запасной Pinggy (его ссылка живёт час)');
+      return void запуститьЗапись('pinggy').catch(() => {});
+    }
+    if (tunnelState !== 'error') { tunnelState = 'error'; tunnelError = tunnelFailMessage(); log(tunnelError); }
+  } else запланироватьВыбор();
+}
+
+// Активная ссылка перестала отдавать поток отсюда. Сначала спрашиваем снаружи:
+// плейлист у зрителей открывается — оставляем (отсюда путь медленный или
+// режется провайдером). Снаружи не открывается, а туннель жив (наш ping через
+// него отвечает) — дело в потоке, а не в ссылке, менять сервис бесполезно.
+// Иначе ссылка мертва: переключаемся на запасную.
+async function провалАктивной(причина) {
+  const запись = активнаяЗапись();
+  if (запись && await снаружиОткрывается(запись.url, '/stream/live.m3u8')) {
+    if (активнаяЗапись() !== запись) return;
+    запись.снаружи = true; tunnelServes = true; tunnelState = 'ready'; tunnelError = '';
+    log(`Быстрая ссылка · ${запись.name}: отсюда поток идёт плохо, но снаружи открывается — зрителям видно, оставляю`);
+    return;
+  }
+  if (!запись || await пингСсылки(запись.url)) {
+    tunnelServes = false; tunnelState = 'error'; tunnelMetrics = null; tunnelError = причина;
+    log(`Публичная ссылка не отдаёт поток · ${причина}`);
+    return;
+  }
+  if (активнаяЗапись() === запись) отказЗаписи(запись, причина);
 }
 
 // Проверяем публичную ссылку так же, как её увидит плеер: тянем плейлист через
@@ -881,6 +1060,9 @@ let tunnelVerifyBusy = false;
 async function verifyTunnelServes() {
   const url = tunnelUrl, провайдер = tunnelProvider;
   if (!url || config.outputMode !== 'tunnel' || tunnelVerifyBusy) return;
+  // Ссылка, которая с этого ПК не открывается, но снаружи открывается: отсюда её
+  // не проверить, держим, пока жив процесс сервиса.
+  if (активнаяЗапись()?.снаружи) { tunnelServes = true; tunnelState = 'ready'; return; }
   tunnelVerifyBusy = true;
   // Один сбой у уже проверенной ссылки — чаще джиттер туннеля, чем смерть:
   // не прячем адрес и не пугаем «не отдаёт поток» до второго сбоя подряд.
@@ -919,37 +1101,16 @@ async function verifyTunnelServes() {
       // ждала замер (до 6 с), прежде чем её показать.
       if (tunnelServes !== true) log(`Публичная ссылка готова · ${провайдер} — реально отдаёт поток, можно отправлять друзьям`);
       tunnelServes = true; tunnelState = 'ready'; tunnelError = ''; tunnelVerifyFails = 0;
-      if (!tunnelBudgetKbps && !activeKind) (async () => {
-        const { ttfbMs, rawKbps: kbps } = await measureTunnelKbps(url);
-        if (tunnelUrl !== url) return;
-        // Секундный сегмент должен приходить к зрителю за полсекунды вместе с
-        // задержкой ответа — иначе плеер подвисает (замер Pinggy из Латвии: на
-        // 60% канала сегмент шёл 0,84–0,97 с). Потолок 1,8 Мбит/с: канал со
-        // стороны программы (21 Мбит/с) и у зрителя (~3,5) у бесплатных
-        // туннелей разные — зрителя они режут отдельно, а его отсюда не измерить.
-        // Штраф за задержку ответа (было до ×0,15) ронял поток в 300 кбит/с —
-        // картинка кашей при том, что зрители тянули больше. Теперь 60% замера.
-        // Потолок 8 Мбит/с — максимум качества (1080p/60). Ниже по замеру —
-        // 60% канала: остальное запас на рывки туннеля.
-        tunnelBudgetKbps = Math.max(800, Math.min(8000, Math.round(kbps * 0.6 - 128)));
-        tunnelSpeedMbps = tunnelMetrics.throughputMbps = Number((kbps / 1000).toFixed(2));
-        запомнитьСкоростьТуннеля(ключТуннеля(провайдер), kbps);
-        const p = streamProfile('queue');
-        log(`Скорость публичной ссылки ~${(kbps / 1000).toFixed(1)} Мбит/с, ответ ${ttfbMs} мс — эфир через неё пойдёт в ${p.quality}/${p.fps}, ${p.bitrateKbps} кбит/с`);
-      })().catch(() => {});
+      if (tunnelMetrics && tunnelSpeedMbps) tunnelMetrics.throughputMbps = tunnelSpeedMbps;
       return;
     }
     if (сбой()) return;
     const html = /<!doctype|<html/i.test(текст);
-    tunnelServes = false; tunnelState = 'error'; tunnelMetrics = null;
-    tunnelError = html ? `${провайдер} отдаёт страницу, а не поток — для VRChat не годится. Смените туннель или возьмите свой сервер.`
-      : `${провайдер}: ссылка не отдаёт поток (ответ ${ответ.status}). Смените туннель или возьмите свой сервер.`;
-    log(`Публичная ссылка не отдаёт поток · ${tunnelError}`);
+    await провалАктивной(html ? `${провайдер} отдаёт страницу, а не поток — для VRChat не годится.`
+      : `${провайдер}: ссылка не отдаёт поток (ответ ${ответ.status}).`);
   } catch (error) {
     if (tunnelUrl !== url || сбой()) return;
-    tunnelServes = false; tunnelState = 'error'; tunnelMetrics = null;
-    tunnelError = `${провайдер}: публичная ссылка не открывается (${String(error.message || error).slice(0, 80)}). Сеть блокирует туннель — смените его или возьмите свой сервер.`;
-    log(`Публичная ссылка не открывается · ${tunnelError}`);
+    await провалАктивной(`${провайдер}: ссылка не отдаёт поток (${String(error.message || error).slice(0, 80)}).`);
   } finally {
     tunnelVerifyBusy = false;
     // Пока ссылка не подтверждена, проверяем часто: адрес Cloudflare нередко
@@ -987,30 +1148,6 @@ function tunnelFailMessage() {
     : 'Не удалось подключить ни один публичный канал. Отключите VPN/фильтр или выберите другой туннель.';
 }
 
-function trackTunnelChild(child, provider) {
-  // Туннель отдаёт поток зрителям через интернет — он часть эфира.
-  onAir(child);
-  tunnelCandidates.add(child);
-  child.on('error', error => {
-    tunnelCandidates.delete(child);
-    if (!tunnelUrl && !tunnelCandidates.size) { tunnelState = 'error'; tunnelError = error.message; log(`Публичный туннель: ${error.message}`); }
-  });
-  child.on('close', code => {
-    tunnelCandidates.delete(child);
-    if (tunnelProcess !== child) {
-      if (!tunnelUrl && !tunnelCandidates.size && !stopping && !tunnelFallbackTimer) { tunnelState = 'error'; tunnelError = tunnelFailMessage(); }
-      return;
-    }
-    const stoppedProvider = tunnelProvider;
-    tunnelProcess = null; tunnelUrl = ''; tunnelProvider = '';
-    if (stopping || shuttingDown || config.outputMode !== 'tunnel') { tunnelState = 'idle'; return; }
-    tunnelState = 'error'; tunnelError = `Публичный туннель остановился${code === null ? '' : ` (код ${code})`}.`;
-    log(tunnelError);
-    setTimeout(() => { if (!stopping && !shuttingDown && config.outputMode === 'tunnel') startPublicTunnel(); }, 1800);
-  });
-  return child;
-}
-
 // ── Сервисы быстрой ссылки ───────────────────────────────────────────────────
 // Все бесплатные и без регистрации. SSH-сервисы (Serveo, Pinggy) не
 // требуют своего бинарника — хватает plink, который у нас уже есть.
@@ -1042,13 +1179,18 @@ async function sshКлюч(host, port, цель) {
 }
 
 // Узлы Cloudflare по настоящему DNS: с выбранной карты cloudflared не должен
-// идти на подставные адреса mihomo.
-async function узлыCloudflare() {
-  const цели = (await dohA('_v2-origintunneld._tcp.argotunnel.com', 'SRV').catch(() => []))
-    .map(запись => запись.split(' ').pop().replace(/\.$/, ''));
+// идти на подставные адреса mihomo. DoH не прошёл — спрашиваем обычный DNS с
+// самой карты: «запрет» (zapret) ломает DoH и через VPN, и мимо, а без адресов
+// cloudflared уходил в VPN и «отключался» (замер 13.10.2026).
+async function узлыCloudflare(карта) {
+  const днс = new Resolver({ timeout: 3000, tries: 1 });
+  днс.setServers(['1.1.1.1', '8.8.8.8']);
+  днс.setLocalAddress(карта);
   const адреса = [];
-  for (const цель of цели.length ? цели : ['region1.v2.argotunnel.com', 'region2.v2.argotunnel.com']) {
-    for (const ip of (await dohA(цель).catch(() => [])).slice(0, 2)) адреса.push(`${ip}:7844`);
+  for (const цель of ['region1.v2.argotunnel.com', 'region2.v2.argotunnel.com']) {
+    let ip = (await dohA(цель).catch(() => [])).filter(адрес => /^\d+\.\d+\.\d+\.\d+$/.test(адрес));
+    if (!ip.length) ip = await днс.resolve4(цель).catch(() => []);
+    for (const адрес of ip.slice(0, 2)) адреса.push(`${адрес}:7844`);
   }
   return адреса;
 }
@@ -1057,7 +1199,7 @@ async function узлыCloudflare() {
 async function командаТуннеля(ключ) {
   const карта = выбраннаяКарта();
   if (ключ === 'cloudflare') {
-    const мимо = карта ? await узлыCloudflare() : [];
+    const мимо = карта ? await узлыCloudflare(карта) : [];
     return { cmd: CLOUDFLARED(), args: ['tunnel', '--no-autoupdate', '--protocol', 'http2',
       ...(мимо.length ? ['--edge-bind-address', карта, ...мимо.flatMap(адрес => ['--edge', адрес])] : []),
       '--url', `http://127.0.0.1:${PORT}`], ready: текст => /Registered tunnel connection/i.test(текст) };
@@ -1155,62 +1297,82 @@ async function проверитьТуннели() {
   }
 }
 
-async function startTunnelCandidate(ключ) {
+async function запуститьЗапись(ключ) {
   const поколение = tunnelGeneration;
-  const команда = await командаТуннеля(ключ);
-  // Пока узнавали ключ и узлы, туннель могли выключить или уже найти другой.
-  if (поколение !== tunnelGeneration || config.outputMode !== 'tunnel' || stopping || tunnelUrl) return;
-  const child = trackTunnelChild(поднятьТуннель(команда, ключ, адрес => activatePublicTunnel(child, ТУННЕЛИ[ключ].name, адрес)), ТУННЕЛИ[ключ].name);
+  const запись = { key: ключ, name: ТУННЕЛИ[ключ].name, child: null, url: '', state: 'starting', kbps: 0, ttfbMs: 0, error: '', снаружи: false, timer: null };
+  пул.set(ключ, запись);
+  let команда;
+  try { команда = await командаТуннеля(ключ); }
+  catch (error) { if (пул.get(ключ) === запись) отказЗаписи(запись, error.message); return; }
+  // Пока узнавали ключ и узлы, ссылку могли выключить или перезапустить.
+  if (поколение !== tunnelGeneration || пул.get(ключ) !== запись || config.outputMode !== 'tunnel' || stopping) return;
+  const child = поднятьТуннель(команда, ключ, адрес => {
+    if (пул.get(ключ) !== запись) return;
+    clearTimeout(запись.timer);
+    запись.url = адрес.replace(/\/$/, ''); запись.state = 'verifying';
+    проверитьНовую(запись).catch(() => {});
+  });
+  запись.child = child;
+  onAir(child); tunnelCandidates.add(child);
   if (ключ === 'cloudflare') {
     child.stderr.on('data', chunk => {
       const строка = String(chunk).split(/\r?\n/).find(line => /\bERR\b/.test(line));
-      if (строка) log(`Cloudflare: ${строка.trim().slice(0, 300)}`);
+      if (строка) logDetail(`Cloudflare: ${строка.trim().slice(0, 300)}`);
     });
   }
+  // Адреса за 25 с нет — в этой сети сервис сейчас недоступен.
+  запись.timer = setTimeout(() => { if (пул.get(ключ) === запись && запись.state === 'starting') отказЗаписи(запись, 'не выдал адрес за 25 с'); }, 25000);
+  const закрылся = code => {
+    tunnelCandidates.delete(child);
+    if (пул.get(ключ) !== запись || запись.закрыта) return;
+    запись.закрыта = true;
+    if (запись.state !== 'failed') {
+      запись.state = 'failed'; запись.error = `отключился${code == null ? '' : ` (код ${code})`}`;
+      log(`Быстрая ссылка · ${запись.name}: ${запись.error}`);
+    }
+    if (stopping || shuttingDown || config.outputMode !== 'tunnel') return;
+    закрытаЗапись(запись);
+  };
+  child.on('close', закрылся);
+  child.on('error', error => { запись.error = error.message; закрылся(null); });
 }
 
 function startPublicTunnel() {
-  if (config.outputMode !== 'tunnel' || tunnelProcess || tunnelCandidates.size) return;
-  // Не бросаем: функцию зовут и из таймеров (переподключение, смена режима),
-  // а необработанный throw в setTimeout ронял бы весь сервер. Просто честно
-  // ставим состояние ошибки.
-  if (!Object.keys(ТУННЕЛИ).some(туннельДоступен)) {
-    tunnelState = 'error'; tunnelError = 'Компоненты публичной ссылки не найдены.';
-    return;
-  }
+  if (config.outputMode !== 'tunnel' || пул.size) return;
+  // Pinggy — только если его выбрали: его ссылка живёт час.
+  const ключи = Object.keys(ТУННЕЛИ).filter(ключ => туннельДоступен(ключ) && (ключ !== 'pinggy' || config.tunnelProvider === 'pinggy'));
+  if (!ключи.length) { tunnelState = 'error'; tunnelError = 'Компоненты публичной ссылки не найдены.'; return; }
   tunnelUrl = ''; tunnelProvider = ''; tunnelState = 'starting'; tunnelError = '';
-  // Провайдер можно выбрать; «Авто» поднимает всех сразу — побеждает тот, кто
-  // первым отдал адрес. Если выбранного нет — откатываемся к авто.
-  let провайдер = config.tunnelProvider || 'auto';
-  if (провайдер !== 'auto' && !(ТУННЕЛИ[провайдер] && туннельДоступен(провайдер))) провайдер = 'auto';
-  const запустить = ключ => startTunnelCandidate(ключ).catch(error => logDetail(`Туннель ${ТУННЕЛИ[ключ].name}: ${error.message}`));
-  if (провайдер !== 'auto') запустить(провайдер);
-  else {
-    // Сначала самый быстрый по прошлым замерам, и ему 15 секунд форы: Cloudflare
-    // регистрируется 10–15 с, и при фору в 6 с медленный localhost.run успевал
-    // первым — «Авто» брал его вместо быстрого (так было у друга). Не ответил —
-    // поднимаем остальных наперегонки.
-    const скорость = ключ => Number(config.tunnelSpeeds?.[ключ]) || 0;
-    // Pinggy — последним при любой скорости: его ссылка живёт час.
-    const порядок = Object.keys(ТУННЕЛИ).filter(туннельДоступен).sort((a, b) => (a === 'pinggy') - (b === 'pinggy') || скорость(b) - скорость(a));
-    const ещё = () => !tunnelUrl && !stopping && config.outputMode === 'tunnel';
-    const [лучший, ...остальные] = скорость(порядок[0]) ? порядок : [null, ...порядок];
-    if (лучший) запустить(лучший);
-    const резерв = () => { for (const ключ of остальные) запустить(ключ); };
-    if (лучший) tunnelFallbackTimer = setTimeout(() => { if (ещё()) резерв(); }, 15000);
-    else резерв();
-  }
-  // Один выбранный туннель ждём меньше: если он не отозвался за 18 секунд, он в
-  // этой сети недоступен. «Авто» гоняет несколько сразу, ему даём больше.
-  const дедлайн = провайдер === 'auto' ? 35000 : 18000;
-  tunnelDeadlineTimer = setTimeout(() => {
-    if (tunnelUrl || tunnelState !== 'starting') return;
-    for (const child of tunnelCandidates) child.kill('SIGTERM');
-    tunnelCandidates = new Set(); tunnelState = 'error';
-    tunnelError = tunnelFailMessage();
-    log(tunnelError);
-  }, дедлайн);
+  for (const ключ of ключи) запуститьЗапись(ключ).catch(error => logDetail(`Туннель ${ТУННЕЛИ[ключ].name}: ${error.message}`));
 }
+
+// Сменили сервис в настройках: остальные ссылки уже подняты, поэтому просто
+// берём выбранную, если она работает. Pinggy поднимаем или гасим по выбору.
+function сменаСервиса() {
+  if (config.outputMode !== 'tunnel') return;
+  if (!пул.size) return startPublicTunnel();
+  const pinggy = пул.get('pinggy');
+  if (config.tunnelProvider === 'pinggy' && !pinggy && туннельДоступен('pinggy')) запуститьЗапись('pinggy').catch(() => {});
+  const естьДругие = [...пул.values()].some(запись => запись.key !== 'pinggy' && запись.state === 'ready');
+  if (config.tunnelProvider !== 'pinggy' && pinggy && естьДругие) {
+    пул.delete('pinggy'); clearTimeout(pinggy.timer);
+    const былаАктивной = pinggy.child === tunnelProcess && tunnelUrl;
+    pinggy.child?.kill('SIGTERM');
+    if (былаАктивной) снятьАктивную(pinggy);
+  }
+  const выбран = пул.get(config.tunnelProvider);
+  if (выбран?.state === 'ready' && выбран !== активнаяЗапись()) {
+    const прежняя = tunnelProvider;
+    if (tunnelVerifyTimer) clearInterval(tunnelVerifyTimer);
+    tunnelUrl = '';
+    сделатьАктивной(выбран);
+    if (прежняя) log(`Быстрая ссылка: по выбору переключил с ${прежняя} на ${выбран.name}`);
+  } else if (!tunnelUrl) запланироватьВыбор();
+}
+
+// Для настроек: какие ссылки сейчас подняты и как работают.
+const ссылкиПула = () => [...пул.values()].map(запись => ({ key: запись.key, name: запись.name, state: запись.state,
+  kbps: запись.kbps, error: запись.error, outside: запись.снаружи, active: Boolean(tunnelUrl) && запись.child === tunnelProcess }));
 
 // Транспорт выбирается по адресу назначения, а не настройкой.
 // Своя машина (127.0.0.1) — rtsp:// (UDP): на петле пакеты не теряются, а по TCP
@@ -1659,7 +1821,7 @@ function requireReadyOutput() {
   if (config.outputMode === 'local') return;
   // Туннель, который не поднялся, сам не перезапускается: раньше повтором был
   // каждый новый старт эфира. Сохраняем это — пробуем снова и просим подождать.
-  if (config.outputMode === 'tunnel' && !activeKind && !tunnelProcess && !tunnelCandidates.size) startPublicTunnel();
+  if (config.outputMode === 'tunnel' && !activeKind && !пул.size) startPublicTunnel();
   const result = outputReadiness();
   if (!result.ready && !activeKind) throw Object.assign(new Error(result.message), { statusCode: 425, code: 'OUTPUT_NOT_READY' });
 }
@@ -2195,7 +2357,7 @@ function status(withLogs = true) {
     tunnel: { state: tunnelState, ready: Boolean(tunnelUrl) && tunnelServes === true, provider: tunnelProvider,
       serves: tunnelServes, verifying: Boolean(tunnelUrl) && tunnelServes === null, metrics: tunnelMetrics,
       expiresInMinutes: tunnelProvider === 'Pinggy' ? 60 : null, url: tunnelUrl ? `${tunnelUrl}/stream/live.m3u8` : '', error: tunnelError,
-      speeds: config.tunnelSpeeds || {}, test: проверкаТуннелей },
+      speeds: config.tunnelSpeeds || {}, test: проверкаТуннелей, options: ссылкиПула() },
     config: { ...config,
       pairedPhones: (config.pairedPhones || []).map(({ id, name, at, kind }) => ({ id, name, at, kind: kind || 'phone' })),
       servers: allServers().map(item => ({ id: item.id, name: item.name, host: item.host, owner: item.owner || '',
@@ -3786,10 +3948,12 @@ async function обновитьИнтернетКарт() {
   finally { картыПроверяются = false; }
 }
 // Для настроек: карты с интернетом (и выбранная, даже если сейчас без него).
+// Все карты: выбрать можно только живую карту мимо VPN, но VPN и карты без сети
+// тоже показываем (серыми) — чтобы было видно, что программа их нашла.
 function картыСИнтернетом() {
   if (!картыПроверяются && [...интернетКарт.values()].every(x => Date.now() - x.at > 60000)) обновитьИнтернетКарт();
-  return сетевыеКарты().filter(карта => !карта.vpn && (интернетКарт.get(карта.address)?.online || карта.address === выбраннаяКарта()))
-    .map(карта => ({ ...карта, rttMs: интернетКарт.get(карта.address)?.rttMs || 0 }));
+  return сетевыеКарты().map(карта => ({ ...карта, online: Boolean(интернетКарт.get(карта.address)?.online),
+    rttMs: интернетКарт.get(карта.address)?.rttMs || 0 }));
 }
 // Выбранная карта. Помним и адрес, и имя: роутер выдал новый адрес — карта та
 // же, выбор не слетает. Кабель вынули — идём как система.
@@ -7443,10 +7607,12 @@ const server = http.createServer(async (req, res) => {
         remoteReachable = null;
         probeAllServers();
       }
-      // Сменили провайдера прямо в режиме «Быстрая ссылка» — поднимаем туннель
-      // заново уже через выбранного, старый гасим.
-      const провайдерСменился = previousTunnelProvider !== config.tunnelProvider && config.outputMode === 'tunnel';
-      if (previousOutput !== config.outputMode || провайдерСменился) {
+      // Сменили сервис в режиме «Быстрая ссылка» — остальные ссылки уже подняты,
+      // берём выбранную без перезапуска. Сменили карту — ссылки пойдут другим
+      // путём, поднимаем их заново.
+      if (previousTunnelProvider !== config.tunnelProvider && config.outputMode === 'tunnel' && previousOutput === config.outputMode) сменаСервиса();
+      const картаСменилась = (previousConfig.remoteBindAddress || '') !== config.remoteBindAddress && config.outputMode === 'tunnel';
+      if (previousOutput !== config.outputMode || картаСменилась) {
         clearTimeout(tunnelSwitchTimer);
         tunnelSwitchTimer = setTimeout(() => {
           if (config.outputMode === 'tunnel') { stopPublicTunnel(); startPublicTunnel(); }
@@ -7555,6 +7721,11 @@ const server = http.createServer(async (req, res) => {
         server.close(() => process.exit(0));
       }, 1000);
       return;
+    }
+    // Проверка, что через публичную ссылку отвечаем именно мы, а не заглушка сервиса.
+    if (req.method === 'GET' && url.pathname === '/stream/ping') {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+      return void res.end('vrcast');
     }
     if (req.method === 'GET' && url.pathname === '/stream/speedtest.bin') {
       res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': SPEEDTEST.length, 'Cache-Control': 'no-store' });

@@ -625,32 +625,48 @@ function scheduleLiveClock(state){
 // и предупреждение, если включён VPN — поток тогда идёт через него кругом.
 // Напротив каждого сервиса быстрой ссылки — его средняя скорость по замерам.
 const мбит=kbps=>`${(kbps/1000).toLocaleString('ru-RU',{maximumFractionDigits:1})} Мбит/с`;
+// В режиме «Быстрая ссылка» все сервисы подняты сразу — показываем, какие
+// реально работают сейчас; вне его — итог кнопки «Проверить» или прошлые замеры.
 function paintTunnelSpeeds(state){
-  const скорости=state.tunnel?.speeds||{}, проверка=state.tunnel?.test||{};
+  const скорости=state.tunnel?.speeds||{}, проверка=state.tunnel?.test||{}, пул=state.tunnel?.options||[];
   for(const option of $('#tunnelProviderSelect').options){
     if(option.value==='auto')continue;
     option.dataset.base||=option.textContent;
-    const итог=проверка.results?.[option.value];
-    const хвост=проверка.running&&!итог?' · проверяю…':итог?.error?' · не отвечает':скорости[option.value]?` · ~${мбит(скорости[option.value])}`:'';
+    const итог=проверка.results?.[option.value], ссылка=пул.find(з=>з.key===option.value);
+    const хвост=ссылка?(ссылка.state==='ready'?`${ссылка.active?' · сейчас':' · работает'}${ссылка.outside?' (снаружи)':ссылка.kbps?` ~${мбит(ссылка.kbps)}`:''}`
+        :ссылка.state==='failed'?' · не работает':' · поднимается…')
+      :проверка.running&&!итог?' · проверяю…':итог?.error?' · не отвечает':скорости[option.value]?` · ~${мбит(скорости[option.value])}`:'';
     setText(option,option.dataset.base+хвост);
   }
+  // Cloudflare реально не пробился, а VPN включён и карта не выбрана — подсказка
+  // с кнопкой «мимо VPN». Только по факту проверки: у кого через VPN работает,
+  // тому не показываем.
+  const cf=пул.find(з=>з.key==='cloudflare'), мимо=cf?.state==='failed'&&state.network?.vpn&&!state.network?.chosen;
+  const заметка=$('#tunnelSpeedNote');
+  setText(заметка,мимо?`Cloudflare не пробился через VPN (${state.network.vpn}) — нажмите, чтобы пустить ссылки мимо VPN`:'В «Авто» программа берёт самый быстрый из работающих');
+  заметка.classList.toggle('link-like',Boolean(мимо));
+  заметка.tabIndex=мимо?0:-1; заметка.setAttribute('role',мимо?'button':'note');
   const кнопка=$('#testTunnels');
   setDisabled(кнопка,Boolean(проверка.running||state.running));
   setText(кнопка,проверка.running?'Проверяю…':'Проверить');
   setTitle(кнопка,state.running?'Остановите эфир, чтобы проверить сервисы':'Поднять каждый сервис по очереди и измерить скорость');
 }
+$('#tunnelSpeedNote').addEventListener('click',()=>{ if($('#tunnelSpeedNote').classList.contains('link-like'))кМимоVpn(); });
 $('#testTunnels').addEventListener('click',async()=>{try{render(await api('/api/tunnels/test',{method:'POST'}));toast('Проверяю сервисы по очереди — около минуты');}catch(error){toast(error.message,true);}});
 // Выбор сетевой карты для потока на свой сервер. Перерисовываем только когда
 // список карт или выбор поменялись, иначе открытый список закрывался бы сам.
+// Карты мимо VPN с интернетом — выбор; VPN и карты без сети (VirtualBox,
+// Hyper-V, WSL) видны серыми, выбрать их нельзя. Выбор помнится по имени карты.
+const картаЖива=к=>к.online&&!к.vpn;
 function paintAdapters(state){
-  // Только карты, через которые есть интернет: виртуальные (VirtualBox, Hyper-V,
-  // WSL) и VPN сюда не попадают. Выбор помнится по имени карты.
-  const select=$('#remoteAdapter'), карты=(state.network?.adapters||[]).map(к=>({name:к.name,address:к.address})), выбрана=state.network?.chosen||'', имя=state.config.remoteBindName||'';
+  const select=$('#remoteAdapter'), выбрана=state.network?.chosen||'', имя=state.config.remoteBindName||'';
+  const карты=(state.network?.adapters||[]).map(к=>({name:к.name,address:к.address,vpn:к.vpn,online:к.online||к.address===выбрана}))
+    .sort((a,b)=>картаЖива(b)-картаЖива(a));
   const подпись=JSON.stringify([карты,выбрана,имя]);
   if(select.dataset.sig===подпись||document.activeElement===select)return;
   select.dataset.sig=подпись;
   const пропала=имя&&!выбрана;
-  select.innerHTML=`<option value="">Как в системе</option>`+карты.map(к=>`<option value="${escapeHtml(к.address)}">${escapeHtml(к.name)} · ${escapeHtml(к.address)}</option>`).join('')
+  select.innerHTML=`<option value="">Как в системе</option>`+карты.map(к=>`<option value="${escapeHtml(к.address)}"${картаЖива(к)?'':' disabled'}>${escapeHtml(к.name)} · ${escapeHtml(к.address)}${к.vpn?' · VPN':!к.online?' · без интернета':''}</option>`).join('')
     +(пропала?`<option value="__gone" disabled>${escapeHtml(имя)} · сейчас не подключена</option>`:'');
   select.value=выбрана||(пропала?'__gone':'');
 }
@@ -658,15 +674,19 @@ $('#remoteAdapter').addEventListener('change',async event=>{
   try{render(await api('/api/config',{method:'POST',body:JSON.stringify({remoteBindAddress:event.target.value})}));toast(event.target.value?'Поток пойдёт через выбранную карту':'Поток пойдёт как решит система');}
   catch(error){toast(error.message,true);}
 });
-// «Через VPN» в строке статуса — кнопка: ведёт к выбору карты и подсвечивает ту,
-// что идёт мимо VPN.
-function кМимоVpn(){
-  const карта=(ui.status?.network?.adapters||[]).find(к=>!к.vpn);
-  открытьНастройки('setNet');
-  const select=$('#remoteAdapter');
-  select.classList.remove('flash'); void select.offsetWidth; select.classList.add('flash');
-  select.focus();
-  if(карта)toast(`Выберите «${карта.name} · ${карта.address}» — поток пойдёт мимо VPN`);
+// «Через VPN» — кнопка в одно касание: выбирает карту с интернетом мимо VPN
+// (самую быструю по отклику). Нет такой — открываем выбор карты.
+async function кМимоVpn(){
+  const карта=(ui.status?.network?.adapters||[]).filter(картаЖива).sort((a,b)=>(a.rttMs||1e9)-(b.rttMs||1e9))[0];
+  if(!карта){
+    открытьНастройки('setNet');
+    const select=$('#remoteAdapter');
+    select.classList.remove('flash'); void select.offsetWidth; select.classList.add('flash');
+    select.focus();
+    return toast('Не нашёл карту с интернетом мимо VPN — выберите вручную',true);
+  }
+  try{render(await api('/api/config',{method:'POST',body:JSON.stringify({remoteBindAddress:карта.address})}));toast(`Поток и ссылки пойдут мимо VPN — через «${карта.name}»`);}
+  catch(error){toast(error.message,true);}
 }
 $('#netInfo').addEventListener('click',()=>{ if($('#netInfo').classList.contains('warn'))кМимоVpn(); });
 $('#netInfo').addEventListener('keydown',event=>{ if((event.key==='Enter'||event.key===' ')&&$('#netInfo').classList.contains('warn')){ event.preventDefault(); кМимоVpn(); } });
