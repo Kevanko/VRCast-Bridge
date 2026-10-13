@@ -193,11 +193,9 @@ let tunnelError = '';
 let tunnelProvider = '';
 let tunnelDeadlineTimer = null;
 let tunnelFallbackTimer = null;
-let pinggyStarted = false;
 // Реально ли публичная ссылка отдаёт поток. null — ещё проверяем, false —
-// отдаёт заглушку/ошибку (бесплатный Pinggy подменяет поток страницей, сеть
-// блокирует туннель), true — играет. Раньше «готово» ставилось по факту
-// получения адреса, и Pinggy рапортовал «работает», а в VRChat было пусто.
+// отдаёт заглушку/ошибку (сеть блокирует туннель), true — играет. Раньше
+// «готово» ставилось по факту получения адреса, а в VRChat бывало пусто.
 let tunnelServes = null;
 let tunnelVerifyTimer = null;
 let tunnelMetrics = null;
@@ -408,7 +406,6 @@ function toolPath(name) {
 }
 
 const CLOUDFLARED = () => toolPath(exe('cloudflared'));
-const PINGGY = () => toolPath(exe('pinggy'));
 const MEDIAMTX = () => toolPath(exe('mediamtx'));
 const PLINK = () => toolPath(exe('plink'));
 const YTDLP_BUNDLED = join(ROOT, 'tools', exe('yt-dlp'));
@@ -416,9 +413,8 @@ const YTDLP_BUNDLED = join(ROOT, 'tools', exe('yt-dlp'));
 // программы и не затирается распаковкой встроенных компонентов.
 const YTDLP_UPDATED = join(DATA_DIR, 'tools', exe('yt-dlp'));
 const SERVER_RTSP_PORT = 8554;
-const PINGGY_DATA_DIR = join(DATA_DIR, 'pinggy-runtime');
 // Версии на старте не спрашиваем запуском самих утилит: yt-dlp (PyInstaller)
-// распаковывается ~1 с на каждый запуск, cloudflared и pinggy добавляют ещё
+// распаковывается ~1 с на каждый запуск, cloudflared добавляет ещё
 // столько же — это секунды простоя при каждом открытии программы. Достаточно,
 // что файл на месте; действительно ли он рабочий, без спешки уточнит фоновая
 // проверка. ffmpeg оставляем — его запуск дёшев (~30 мс) и точность тут важна.
@@ -426,7 +422,6 @@ let tools = {
   ffmpeg: toolAvailable('ffmpeg', ['-version']),
   ytdlp: existsSync(YTDLP_UPDATED) || Boolean(toolPath(exe('yt-dlp'))),
   cloudflared: Boolean(CLOUDFLARED()),
-  pinggy: Boolean(PINGGY()),
   mediamtx: Boolean(MEDIAMTX()),
   plink: Boolean(PLINK()),
 };
@@ -459,28 +454,6 @@ function pickEncoder(mode) {
 }
 let encoder = pickEncoder(config.encoderMode);
 detectHardwareEncoder(); // узнаём про видеокарту сразу, чтобы настройки её показывали
-
-function pinggyEnvironment() {
-  const roaming = join(PINGGY_DATA_DIR, 'roaming'), local = join(PINGGY_DATA_DIR, 'local');
-  mkdirSync(roaming, { recursive: true }); mkdirSync(local, { recursive: true });
-  return { ...process.env, APPDATA: roaming, LOCALAPPDATA: local };
-}
-
-function stopPinggyDaemon() {
-  if (!tools.pinggy || !pinggyStarted) return;
-  pinggyStarted = false;
-  const stopper = spawn(PINGGY(), ['daemon', 'stop'], { windowsHide: true, stdio: 'ignore', env: pinggyEnvironment() });
-  stopper.on('error', () => {});
-  if (!IS_WIN) return;
-  const escaped = PINGGY().replace(/'/g, "''");
-  spawnCollect('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    `$target='${escaped}'; Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $target } | ForEach-Object { $_.ProcessId }`], 8000)
-    .then(result => {
-      for (const value of String(result.stdout || '').split(/\s+/).filter(Boolean)) {
-        if (/^\d+$/.test(value)) spawn('taskkill.exe', ['/PID', value, '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => {});
-      }
-    });
-}
 
 // Кеш можно унести на другой диск: на системном место кончается быстрее всего.
 // Пустое значение — папка по умолчанию рядом с настройками.
@@ -877,7 +850,6 @@ function stopPublicTunnel() {
   tunnelVerifyTimer = null; tunnelServes = null; tunnelMetrics = null; tunnelBudgetKbps = 0;
   tunnelProcess = null; tunnelCandidates = new Set(); tunnelUrl = ''; tunnelState = 'idle'; tunnelError = ''; tunnelProvider = '';
   for (const child of children) child.kill('SIGTERM');
-  stopPinggyDaemon();
 }
 
 function activatePublicTunnel(child, provider, url) {
@@ -889,7 +861,6 @@ function activatePublicTunnel(child, provider, url) {
   tunnelProcess = child; tunnelProvider = provider; tunnelUrl = url.replace(/\/$/, ''); tunnelState = 'verifying'; tunnelError = '';
   for (const candidate of tunnelCandidates) if (candidate !== child) candidate.kill('SIGTERM');
   tunnelCandidates = new Set([child]);
-  if (provider === 'Cloudflare') setTimeout(stopPinggyDaemon, 500);
   log(`Публичная ссылка · ${provider} — проверяю, что она реально отдаёт поток…`);
   // Адрес получен, но это ещё не значит, что по нему играет: проверяем сами,
   // как это делает плеер, и перепроверяем — заглушка может появиться и позже.
@@ -903,7 +874,7 @@ function activatePublicTunnel(child, provider, url) {
 
 // Проверяем публичную ссылку так же, как её увидит плеер: тянем плейлист через
 // сам туннель. Настоящий поток начинается с #EXTM3U; страница-предупреждение
-// Pinggy или ошибка сети — это HTML или не-200, и тогда честно говорим, что
+// Заглушка или ошибка сети — это HTML или не-200, и тогда честно говорим, что
 // ссылка для VRChat не годится, вместо ложного «готово».
 let tunnelVerifyFails = 0;
 let tunnelVerifyBusy = false;
@@ -971,9 +942,7 @@ async function verifyTunnelServes() {
     if (сбой()) return;
     const html = /<!doctype|<html/i.test(текст);
     tunnelServes = false; tunnelState = 'error'; tunnelMetrics = null;
-    tunnelError = провайдер === 'Pinggy'
-      ? 'Pinggy показывает страницу-предупреждение вместо потока — в VRChat не заиграет. Выберите Cloudflare или свой сервер (его ссылка постоянная и без заглушек).'
-      : html ? `${провайдер} отдаёт страницу, а не поток — для VRChat не годится. Смените туннель или возьмите свой сервер.`
+    tunnelError = html ? `${провайдер} отдаёт страницу, а не поток — для VRChat не годится. Смените туннель или возьмите свой сервер.`
       : `${провайдер}: ссылка не отдаёт поток (ответ ${ответ.status}). Смените туннель или возьмите свой сервер.`;
     log(`Публичная ссылка не отдаёт поток · ${tunnelError}`);
   } catch (error) {
@@ -1034,7 +1003,6 @@ function trackTunnelChild(child, provider) {
     }
     const stoppedProvider = tunnelProvider;
     tunnelProcess = null; tunnelUrl = ''; tunnelProvider = '';
-    if (stoppedProvider === 'Pinggy') stopPinggyDaemon();
     if (stopping || shuttingDown || config.outputMode !== 'tunnel') { tunnelState = 'idle'; return; }
     tunnelState = 'error'; tunnelError = `Публичный туннель остановился${code === null ? '' : ` (код ${code})`}.`;
     log(tunnelError);
@@ -1044,28 +1012,30 @@ function trackTunnelChild(child, provider) {
 }
 
 // ── Сервисы быстрой ссылки ───────────────────────────────────────────────────
-// Все бесплатные и без регистрации. SSH-сервисы (localhost.run, Serveo) не
+// Все бесплатные и без регистрации. SSH-сервисы (Serveo, Pinggy) не
 // требуют своего бинарника — хватает plink, который у нас уже есть.
 // Замер 29.09.2026 за VPN: Cloudflare рвётся на узлах 7844 (ECONNRESET), а с
 // физической карты подключается за 130 мс — поэтому, если в настройках выбрана
 // сетевая карта, все сервисы идут через неё мимо TUN.
 const ТУННЕЛИ = {
   cloudflare: { name: 'Cloudflare', url: /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i },
-  localhostrun: { name: 'localhost.run', url: /https:\/\/[a-z0-9-]+\.lhr\.life/i, ssh: 'localhost.run' },
   serveo: { name: 'Serveo', url: /https:\/\/[a-z0-9.-]+\.serveousercontent\.com/i, ssh: 'serveo.net' },
-  // Pinggy убран: бесплатный подменяет поток страницей-предупреждением,
-  // в VRChat такая ссылка не играет.
+  // Замер 13.10.2026: 45–55 Мбит/с (localhost.run — 0,4, его убрали). Заглушку
+  // показывает только браузерам («Mozilla» в User-Agent): плееры Unity, AVPro,
+  // Quest и VLC получают поток. Вход — пользователь free с пустым паролем.
+  // Ссылка живёт 60 минут, поэтому в «Авто» он последний.
+  pinggy: { name: 'Pinggy', url: /https:\/\/[a-z0-9-]+\.free\.pinggy\.net/i, ssh: 'a.pinggy.io', port: 443, user: 'free', пароль: true },
 };
 const ключТуннеля = имя => Object.keys(ТУННЕЛИ).find(ключ => ТУННЕЛИ[ключ].name === имя) || '';
-// Serveo и localhost.run — по SSH: в Windows через свой plink, в Linux — через системный ssh.
+// Serveo и Pinggy — по SSH: в Windows через свой plink, в Linux — через системный ssh.
 const sshДляТуннеля = () => (IS_LINUX && !PLINK() ? which('ssh') : '');
 const туннельДоступен = ключ => ключ === 'cloudflare' ? Boolean(tools.cloudflared) : Boolean(PLINK() || sshДляТуннеля());
 
 // Ключ SSH-сервера узнаём первым подключением и держим до перезапуска.
 const sshКлючи = new Map();
-async function sshКлюч(host, port) {
+async function sshКлюч(host, port, цель) {
   if (sshКлючи.has(host)) return sshКлючи.get(host);
-  const проба = await spawnCollect(PLINK(), ['-ssh', '-batch', '-P', String(port), `nokey@${port === 22 ? host : '127.0.0.1'}`, 'exit'], 20000);
+  const проба = await spawnCollect(PLINK(), ['-ssh', '-batch', '-P', String(port), цель, 'exit'], 20000);
   const ключ = `${проба.stdout || ''}${проба.stderr || ''}`.match(/SHA256:[A-Za-z0-9+/=]+/)?.[0] || '';
   if (ключ) sshКлючи.set(host, ключ);
   return ключ;
@@ -1092,21 +1062,25 @@ async function командаТуннеля(ключ) {
       ...(мимо.length ? ['--edge-bind-address', карта, ...мимо.flatMap(адрес => ['--edge', адрес])] : []),
       '--url', `http://127.0.0.1:${PORT}`], ready: текст => /Registered tunnel connection/i.test(текст) };
   }
-  const host = ТУННЕЛИ[ключ].ssh;
-  // С выбранной картой plink идёт через местный мост, иначе — напрямую.
-  const port = карта ? await мостДо(host, 22) : 22;
+  const { ssh: host, port: sshPort = 22, user = 'nokey', пароль } = ТУННЕЛИ[ключ];
+  // С выбранной картой ssh/plink идёт через местный мост, иначе — напрямую.
+  const мост = карта ? await мостДо(host, sshPort) : 0;
+  const port = мост || sshPort, цель = `${user}@${мост ? '127.0.0.1' : host}`;
   const ssh = sshДляТуннеля();
   if (ssh) {
     // Без своих ключей пользователя (не светим их чужому серверу); вход пустой,
     // интерактивный — так пускает Serveo; ввод закрыт, поэтому ничего не ждёт.
+    // Pinggy просит пароль: пустой отдаёт SSH_ASKPASS=true.
     return { cmd: ssh, args: ['-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', '-o', 'PubkeyAuthentication=no',
-      '-o', 'PasswordAuthentication=no', '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=15',
-      '-p', String(port), '-R', `80:127.0.0.1:${PORT}`, `nokey@${port === 22 ? host : '127.0.0.1'}`], ready: () => true };
+      '-o', `PasswordAuthentication=${пароль ? 'yes' : 'no'}`, '-o', 'NumberOfPasswordPrompts=1', '-o', 'ServerAliveInterval=30',
+      '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=15', '-T', '-p', String(port), '-R', `80:127.0.0.1:${PORT}`, цель],
+    ...(пароль ? { env: { ...process.env, SSH_ASKPASS: which('true') || '/bin/true', SSH_ASKPASS_REQUIRE: 'force' } } : {}), ready: () => true };
   }
-  const hostkey = await sshКлюч(host, port);
+  const hostkey = await sshКлюч(host, port, цель);
   if (!hostkey) throw new Error(`${ТУННЕЛИ[ключ].name}: сервер не отдал ключ`);
-  return { cmd: PLINK(), args: ['-ssh', '-batch', '-no-antispoof', '-hostkey', hostkey, '-P', String(port),
-    '-R', `80:127.0.0.1:${PORT}`, `nokey@${port === 22 ? host : '127.0.0.1'}`], ready: () => true };
+  // -T: без псевдотерминала Pinggy пишет адрес обычным текстом, а не рисует экран.
+  return { cmd: PLINK(), args: ['-ssh', '-batch', '-T', '-no-antispoof', '-hostkey', hostkey, ...(пароль ? ['-pw', ''] : []), '-P', String(port),
+    '-R', `80:127.0.0.1:${PORT}`, цель], ready: () => true };
 }
 
 // Запуск сервиса: сообщает адрес, когда он реально готов принимать зрителей.
@@ -1163,10 +1137,11 @@ async function проверитьТуннели() {
       const адрес = адреса[номер];
       if (!адрес || shuttingDown) continue;
       проверкаТуннелей.current = ключ;
-      // Новый адрес (особенно у Cloudflare) начинает открываться не сразу.
+      // Новый адрес (особенно у Cloudflare) начинает открываться не сразу:
+      // замер на ноутбуке — бывает и дольше 12 с, проверка ложно писала «не отдаёт».
       let rawKbps = 0, ttfbMs = 0;
-      for (let попытка = 0; попытка < 4 && !(rawKbps > 50); попытка++) {
-        await new Promise(resolve => setTimeout(resolve, попытка ? 2500 : 1000));
+      for (const до = Date.now() + 30000; Date.now() < до && !(rawKbps > 50);) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
         ({ rawKbps, ttfbMs } = await measureTunnelKbps(адрес));
       }
       if (!(rawKbps > 50)) { ошибка(ключ, new Error('ссылка не отдаёт данные')); continue; }
@@ -1216,7 +1191,8 @@ function startPublicTunnel() {
     // первым — «Авто» брал его вместо быстрого (так было у друга). Не ответил —
     // поднимаем остальных наперегонки.
     const скорость = ключ => Number(config.tunnelSpeeds?.[ключ]) || 0;
-    const порядок = Object.keys(ТУННЕЛИ).filter(туннельДоступен).sort((a, b) => скорость(b) - скорость(a));
+    // Pinggy — последним при любой скорости: его ссылка живёт час.
+    const порядок = Object.keys(ТУННЕЛИ).filter(туннельДоступен).sort((a, b) => (a === 'pinggy') - (b === 'pinggy') || скорость(b) - скорость(a));
     const ещё = () => !tunnelUrl && !stopping && config.outputMode === 'tunnel';
     const [лучший, ...остальные] = скорость(порядок[0]) ? порядок : [null, ...порядок];
     if (лучший) запустить(лучший);
@@ -1230,7 +1206,6 @@ function startPublicTunnel() {
   tunnelDeadlineTimer = setTimeout(() => {
     if (tunnelUrl || tunnelState !== 'starting') return;
     for (const child of tunnelCandidates) child.kill('SIGTERM');
-    stopPinggyDaemon();
     tunnelCandidates = new Set(); tunnelState = 'error';
     tunnelError = tunnelFailMessage();
     log(tunnelError);
@@ -1717,7 +1692,6 @@ function unityCompatibility() {
     ? (unityCapture.state === 'recording' ? 'Идёт запись. Остановите её, чтобы Unity получил завершённый MP4.' : 'Сначала запишите и завершите клип захвата.')
     : unityBuild.state === 'building' ? unityBuild.message : queue.length ? 'Выберите трек и подготовьте его для Unity.' : 'Добавьте видео в очередь.';
   if (ready) reason = selected === 'capture' ? 'Готовый клип захвата. Это запись, не прямая трансляция.' : `Трек «${selectedItem.title}» готов для Unity.`;
-  if (ready && config.outputMode === 'tunnel' && tunnelProvider === 'Pinggy') reason += ' Ссылка локальная: бесплатный Pinggy подменяет запрос Unity страницей предупреждения.';
   return { available: ready, url: ready ? `${unityBaseAddress()}${path}` : '', reason,
     selected, queue: { ...unityBuild, stale: unityBuild.state === 'ready' && unityBuild.signature !== signature,
       available: queueReady, url: queueReady ? `${unityBaseAddress()}/media/unity-queue.mp4` : '', scope: unityPublic ? 'public' : 'local' },
@@ -1888,7 +1862,6 @@ async function refreshToolsAsync() {
   // проверяем именно наличие файла, а не путь.
   tools.ytdlp = existsSync(YTDLP_UPDATED) || Boolean(toolPath(exe('yt-dlp')));
   tools.cloudflared = Boolean(CLOUDFLARED());
-  tools.pinggy = Boolean(PINGGY());
   tools.mediamtx = Boolean(MEDIAMTX());
   tools.plink = Boolean(PLINK());
   // ffmpeg только что появился (докачан) — теперь есть чем проверить видеокарту.
@@ -1907,20 +1880,19 @@ function refreshTools() {
   tools.ffmpeg = toolAvailable('ffmpeg', ['-version']);
   tools.ytdlp = toolAvailable(ytdlpPath());
   tools.cloudflared = Boolean(CLOUDFLARED()) && toolAvailable(CLOUDFLARED());
-  tools.pinggy = Boolean(PINGGY()) && toolAvailable(PINGGY());
   tools.mediamtx = Boolean(MEDIAMTX());
   tools.plink = Boolean(PLINK());
 }
 
 // Если утилита лежит рядом с программой (папка tools возле EXE) — берём её
-// оттуда и не качаем. Так же переезжает pinggy: публичной ссылки на него нет.
+// оттуда и не качаем.
 function importLocalTools() {
-  const exe = process.env.VRCAST_EXE;
-  if (!exe) return;
-  const рядом = join(dirname(exe), 'tools');
+  const программа = process.env.VRCAST_EXE;
+  if (!программа) return;
+  const рядом = join(dirname(программа), 'tools');
   if (!existsSync(рядом)) return;
   mkdirSync(TOOL_DIR, { recursive: true });
-  for (const name of [exe('pinggy'), exe('yt-dlp'), exe('mediamtx'), exe('cloudflared'), exe('ffmpeg'), exe('ffprobe')]) {
+  for (const name of [exe('yt-dlp'), exe('mediamtx'), exe('cloudflared'), exe('ffmpeg'), exe('ffprobe')]) {
     const источник = join(рядом, name);
     if (existsSync(источник) && !existsSync(join(TOOL_DIR, name))) {
       try { copyFileSync(источник, join(TOOL_DIR, name)); log(`Взял ${name} из папки рядом с программой`); } catch {}
@@ -3910,12 +3882,11 @@ function mihomoConnections(pipe) {
 async function проверитьМаршрут() {
   if (!vpnInterface || config.outputMode === 'local') { vpnRoute = ''; return; }
   // Поток идёт с выбранной карты — мимо TUN, mihomo его и не видит. Так и для
-  // своего сервера, и для туннелей (Cloudflare, localhost.run, Serveo) — кроме
-  // Pinggy: его клиент к карте не привязать.
-  const черезКарту = config.outputMode === 'remote' || (config.outputMode === 'tunnel' && tunnelProvider !== 'Pinggy');
+  // своего сервера, и для туннелей (Cloudflare, Serveo, Pinggy).
+  const черезКарту = config.outputMode === 'remote' || config.outputMode === 'tunnel';
   if (черезКарту && выбраннаяКарта()) { vpnRoute = 'direct'; return; }
   // Наружу поток несут только эти процессы: ffmpeg (свой сервер) и клиенты туннелей.
-  const наши = /^(ffmpeg|cloudflared|pinggy|ssh|plink)(\.exe)?$/i;
+  const наши = /^(ffmpeg|cloudflared|ssh|plink)(\.exe)?$/i;
   for (const pipe of mihomoPipes()) {
     const list = await mihomoConnections(pipe);
     if (!list) continue;
@@ -6958,7 +6929,7 @@ const server = http.createServer(async (req, res) => {
     const tunnelHost = (() => { try { return tunnelUrl ? new URL(tunnelUrl).hostname.toLowerCase() : ''; } catch { return ''; } })();
     // Туннель приходит к нам с этого же ПК; подставленный Host из сети — не туннель.
     const publicTunnelHost = isLoopbackAddress(req.socket.remoteAddress) && Boolean((tunnelHost && requestHost === tunnelHost)
-      || /\.(trycloudflare\.com|pinggy-free\.link|free\.pinggy\.net|lhr\.life|serveo\.net|serveousercontent\.com)$/.test(requestHost));
+      || /\.(trycloudflare\.com|pinggy-free\.link|free\.pinggy\.net|serveo\.net|serveousercontent\.com)$/.test(requestHost));
     if (publicTunnelHost && !url.pathname.startsWith('/stream/') && !url.pathname.startsWith('/media/')) {
       return json(res, 404, { error: 'Через публичную ссылку доступен только медиапоток.' });
     }

@@ -268,7 +268,7 @@ test('режим «Друзья» не роняет сервер и сообща
   const s = await alive.json();
   assert.ok('serves' in s.tunnel, 'статус туннеля должен нести serves');
   assert.ok('verifying' in s.tunnel, 'статус туннеля должен нести verifying');
-  assert.ok(['idle', 'starting', 'ready', 'error'].includes(s.tunnel.state), `неизвестное состояние туннеля: ${s.tunnel.state}`);
+  assert.ok(['idle', 'starting', 'verifying', 'ready', 'error'].includes(s.tunnel.state), `неизвестное состояние туннеля: ${s.tunnel.state}`);
   await post('/api/config', { outputMode: 'local' });
 });
 
